@@ -12,6 +12,8 @@
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 !define PRODUCT_UNINST_ROOT_KEY "HKLM"
 
+Name "${PRODUCT_NAME}"
+
 ; Target executable name
 OutFile "Proximap_Setup.exe"
 
