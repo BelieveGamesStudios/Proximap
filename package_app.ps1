@@ -17,9 +17,31 @@ foreach ($path in $cleanPaths) {
     }
 }
 
+# 1.5 Convert app_icon.png to app_icon.ico if png exists
+Write-Host "Checking for app_icon.png to convert to .ico..." -ForegroundColor Yellow
+if (Test-Path "app_icon.png") {
+    Write-Host "  Found app_icon.png. Converting to app_icon.ico using Pillow..." -ForegroundColor DarkGray
+    python -c "from PIL import Image; img = Image.open('app_icon.png'); img.save('app_icon.ico', format='ICO', sizes=[(256, 256), (128, 128), (64, 64), (48, 48), (32, 32), (16, 16)])"
+    if (Test-Path "app_icon.ico") {
+        Write-Host "  Successfully converted app_icon.png to app_icon.ico" -ForegroundColor Green
+    } else {
+        Write-Warning "Failed to convert app_icon.png to app_icon.ico"
+    }
+}
+
 # 2. Run PyInstaller to package the Python GUI
 Write-Host "[2/5] Compiling Python application using PyInstaller..." -ForegroundColor Yellow
-python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy main_window.py
+$iconFlag = ""
+if (Test-Path "app_icon.ico") {
+    $iconFlag = "--icon=app_icon.ico"
+}
+
+if ($iconFlag) {
+    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy main_window.py
+} else {
+    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy main_window.py
+}
+
 
 if (-not (Test-Path "dist/Proximap")) {
     Write-Error "PyInstaller compilation failed! 'dist/Proximap' not found."

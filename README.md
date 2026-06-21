@@ -1,0 +1,99 @@
+# Proximap — 3D Photogrammetry Dashboard
+
+Proximap is an intuitive desktop application built in Python and PySide6 that provides a step-by-step wizard dashboard for 3D photogrammetry reconstruction. It acts as a graphical pipeline coordinator that automates **COLMAP** (for Structure-from-Motion / camera registration) and **OpenMVS** (for dense point clouds, meshing, mesh refinement, and texturing) to turn flat images into detailed 3D scenes.
+
+---
+
+## Key Features
+
+* **Drag-and-Drop Loader**: Simply drag a folder or selection of image files (`.png`, `.jpg`, `.jpeg`, `.tiff`) into the dashboard.
+* **Camera Detection**: Autodetects your camera sensor make/model from image EXIF metadata.
+* **Hardware Profiler**: Automatically profiles local system resources (RAM size, discrete GPU availability) and sets fallback limits for low-resource environments.
+* **Reconstruction Quality Presets**: Select from Preview, Medium, High, or Ultra configuration presets to balance speed and fidelity.
+* **Interactive Embedded 3D Viewer**: Interactively view reconstructed stages (Sparse Cloud & Cameras, Dense Cloud, and Textured Mesh) embedded directly inside the GUI application.
+* **Multi-Format Export**: Export final textured 3D models directly as `.obj`, `.glb`, or `.ply`.
+
+---
+
+## Repository Structure
+
+```text
+Proximap/
+├── main_window.py          # PySide6 desktop GUI entry point
+├── pipeline_manager.py     # Multi-stage photogrammetry pipeline coordinator
+├── hardware_profiler.py    # Hardware checker (RAM and CUDA detection)
+│
+├── package_app.ps1         # PowerShell automated build and compilation pipeline
+├── installer.nsi           # NSIS Setup Wizard installer configuration
+├── toolchain_map.json      # Config mapping GUI calls to C++ binaries
+│
+├── LICENSE                 # GNU GPL v3 Source code license
+└── THIRD_PARTY_LICENSES.md # License attributions for OpenMVS, COLMAP, etc.
+```
+
+---
+
+## Getting Started (Developers)
+
+### 1. Prerequisites
+* **Python**: Version 3.9 or higher (64-bit recommended).
+* **GPU (Optional but Recommended)**: NVIDIA GPU with CUDA drivers installed for GPU-accelerated mesh refinement and densification.
+
+### 2. Installation
+Clone the repository and install dependencies:
+```bash
+git clone https://github.com/BelieveGamesStudios/Proximap.git
+cd Proximap
+pip install -r requirements.txt
+```
+*(Dependencies: `PySide6`, `numpy`, `pillow`, `pyinstaller` for packaging)*
+
+### 3. Placing Backend Binaries
+To run reconstructions, you must download precompiled C++ binaries for COLMAP and OpenMVS and place them in the `backend_bin` directory (which is ignored by Git to keep the repository lightweight):
+
+1. **COLMAP**: Download the Windows release and extract it to `backend_bin/colmap/`.
+2. **OpenMVS**: Download the Windows binary package and extract it to `backend_bin/openMVS/`.
+
+Make sure your directories resemble the following structure:
+```text
+Proximap/
+└── backend_bin/
+    ├── colmap/
+    │   ├── colmap.exe
+    │   └── [Required DLLs...]
+    └── openMVS/
+        ├── DensifyPointCloud.exe
+        ├── Viewer.exe
+        └── [Required DLLs...]
+```
+
+### 4. Running the Dashboard
+Launch the dashboard via Python:
+```bash
+python main_window.py
+```
+
+---
+
+## Standalone Packaging & Distribution
+
+You can bundle Proximap into a standalone zip file or Windows setup installer.
+
+1. Place your custom logo as `app_icon.png` in the project root.
+2. Run the automated PowerShell script as an Administrator:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\package_app.ps1
+   ```
+This script will automatically:
+* Convert `app_icon.png` into a multi-resolution `.ico` icon using Pillow.
+* Compile the Python scripts into a single directory layout using PyInstaller and embed the custom icon inside `Proximap.exe`.
+* Strip out large developer libraries and test executables from COLMAP and OpenMVS to save ~450MB of space.
+* Compile a Windows wizard installer (`Proximap_Setup.exe`) using NSIS (Nullsoft Scriptable Install System) if installed.
+* Package the finalized distribution into a clean `Proximap_Commercial_Release.zip` folder.
+
+---
+
+## License
+
+* The **Proximap** frontend source code is licensed under the **GNU General Public License v3 (GPL v3)**. See the [LICENSE](LICENSE) file for details.
+* Native backend dependencies (OpenMVS, COLMAP, etc.) are subject to their own respective open-source licenses. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for full attribution.

@@ -1,0 +1,20 @@
+# Python caching
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller / Packaging build artifacts
+build/
+dist/
+*.spec
+
+# Native backend C++ binaries (exclude large binaries from repository)
+backend_bin/
+
+# Pipeline output data
+reconstruction_out/
+*.log
+
+# Final packed distributions
+Proximap_Commercial_Release.zip
+Proximap_Setup.exe
