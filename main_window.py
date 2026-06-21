@@ -14,6 +14,27 @@ def get_base_dir():
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
+def get_reconstruction_out_dir():
+    base_dir = get_base_dir()
+    # Try writing a dummy file to check permissions
+    try:
+        test_file = os.path.join(base_dir, ".write_test")
+        with open(test_file, "w") as f:
+            f.write("test")
+        os.remove(test_file)
+        # Base directory is writable, we can use it
+        return os.path.join(base_dir, "reconstruction_out")
+    except (IOError, OSError, PermissionError):
+        # Base directory is read-only (e.g. Program Files). Fallback to AppData/Local/Proximap
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            out_dir = os.path.join(local_appdata, "Proximap", "reconstruction_out")
+        else:
+            # Fallback to user home
+            out_dir = os.path.join(os.path.expanduser("~"), ".proximap", "reconstruction_out")
+        return out_dir
+
+
 from PySide6.QtCore import Qt, QSize, Signal, QTimer
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QFont, QWindow
 
@@ -720,8 +741,8 @@ class MainWindow(QMainWindow):
         self.browse_btn.setEnabled(False)
         self.step3_box.setEnabled(False)
         
-        # Temp output dir inside the workspace
-        output_dir = os.path.join(get_base_dir(), "reconstruction_out")
+        # Temp output dir inside the workspace or local appdata if not writable
+        output_dir = get_reconstruction_out_dir()
         os.makedirs(output_dir, exist_ok=True)
         
         # Extract quality and gpu mode
@@ -755,7 +776,7 @@ class MainWindow(QMainWindow):
         # At Step 6/10 (progress=70), the scene.mvs is exported from OpenMVG.
         # Auto-switch the viewer to show the sparse cloud + camera orientations.
         if value == 70:
-            mvs_dir = os.path.join(get_base_dir(), "reconstruction_out", "mvs")
+            mvs_dir = os.path.join(get_reconstruction_out_dir(), "mvs")
             scene_mvs = os.path.join(mvs_dir, "scene.mvs")
             if os.path.exists(scene_mvs):
                 self.viewer_widget.set_mvs_directory(mvs_dir)
@@ -774,7 +795,7 @@ class MainWindow(QMainWindow):
             self.console_text.append(f"[FINISHED] {msg}")
             self.step3_box.setEnabled(True)
             
-            mvs_dir = os.path.join(get_base_dir(), "reconstruction_out", "mvs")
+            mvs_dir = os.path.join(get_reconstruction_out_dir(), "mvs")
             self.viewer_widget.set_mvs_directory(mvs_dir)
             self.viewer_widget.mode_select.blockSignals(True)
             
@@ -816,7 +837,7 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
             
-        output_dir = os.path.join(get_base_dir(), "reconstruction_out")
+        output_dir = get_reconstruction_out_dir()
         mvs_out = os.path.join(output_dir, "mvs")
         
         import shutil
@@ -878,7 +899,7 @@ class MainWindow(QMainWindow):
 
     def _check_existing_scene(self):
         """Checks if a previous reconstruction scene exists to enable the viewer button."""
-        output_dir = os.path.join(get_base_dir(), "reconstruction_out")
+        output_dir = get_reconstruction_out_dir()
         mvs_dir = os.path.join(output_dir, "mvs")
         scene_mvs = os.path.join(mvs_dir, "scene.mvs")
         if os.path.exists(scene_mvs):
