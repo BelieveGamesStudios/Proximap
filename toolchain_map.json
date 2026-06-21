@@ -1,0 +1,13 @@
+{
+    "colmap": {
+        "colmap": "backend_bin/colmap/colmap.exe"
+    },
+    "openMVS": {
+        "InterfaceCOLMAP": "backend_bin/openMVS/InterfaceCOLMAP.exe",
+        "DensifyPointCloud": "backend_bin/openMVS/DensifyPointCloud.exe",
+        "ReconstructMesh": "backend_bin/openMVS/ReconstructMesh.exe",
+        "RefineMesh": "backend_bin/openMVS/RefineMesh.exe",
+        "TextureMesh": "backend_bin/openMVS/TextureMesh.exe",
+        "Viewer": "backend_bin/openMVS/Viewer.exe"
+    }
+}
