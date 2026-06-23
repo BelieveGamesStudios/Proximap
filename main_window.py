@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton, QProgressBar, QRadioButton, QButtonGroup,
     QFrame, QFileDialog, QTextEdit, QStackedWidget, QComboBox,
-    QScrollArea
+    QScrollArea, QTabWidget, QGridLayout, QCheckBox, QSlider
 )
 
 def get_base_dir():
@@ -36,7 +36,7 @@ def get_reconstruction_out_dir():
 
 
 from PySide6.QtCore import Qt, QSize, Signal, QTimer
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QFont, QWindow
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QFont, QWindow, QPixmap
 
 import hardware_profiler
 from pipeline_manager import PipelineWorker
@@ -281,6 +281,261 @@ class ViewerWrapperWidget(QFrame):
             self.reload_requested.emit(path)
 
 
+class PhotoItemWidget(QWidget):
+    """
+    Individual photo thumbnail card display with a selection checkbox.
+    """
+    def __init__(self, file_path, size, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.size = size
+        self.selected = False
+        self.init_ui()
+        
+    def init_ui(self):
+        self.setFixedSize(self.size + 16, self.size + 40)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+        
+        # Container for the thumbnail image
+        self.image_container = QFrame(self)
+        self.image_container.setObjectName("ImageContainer")
+        self.image_container.setFixedSize(self.size + 8, self.size + 8)
+        self.image_container.setStyleSheet("""
+            QFrame#ImageContainer {
+                border: 1px solid #333333;
+                border-radius: 4px;
+                background-color: #1A1A1A;
+            }
+            QFrame#ImageContainer:hover {
+                border-color: #00E676;
+            }
+        """)
+        
+        container_layout = QVBoxLayout(self.image_container)
+        container_layout.setContentsMargins(2, 2, 2, 2)
+        
+        self.image_label = QLabel(self.image_container)
+        self.image_label.setAlignment(Qt.AlignCenter)
+        
+        # Load and scale image to thumbnail
+        pixmap = QPixmap(self.file_path)
+        if not pixmap.isNull():
+            scaled_pix = pixmap.scaled(self.size, self.size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.image_label.setPixmap(scaled_pix)
+        else:
+            self.image_label.setText("⚠️")
+            self.image_label.setStyleSheet("font-size: 24px;")
+            
+        container_layout.addWidget(self.image_label)
+        
+        # Checkbox & Name layout
+        bottom_layout = QHBoxLayout()
+        bottom_layout.setContentsMargins(2, 0, 2, 0)
+        bottom_layout.setSpacing(4)
+        
+        self.checkbox = QCheckBox(self)
+        self.checkbox.setFixedWidth(16)
+        self.checkbox.stateChanged.connect(self._on_check_changed)
+        
+        self.name_label = QLabel(os.path.basename(self.file_path), self)
+        self.name_label.setStyleSheet("color: #cccccc; font-size: 10px;")
+        self.name_label.setToolTip(self.file_path)
+        
+        # Elide text if too long
+        metrics = self.name_label.fontMetrics()
+        elided = metrics.elidedText(os.path.basename(self.file_path), Qt.ElideRight, self.size - 10)
+        self.name_label.setText(elided)
+        
+        bottom_layout.addWidget(self.checkbox)
+        bottom_layout.addWidget(self.name_label)
+        
+        layout.addWidget(self.image_container)
+        layout.addLayout(bottom_layout)
+        
+    def _on_check_changed(self, state):
+        self.selected = (state == Qt.Checked.value or state == 2)
+        if self.selected:
+            self.image_container.setStyleSheet("QFrame#ImageContainer { border: 2px solid #00E676; border-radius: 4px; background-color: #213328; }")
+        else:
+            self.image_container.setStyleSheet("""
+                QFrame#ImageContainer {
+                    border: 1px solid #333333;
+                    border-radius: 4px;
+                    background-color: #1A1A1A;
+                }
+                QFrame#ImageContainer:hover {
+                    border-color: #00E676;
+                }
+            """)
+            
+    def set_checked(self, checked):
+        self.checkbox.setChecked(checked)
+
+
+class PhotosGridWidget(QWidget):
+    """
+    Grid container that dynamically arranges PhotoItemWidgets depending on container width.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.layout = QGridLayout(self)
+        self.layout.setSpacing(10)
+        self.layout.setContentsMargins(10, 10, 10, 10)
+        self.image_items = []
+        self.image_paths = []
+        self.thumbnail_size = 100
+        
+    def set_images(self, image_paths):
+        self.image_paths = image_paths
+        self.rebuild_grid()
+
+    def clear_grid(self):
+        while self.layout.count() > 0:
+            item = self.layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        self.image_items.clear()
+        
+    def rebuild_grid(self):
+        self.clear_grid()
+        if not self.image_paths:
+            return
+            
+        width = self.width()
+        if width < 100:
+            width = 400  # Fallback minimum width estimation
+            
+        col_width = self.thumbnail_size + 20
+        cols = max(1, width // col_width)
+        
+        for idx, path in enumerate(self.image_paths):
+            item_widget = PhotoItemWidget(path, self.thumbnail_size, self)
+            self.image_items.append(item_widget)
+            row = idx // cols
+            col = idx % cols
+            self.layout.addWidget(item_widget, row, col)
+            
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.rebuild_grid()
+
+
+class PhotosTabWidget(QWidget):
+    """
+    Tab widget containing the Photos toolbar and dynamic photo grid area.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.image_list = []
+        self.init_ui()
+        
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        
+        # Toolbar
+        self.toolbar = QFrame(self)
+        self.toolbar.setFixedHeight(38)
+        self.toolbar.setStyleSheet("background-color: #1A1A1A; border-bottom: 1px solid #2B2B2B;")
+        toolbar_layout = QHBoxLayout(self.toolbar)
+        toolbar_layout.setContentsMargins(10, 4, 10, 4)
+        toolbar_layout.setSpacing(6)
+        
+        # Buttons matching reference UI functionality
+        self.btn_select_all = QPushButton("✔️", self.toolbar)
+        self.btn_select_all.setToolTip("Select All")
+        self.btn_select_all.setStyleSheet("QPushButton { padding: 4px 8px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
+        
+        self.btn_deselect_all = QPushButton("➖", self.toolbar)
+        self.btn_deselect_all.setToolTip("Deselect All")
+        self.btn_deselect_all.setStyleSheet("QPushButton { padding: 4px 8px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
+        
+        self.btn_remove_selected = QPushButton("❌", self.toolbar)
+        self.btn_remove_selected.setToolTip("Remove Selected")
+        self.btn_remove_selected.setStyleSheet("QPushButton { padding: 4px 8px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
+        
+        self.btn_add_photos = QPushButton("📂", self.toolbar)
+        self.btn_add_photos.setToolTip("Add Photos")
+        self.btn_add_photos.setStyleSheet("QPushButton { padding: 4px 8px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
+        
+        # Thumbnail size slider
+        self.size_label = QLabel("Size:", self.toolbar)
+        self.size_label.setStyleSheet("color: #888888; font-size: 11px;")
+        self.size_slider = QSlider(Qt.Horizontal, self.toolbar)
+        self.size_slider.setRange(60, 200)
+        self.size_slider.setValue(100)
+        self.size_slider.setFixedWidth(80)
+        self.size_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border: 1px solid #3A3A3A;
+                height: 4px;
+                background: #2D2D2D;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #00E676;
+                width: 12px;
+                margin-top: -4px;
+                margin-bottom: -4px;
+                border-radius: 6px;
+            }
+        """)
+        
+        toolbar_layout.addWidget(self.btn_select_all)
+        toolbar_layout.addWidget(self.btn_deselect_all)
+        toolbar_layout.addWidget(self.btn_remove_selected)
+        toolbar_layout.addWidget(self.btn_add_photos)
+        toolbar_layout.addStretch()
+        toolbar_layout.addWidget(self.size_label)
+        toolbar_layout.addWidget(self.size_slider)
+        
+        layout.addWidget(self.toolbar)
+        
+        # Scroll Area for Grid
+        self.scroll_area = QScrollArea(self)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setStyleSheet("QScrollArea { background-color: #121212; border: none; }")
+        
+        self.grid_widget = PhotosGridWidget(self.scroll_area)
+        self.scroll_area.setWidget(self.grid_widget)
+        
+        layout.addWidget(self.scroll_area)
+        
+        # Connections
+        self.btn_select_all.clicked.connect(self.select_all)
+        self.btn_deselect_all.clicked.connect(self.deselect_all)
+        self.size_slider.valueChanged.connect(self.change_thumbnail_size)
+        
+    def set_images(self, image_paths):
+        self.image_list = image_paths
+        self.grid_widget.set_images(image_paths)
+        
+    def select_all(self):
+        for item in self.grid_widget.image_items:
+            item.set_checked(True)
+            
+    def deselect_all(self):
+        for item in self.grid_widget.image_items:
+            item.set_checked(False)
+            
+    def get_selected_images(self):
+        selected = []
+        for item in self.grid_widget.image_items:
+            if item.selected:
+                selected.append(item.file_path)
+        return selected
+        
+    def change_thumbnail_size(self, value):
+        self.grid_widget.thumbnail_size = value
+        self.grid_widget.rebuild_grid()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -499,23 +754,39 @@ class MainWindow(QMainWindow):
         
         right_layout.addWidget(self.viewer_widget, stretch=4)
         
-        # Console output for CLI/pipeline feedback
-        console_frame = QFrame(right_panel)
-        console_frame.setObjectName("ConsoleFrame")
-        console_layout = QVBoxLayout(console_frame)
+        # Tabbed panel containing Photos and Console
+        self.bottom_tabs = QTabWidget(right_panel)
+        self.bottom_tabs.setObjectName("BottomTabs")
+        self.bottom_tabs.setTabPosition(QTabWidget.South)
+        
+        # Photos Tab
+        self.photos_tab = PhotosTabWidget(self.bottom_tabs)
+        self.photos_tab.btn_remove_selected.clicked.connect(self._remove_selected_photos)
+        self.photos_tab.btn_add_photos.clicked.connect(self._add_photos_dialog)
+        
+        # Console Tab
+        self.console_frame = QFrame(self.bottom_tabs)
+        self.console_frame.setObjectName("ConsoleFrame")
+        console_layout = QVBoxLayout(self.console_frame)
         console_layout.setContentsMargins(10, 10, 10, 10)
         
-        console_title = QLabel("System Output Log", console_frame)
+        console_title = QLabel("System Output Log", self.console_frame)
         console_title.setStyleSheet("font-weight: bold; color: #888888; font-size: 11px; text-transform: uppercase;")
-        self.console_text = QTextEdit(console_frame)
+        self.console_text = QTextEdit(self.console_frame)
         self.console_text.setReadOnly(True)
         self.console_text.setObjectName("Console")
         
         console_layout.addWidget(console_title)
         console_layout.addWidget(self.console_text)
-        right_layout.addWidget(console_frame, stretch=2)
+        
+        # Add tabs
+        self.bottom_tabs.addTab(self.photos_tab, "Photos")
+        self.bottom_tabs.addTab(self.console_frame, "Console")
+        
+        right_layout.addWidget(self.bottom_tabs, stretch=2)
         
         main_layout.addWidget(right_panel, stretch=1)
+        self._set_process_btn_state("idle")
 
     def _update_system_badge(self):
         """Calculates system resource quality badge and updates style dynamically."""
@@ -539,6 +810,67 @@ class MainWindow(QMainWindow):
             f"background-color: {badge_color}; color: {text_color}; "
             "font-weight: bold; border-radius: 4px; padding: 6px; font-size: 11px;"
         )
+
+    def _set_process_btn_state(self, state: str):
+        """
+        Dynamically updates process button colors, text, and enabled state.
+        """
+        if state == "idle":
+            self.process_btn.setText("▶  Start Processing")
+            self.process_btn.setEnabled(False)
+            self.process_btn.setStyleSheet("""
+                QPushButton#ProcessBtn {
+                    background-color: #202020;
+                    color: #555555;
+                    border: 1px solid #2D2D2D;
+                }
+            """)
+        elif state == "ready":
+            self.process_btn.setText("▶  Start Processing")
+            self.process_btn.setEnabled(True)
+            self.process_btn.setStyleSheet("""
+                QPushButton#ProcessBtn {
+                    background-color: #00E676;
+                    color: #121212;
+                    border: none;
+                }
+                QPushButton#ProcessBtn:hover {
+                    background-color: #00FF87;
+                    border: none;
+                }
+                QPushButton#ProcessBtn:pressed {
+                    background-color: #00B35C;
+                    border: none;
+                }
+            """)
+        elif state == "progress":
+            self.process_btn.setText("Reconstruction in Progress...")
+            self.process_btn.setEnabled(False)
+            self.process_btn.setStyleSheet("""
+                QPushButton#ProcessBtn {
+                    background-color: #FF9100;
+                    color: #121212;
+                    border: none;
+                }
+            """)
+        elif state == "failed":
+            self.process_btn.setText("Retry Reconstruction")
+            self.process_btn.setEnabled(True)
+            self.process_btn.setStyleSheet("""
+                QPushButton#ProcessBtn {
+                    background-color: #D50000;
+                    color: #ffffff;
+                    border: none;
+                }
+                QPushButton#ProcessBtn:hover {
+                    background-color: #FF1744;
+                    border: none;
+                }
+                QPushButton#ProcessBtn:pressed {
+                    background-color: #B30000;
+                    border: none;
+                }
+            """)
 
     def _apply_styling(self):
         qss = """
@@ -686,12 +1018,43 @@ class MainWindow(QMainWindow):
                 width: 14px;
                 height: 14px;
             }
+            QTabWidget#BottomTabs::pane {
+                border: 1px solid #2B2B2B;
+                background-color: #151515;
+            }
+            QTabBar::tab {
+                background-color: #242424;
+                color: #aaaaaa;
+                border: 1px solid #2B2B2B;
+                padding: 6px 16px;
+                font-weight: bold;
+                font-size: 11px;
+                border-bottom-left-radius: 4px;
+                border-bottom-right-radius: 4px;
+            }
+            QTabBar::tab:selected {
+                background-color: #e0e0e0;
+                color: #121212;
+                border-top: none;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #333333;
+                color: #ffffff;
+            }
+            QCheckBox {
+                color: #cccccc;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+            }
         """
         self.setStyleSheet(qss)
 
     def _handle_dropped_images(self, files: list):
         self.image_list = files
         self.img_count_label.setText(f"Images Loaded: {len(files)}")
+        self.photos_tab.set_images(self.image_list)
         
         # Scan actual EXIF camera model using Pillow
         camera_name = "Undetected"
@@ -714,8 +1077,41 @@ class MainWindow(QMainWindow):
                 pass
                 
         self.camera_label.setText(f"Camera: {camera_name}")
-        self.console_text.append(f"[INFO] Successfully imported {len(files)} files via Drag & Drop. Camera identified: {camera_name}")
-        self.process_btn.setEnabled(True)
+        if files:
+            self.console_text.append(f"[INFO] Successfully imported {len(files)} files. Camera identified: {camera_name}")
+            self._set_process_btn_state("ready")
+        else:
+            self.console_text.append("[INFO] Image list cleared.")
+            self._set_process_btn_state("idle")
+
+    def _remove_selected_photos(self):
+        selected = self.photos_tab.get_selected_images()
+        if not selected:
+            return
+        
+        # Filter out selected images
+        selected_set = set(selected)
+        self.image_list = [f for f in self.image_list if f not in selected_set]
+        
+        # Refresh UI
+        self._handle_dropped_images(self.image_list)
+        self.console_text.append(f"[INFO] Removed {len(selected)} selected image(s).")
+
+    def _add_photos_dialog(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select Images to Add", "", "Image Files (*.png *.jpg *.jpeg *.tif *.tiff)"
+        )
+        if files:
+            current_set = set(self.image_list)
+            added_count = 0
+            for f in files:
+                normalized = os.path.normpath(f)
+                if normalized not in current_set:
+                    self.image_list.append(normalized)
+                    added_count += 1
+            if added_count > 0:
+                self._handle_dropped_images(self.image_list)
+                self.console_text.append(f"[INFO] Added {added_count} new images.")
 
     def _open_dir_dialog(self):
         dir_path = QFileDialog.getExistingDirectory(self, "Select Images Folder")
@@ -737,7 +1133,7 @@ class MainWindow(QMainWindow):
         # Terminate any active viewer to prevent lock conflict on MVS files during reconstruction
         self._terminate_viewer()
         
-        self.process_btn.setEnabled(False)
+        self._set_process_btn_state("progress")
         self.browse_btn.setEnabled(False)
         self.step3_box.setEnabled(False)
         
@@ -788,10 +1184,10 @@ class MainWindow(QMainWindow):
 
     def _on_pipeline_finished(self, success: bool, msg: str):
         self.browse_btn.setEnabled(True)
-        self.process_btn.setEnabled(True)
         self.view_scene_btn.setEnabled(True)
         
         if success:
+            self._set_process_btn_state("ready")
             self.console_text.append(f"[FINISHED] {msg}")
             self.step3_box.setEnabled(True)
             
@@ -821,6 +1217,7 @@ class MainWindow(QMainWindow):
             if mesh_path:
                 self._reload_viewer(mesh_path)
         else:
+            self._set_process_btn_state("failed")
             self.console_text.append(f"[FAILED] Reconstruction failed: {msg}")
 
     def _export_mesh(self):
