@@ -503,23 +503,27 @@ class PhotosGridWidget(QWidget):
         self.image_paths = []
         self.thumbnail_size = 100
         self.item_widgets = {}  # Map path -> PhotoItemWidget for dynamic updates
+        self.current_cols = 0
         
     def set_images(self, image_paths):
         self.image_paths = image_paths
-        self.rebuild_grid()
+        self.rebuild_grid(force=True)
 
     def clear_grid(self):
         while self.layout.count() > 0:
             item = self.layout.takeAt(0)
             widget = item.widget()
             if widget:
+                widget.hide()
+                widget.setParent(None)
                 widget.deleteLater()
         self.image_items.clear()
         self.item_widgets.clear()
         
-    def rebuild_grid(self):
-        self.clear_grid()
+    def rebuild_grid(self, force=False):
         if not self.image_paths:
+            self.clear_grid()
+            self.current_cols = 0
             return
             
         width = self.width()
@@ -529,22 +533,46 @@ class PhotosGridWidget(QWidget):
         col_width = self.thumbnail_size + 20
         cols = max(1, width // col_width)
         
-        # Get reference to cache from PhotosTabWidget
-        cache = getattr(self.tab_widget, "thumbnail_cache", {})
-        
-        for idx, path in enumerate(self.image_paths):
-            pixmap = cache.get(path)
-            item_widget = PhotoItemWidget(path, self.thumbnail_size, pixmap, self)
-            self.image_items.append(item_widget)
-            self.item_widgets[path] = item_widget
+        # If the number of columns hasn't changed and we aren't forcing a rebuild, do nothing
+        if not force and cols == self.current_cols:
+            return
             
-            row = idx // cols
-            col = idx % cols
-            self.layout.addWidget(item_widget, row, col)
+        self.current_cols = cols
+        
+        # Check if we can reuse the existing widgets to avoid recreating them
+        can_reuse = (not force and 
+                     len(self.image_items) == len(self.image_paths) and
+                     all(w.file_path == p for w, p in zip(self.image_items, self.image_paths)))
+                     
+        if can_reuse:
+            # Just rearrange the existing widgets
+            for item in self.image_items:
+                self.layout.removeWidget(item)
+                
+            for idx, item_widget in enumerate(self.image_items):
+                row = idx // cols
+                col = idx % cols
+                self.layout.addWidget(item_widget, row, col)
+        else:
+            # Rebuild from scratch
+            self.clear_grid()
+            cache = getattr(self.tab_widget, "thumbnail_cache", {})
+            
+            for idx, path in enumerate(self.image_paths):
+                pixmap = cache.get(path)
+                item_widget = PhotoItemWidget(path, self.thumbnail_size, pixmap, self)
+                self.image_items.append(item_widget)
+                self.item_widgets[path] = item_widget
+                
+                row = idx // cols
+                col = idx % cols
+                self.layout.addWidget(item_widget, row, col)
+                
+        self.layout.invalidate()
             
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.rebuild_grid()
+        self.rebuild_grid(force=False)
 
 
 class PhotosTabWidget(QWidget):
