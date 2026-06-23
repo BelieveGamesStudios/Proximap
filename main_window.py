@@ -352,54 +352,50 @@ class ViewerWrapperWidget(QFrame):
             self.reload_requested.emit(path)
 
 
-class ImageLoaderWorker(QThread):
+class ThumbnailWorker(QThread):
     """
-    Background worker to load and scale images to thumbnails asynchronously,
-    preventing main thread freezes on large photogrammetry datasets.
+    Background worker that loads and scales images to QImage asynchronously.
     """
-    progress_updated = Signal(int, int)  # current, total
-    image_loaded = Signal(str, QImage)  # file_path, scaled QImage
-    
-    def __init__(self, file_paths, thumbnail_size, parent=None):
-        super().__init__(parent)
+    thumbnail_loaded = Signal(str, QImage)  # Emits (file_path, scaled_qimage)
+    finished_loading = Signal()
+
+    def __init__(self, file_paths, target_size):
+        super().__init__()
         self.file_paths = file_paths
-        self.thumbnail_size = thumbnail_size
-        self._is_cancelled = False
-        
+        self.target_size = target_size
+        self._is_running = True
+
     def run(self):
-        total = len(self.file_paths)
-        for idx, path in enumerate(self.file_paths):
-            if self._is_cancelled:
+        for path in self.file_paths:
+            if not self._is_running:
                 break
-                
-            qimage = QImage(path)
-            if not qimage.isNull():
-                # Scale in background thread (thread-safe for QImage)
-                scaled_image = qimage.scaled(
-                    self.thumbnail_size, 
-                    self.thumbnail_size, 
-                    Qt.KeepAspectRatio, 
-                    Qt.SmoothTransformation
+            # Load the image using QImage (which is thread-safe for background loading/scaling)
+            image = QImage(path)
+            if not image.isNull():
+                scaled_image = image.scaled(
+                    self.target_size, self.target_size,
+                    Qt.KeepAspectRatio, Qt.SmoothTransformation
                 )
-                self.image_loaded.emit(path, scaled_image)
+                self.thumbnail_loaded.emit(path, scaled_image)
             else:
-                self.image_loaded.emit(path, QImage())
-                
-            self.progress_updated.emit(idx + 1, total)
-            
-    def cancel(self):
-        self._is_cancelled = True
+                self.thumbnail_loaded.emit(path, QImage())
+        self.finished_loading.emit()
+
+    def stop(self):
+        self._is_running = False
 
 
 class PhotoItemWidget(QWidget):
     """
     Individual photo thumbnail card display with a selection checkbox.
+    Supports a placeholder initially and lazy updates.
     """
-    def __init__(self, file_path, size, parent=None):
+    def __init__(self, file_path, size, pixmap=None, parent=None):
         super().__init__(parent)
         self.file_path = file_path
         self.size = size
         self.selected = False
+        self.pixmap = pixmap
         self.init_ui()
         
     def init_ui(self):
@@ -430,17 +426,12 @@ class PhotoItemWidget(QWidget):
         self.image_label = QLabel(self.image_container)
         self.image_label.setAlignment(Qt.AlignCenter)
         
-        # Get cached pixmap from parent PhotosTabWidget
-        parent_tab = self.find_parent_tab()
-        pixmap = None
-        if parent_tab:
-            pixmap = parent_tab.get_cached_pixmap(self.file_path)
-            
-        if pixmap:
-            self.image_label.setPixmap(pixmap)
+        if self.pixmap is not None:
+            self.image_label.setPixmap(self.pixmap)
         else:
-            self.image_label.setText("⚠️")
-            self.image_label.setStyleSheet("font-size: 24px;")
+            # Show a loading placeholder state
+            self.image_label.setText("⏳")
+            self.image_label.setStyleSheet("font-size: 20px; color: #888888;")
             
         container_layout.addWidget(self.image_label)
         
@@ -468,14 +459,17 @@ class PhotoItemWidget(QWidget):
         layout.addWidget(self.image_container)
         layout.addLayout(bottom_layout)
         
-    def find_parent_tab(self):
-        parent = self.parent()
-        while parent:
-            if isinstance(parent, PhotosTabWidget):
-                return parent
-            parent = parent.parent()
-        return None
-        
+    def set_pixmap(self, pixmap):
+        self.pixmap = pixmap
+        if not pixmap.isNull():
+            self.image_label.setText("")
+            self.image_label.setStyleSheet("")
+            self.image_label.setPixmap(pixmap)
+        else:
+            self.image_label.setPixmap(QPixmap())
+            self.image_label.setText("⚠️")
+            self.image_label.setStyleSheet("font-size: 20px; color: #ff1744;")
+            
     def _on_check_changed(self, state):
         self.selected = (state == Qt.Checked.value or state == 2)
         if self.selected:
@@ -508,6 +502,7 @@ class PhotosGridWidget(QWidget):
         self.image_items = []
         self.image_paths = []
         self.thumbnail_size = 100
+        self.item_widgets = {}  # Map path -> PhotoItemWidget for dynamic updates
         
     def set_images(self, image_paths):
         self.image_paths = image_paths
@@ -520,6 +515,7 @@ class PhotosGridWidget(QWidget):
             if widget:
                 widget.deleteLater()
         self.image_items.clear()
+        self.item_widgets.clear()
         
     def rebuild_grid(self):
         self.clear_grid()
@@ -533,9 +529,15 @@ class PhotosGridWidget(QWidget):
         col_width = self.thumbnail_size + 20
         cols = max(1, width // col_width)
         
+        # Get reference to cache from PhotosTabWidget
+        cache = getattr(self.tab_widget, "thumbnail_cache", {})
+        
         for idx, path in enumerate(self.image_paths):
-            item_widget = PhotoItemWidget(path, self.thumbnail_size, self)
+            pixmap = cache.get(path)
+            item_widget = PhotoItemWidget(path, self.thumbnail_size, pixmap, self)
             self.image_items.append(item_widget)
+            self.item_widgets[path] = item_widget
+            
             row = idx // cols
             col = idx % cols
             self.layout.addWidget(item_widget, row, col)
@@ -548,33 +550,29 @@ class PhotosGridWidget(QWidget):
 class PhotosTabWidget(QWidget):
     """
     Tab widget containing the Photos toolbar and dynamic photo grid area.
-    Has integrated background importing and cached thumbnail rendering to avoid UI freezes.
+    Loads images asynchronously using a background thread and caches thumbnails.
     """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.image_list = []
-        self.thumbnail_cache = {}
-        self.import_worker = None
+        self.thumbnail_cache = {}  # Map path -> QPixmap
+        self.loader_thread = None
         self.init_ui()
         
     def init_ui(self):
-        # We put layout structure inside a QStackedWidget
-        self.stacked_widget = QStackedWidget(self)
-        
-        # --- Page 0: Normal Gallery Page ---
-        self.gallery_page = QWidget(self.stacked_widget)
-        gallery_layout = QVBoxLayout(self.gallery_page)
-        gallery_layout.setContentsMargins(0, 0, 0, 0)
-        gallery_layout.setSpacing(0)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
         
         # Toolbar
-        self.toolbar = QFrame(self.gallery_page)
+        self.toolbar = QFrame(self)
         self.toolbar.setFixedHeight(38)
         self.toolbar.setStyleSheet("background-color: #1A1A1A; border-bottom: 1px solid #2B2B2B;")
         toolbar_layout = QHBoxLayout(self.toolbar)
         toolbar_layout.setContentsMargins(10, 4, 10, 4)
         toolbar_layout.setSpacing(6)
         
+        # Buttons matching reference UI functionality
         self.btn_select_all = QPushButton("✔️", self.toolbar)
         self.btn_select_all.setToolTip("Select All")
         self.btn_select_all.setStyleSheet("QPushButton { padding: 4px 8px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
@@ -622,154 +620,65 @@ class PhotosTabWidget(QWidget):
         toolbar_layout.addWidget(self.size_label)
         toolbar_layout.addWidget(self.size_slider)
         
-        gallery_layout.addWidget(self.toolbar)
+        layout.addWidget(self.toolbar)
         
         # Scroll Area for Grid
-        self.scroll_area = QScrollArea(self.gallery_page)
+        self.scroll_area = QScrollArea(self)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QFrame.NoFrame)
         self.scroll_area.setStyleSheet("QScrollArea { background-color: #121212; border: none; }")
         
         self.grid_widget = PhotosGridWidget(self.scroll_area)
+        self.grid_widget.tab_widget = self
         self.scroll_area.setWidget(self.grid_widget)
         
-        gallery_layout.addWidget(self.scroll_area)
-        
-        # --- Page 1: Async Import Progress Page ---
-        self.progress_page = QWidget(self.stacked_widget)
-        progress_layout = QVBoxLayout(self.progress_page)
-        progress_layout.setAlignment(Qt.AlignCenter)
-        progress_layout.setContentsMargins(30, 30, 30, 30)
-        progress_layout.setSpacing(12)
-        
-        self.loading_spinner = QLabel("📥", self.progress_page)
-        self.loading_spinner.setStyleSheet("font-size: 48px;")
-        self.loading_spinner.setAlignment(Qt.AlignCenter)
-        
-        self.progress_title = QLabel("Importing Images...", self.progress_page)
-        self.progress_title.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
-        self.progress_title.setAlignment(Qt.AlignCenter)
-        
-        self.import_progress_bar = QProgressBar(self.progress_page)
-        self.import_progress_bar.setFixedWidth(300)
-        self.import_progress_bar.setValue(0)
-        self.import_progress_bar.setTextVisible(True)
-        
-        self.progress_status = QLabel("Preparing files...", self.progress_page)
-        self.progress_status.setStyleSheet("color: #888888; font-size: 12px;")
-        self.progress_status.setAlignment(Qt.AlignCenter)
-        
-        self.btn_cancel_import = QPushButton("Cancel Import", self.progress_page)
-        self.btn_cancel_import.setFixedWidth(120)
-        self.btn_cancel_import.setStyleSheet("""
-            QPushButton {
-                background-color: #333333;
-                color: #ffffff;
-                border: 1px solid #444444;
-                margin-top: 10px;
-                padding: 6px 12px;
-            }
-            QPushButton:hover {
-                background-color: #444444;
-                border-color: #FF1744;
-            }
-        """)
-        
-        progress_layout.addWidget(self.loading_spinner)
-        progress_layout.addWidget(self.progress_title)
-        progress_layout.addWidget(self.import_progress_bar)
-        progress_layout.addWidget(self.progress_status)
-        progress_layout.addWidget(self.btn_cancel_import)
-        
-        # Add pages to stacked widget
-        self.stacked_widget.addWidget(self.gallery_page)
-        self.stacked_widget.addWidget(self.progress_page)
-        
-        # Main Tab Layout
-        tab_layout = QVBoxLayout(self)
-        tab_layout.setContentsMargins(0, 0, 0, 0)
-        tab_layout.addWidget(self.stacked_widget)
+        layout.addWidget(self.scroll_area)
         
         # Connections
         self.btn_select_all.clicked.connect(self.select_all)
         self.btn_deselect_all.clicked.connect(self.deselect_all)
         self.size_slider.valueChanged.connect(self.change_thumbnail_size)
-        self.btn_cancel_import.clicked.connect(self.cancel_import)
         
     def set_images(self, image_paths):
         self.image_list = image_paths
         
-        # Sync cache to remove files that are no longer present
-        paths_set = set(image_paths)
-        for cached_path in list(self.thumbnail_cache.keys()):
-            if cached_path not in paths_set:
-                del self.thumbnail_cache[cached_path]
-                
-        # Find which paths need loading
-        missing_paths = [p for p in image_paths if p not in self.thumbnail_cache]
-        
-        if not missing_paths:
-            self.grid_widget.set_images(image_paths)
-            self.stacked_widget.setCurrentIndex(0)
-            return
+        # 1. Stop any current loader thread
+        if self.loader_thread and self.loader_thread.isRunning():
+            self.loader_thread.stop()
+            self.loader_thread.wait()
             
-        self.start_import_worker(missing_paths)
+        # 2. Clear cache keys of images that were removed
+        current_set = set(image_paths)
+        removed_keys = [k for k in self.thumbnail_cache.keys() if k not in current_set]
+        for k in removed_keys:
+            del self.thumbnail_cache[k]
+            
+        # 3. Find files that are not yet cached
+        uncached_paths = [p for p in image_paths if p not in self.thumbnail_cache]
         
-    def start_import_worker(self, paths):
-        # Setup loading UI
-        self.import_progress_bar.setValue(0)
-        self.progress_status.setText(f"Loading 0 of {len(paths)} images...")
-        self.stacked_widget.setCurrentIndex(1)
+        # 4. Refresh grid immediately with placeholders or cached items
+        self.grid_widget.set_images(image_paths)
         
-        # Create and start async thread
-        self.import_worker = ImageLoaderWorker(paths, self.grid_widget.thumbnail_size, self)
-        self.import_worker.image_loaded.connect(self._on_image_loaded)
-        self.import_worker.progress_updated.connect(self._on_import_progress)
-        self.import_worker.finished.connect(self._on_import_finished)
-        self.import_worker.start()
-        
-    def _on_image_loaded(self, path, qimage):
-        if not qimage.isNull():
-            self.thumbnail_cache[path] = QPixmap.fromImage(qimage)
+        # 5. Start background thread loader for uncached paths
+        if uncached_paths:
+            self.loader_thread = ThumbnailWorker(uncached_paths, self.grid_widget.thumbnail_size)
+            self.loader_thread.thumbnail_loaded.connect(self.on_thumbnail_loaded)
+            self.loader_thread.start()
+            
+    def on_thumbnail_loaded(self, path, scaled_image):
+        # Convert QImage to QPixmap in the GUI thread
+        if not scaled_image.isNull():
+            pixmap = QPixmap.fromImage(scaled_image)
         else:
-            self.thumbnail_cache[path] = None
+            pixmap = QPixmap()
             
-    def _on_import_progress(self, current, total):
-        self.import_progress_bar.setValue(int((current / total) * 100))
-        self.progress_status.setText(f"Loading {current} of {total} images...")
+        # Add to memory cache
+        self.thumbnail_cache[path] = pixmap
         
-    def _on_import_finished(self):
-        self.grid_widget.set_images(self.image_list)
-        self.stacked_widget.setCurrentIndex(0)
-        self.import_worker = None
-        
-    def cancel_import(self):
-        if self.import_worker:
-            self.import_worker.cancel()
-            self.import_worker.wait()
-            self.import_worker = None
+        # Update the live widget in grid if it is still displayed
+        if path in self.grid_widget.item_widgets:
+            self.grid_widget.item_widgets[path].set_pixmap(pixmap)
             
-        # Retain only successfully loaded paths
-        self.image_list = [p for p in self.image_list if p in self.thumbnail_cache]
-        
-        # Update main window attributes directly
-        main_win = self.window()
-        if main_win and hasattr(main_win, "image_list"):
-            main_win.image_list = self.image_list
-            if hasattr(main_win, "img_count_label"):
-                main_win.img_count_label.setText(f"Images Loaded: {len(self.image_list)}")
-            if hasattr(main_win, "process_btn"):
-                if self.image_list:
-                    main_win._set_process_btn_state("ready")
-                else:
-                    main_win._set_process_btn_state("idle")
-                    
-        self.grid_widget.set_images(self.image_list)
-        self.stacked_widget.setCurrentIndex(0)
-        
-    def get_cached_pixmap(self, path):
-        return self.thumbnail_cache.get(path)
-        
     def select_all(self):
         for item in self.grid_widget.image_items:
             item.set_checked(True)
@@ -787,9 +696,18 @@ class PhotosTabWidget(QWidget):
         
     def change_thumbnail_size(self, value):
         self.grid_widget.thumbnail_size = value
-        # Clear cache and reload as sizing changed (or keep scaled ones, but clearing makes it fresh)
+        
+        # Reset the thumbnail cache entirely because size changed!
         self.thumbnail_cache.clear()
+        
+        # Reload images with the new size
         self.set_images(self.image_list)
+        
+    def closeEvent(self, event):
+        if self.loader_thread and self.loader_thread.isRunning():
+            self.loader_thread.stop()
+            self.loader_thread.wait()
+        super().closeEvent(event)
 
 
 class MainWindow(QMainWindow):
