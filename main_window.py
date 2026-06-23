@@ -41,6 +41,77 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QFont, QWindow, QP
 import hardware_profiler
 from pipeline_manager import PipelineWorker
 
+import http.server
+import socketserver
+import threading
+import webbrowser
+
+class ModelServerHandler(http.server.BaseHTTPRequestHandler):
+    model_path = ""
+    
+    def log_message(self, format, *args):
+        # Suppress standard logging to console for clean output
+        pass
+
+    def end_headers(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type')
+        super().end_headers()
+        
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.end_headers()
+        
+    def do_GET(self):
+        if not os.path.exists(self.model_path):
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Model not found")
+            return
+            
+        try:
+            with open(self.model_path, 'rb') as f:
+                content = f.read()
+            self.send_response(200)
+            self.send_header('Content-Type', 'model/gltf-binary')
+            self.send_header('Content-Length', str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+        except Exception as e:
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(f"Server error: {e}".encode())
+
+class LoopbackServerThread(threading.Thread):
+    def __init__(self, file_path, port=53120):
+        super().__init__()
+        self.file_path = file_path
+        self.port = port
+        self.daemon = True
+        self.httpd = None
+        
+    def run(self):
+        # We need a unique handler class instance since model_path is a class attribute
+        class CustomHandler(ModelServerHandler):
+            model_path = self.file_path
+
+        # Try finding a free port starting at 53120
+        while self.port < 53200:
+            try:
+                self.httpd = socketserver.TCPServer(("127.0.0.1", self.port), CustomHandler)
+                break
+            except OSError:
+                self.port += 1
+                
+        if self.httpd:
+            self.httpd.serve_forever()
+            
+    def stop(self):
+        if self.httpd:
+            self.httpd.shutdown()
+            self.httpd.server_close()
+
 class DragDropArea(QFrame):
     """
     Custom widget designed as a prominent drag-and-drop landing container.
@@ -698,11 +769,27 @@ class MainWindow(QMainWindow):
         self.export_btn = QPushButton("Export...", self.step3_box)
         self.export_btn.clicked.connect(self._export_mesh)
         
+        self.upload_portal_btn = QPushButton("☁  Upload to ProximaXR", self.step3_box)
+        self.upload_portal_btn.clicked.connect(self._upload_to_proximaxr)
+        self.upload_portal_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1A1A1A;
+                color: #00E676;
+                border: 1px solid #00E676;
+                margin-top: 5px;
+            }
+            QPushButton:hover {
+                background-color: #00E676;
+                color: #121212;
+            }
+        """)
+        
         step3_layout.addWidget(s3_title)
         step3_layout.addWidget(self.radio_glb)
         step3_layout.addWidget(self.radio_obj)
         step3_layout.addWidget(self.radio_ply)
         step3_layout.addWidget(self.export_btn)
+        step3_layout.addWidget(self.upload_portal_btn)
         scroll_content_layout.addWidget(self.step3_box)
         
         # Disable Step 3 until processing finishes
@@ -1302,6 +1389,7 @@ class MainWindow(QMainWindow):
         if os.path.exists(scene_mvs):
             self.viewer_widget.set_mvs_directory(mvs_dir)
             self.view_scene_btn.setEnabled(True)
+            self.step3_box.setEnabled(True)
             self.console_text.append("[INFO] Detected previous reconstruction. 3D Viewer is ready to display.")
 
     def _toggle_viewer_mode(self):
@@ -1435,7 +1523,66 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self._terminate_viewer()
+        if hasattr(self, 'loopback_server') and self.loopback_server:
+            try:
+                self.loopback_server.stop()
+            except Exception:
+                pass
         super().closeEvent(event)
+
+    def _upload_to_proximaxr(self):
+        output_dir = get_reconstruction_out_dir()
+        mvs_out = os.path.join(output_dir, "mvs")
+        
+        src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
+        src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+        
+        if not os.path.exists(src_glb):
+            if os.path.exists(src_obj):
+                self.console_text.append("[BRIDGE] Pre-converting reconstructed OBJ to GLB for upload...")
+                try:
+                    import subprocess
+                    import sys
+                    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    subprocess.run(["obj2gltf", "-i", src_obj, "-o", src_glb, "-b"], capture_output=True, text=True, check=True, shell=True, creationflags=creationflags)
+                except Exception as e:
+                    self.console_text.append(f"[BRIDGE ERROR] Could not convert model to GLB. Ensure obj2gltf is installed: {e}")
+                    return
+            else:
+                self.console_text.append("[BRIDGE ERROR] No reconstructed mesh found. Please run reconstruction first.")
+                return
+
+        self.console_text.append(f"[BRIDGE] Initializing local server to host model: {src_glb}")
+        
+        if hasattr(self, 'loopback_server') and self.loopback_server:
+            try:
+                self.loopback_server.stop()
+            except Exception:
+                pass
+                
+        import random
+        port = random.randint(53120, 53200)
+        self.loopback_server = LoopbackServerThread(src_glb, port=port)
+        self.loopback_server.start()
+        
+        import time
+        time.sleep(0.5)
+        
+        actual_port = self.loopback_server.port
+        local_url = f"http://127.0.0.1:{actual_port}/model.glb"
+        
+        try:
+            folder_name = os.path.basename(os.path.dirname(os.path.dirname(mvs_out)))
+        except Exception:
+            folder_name = "Reconstructed_Space"
+            
+        model_name = folder_name if folder_name else "Reconstructed_Space"
+        
+        bridge_url = f"http://localhost:3000/upload-bridge?local_url={local_url}&name={model_name}"
+        
+        self.console_text.append(f"[BRIDGE] Directing system browser to: {bridge_url}")
+        import webbrowser
+        webbrowser.open(bridge_url)
 
 
 if __name__ == "__main__":
