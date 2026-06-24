@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QProgressBar, QRadioButton, QButtonGroup,
     QFrame, QFileDialog, QTextEdit, QStackedWidget, QComboBox,
     QScrollArea, QTabWidget, QGridLayout, QCheckBox, QSlider,
-    QMessageBox
+    QMessageBox, QDialog
 )
 
 def get_base_dir():
@@ -58,7 +58,7 @@ class ModelServerHandler(http.server.BaseHTTPRequestHandler):
 
     def end_headers(self):
         self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type')
         super().end_headers()
         
@@ -66,6 +66,22 @@ class ModelServerHandler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         
+    def do_HEAD(self):
+        if not os.path.exists(self.model_path):
+            self.send_response(404)
+            self.end_headers()
+            return
+            
+        try:
+            file_size = os.path.getsize(self.model_path)
+            self.send_response(200)
+            self.send_header('Content-Type', 'model/gltf-binary')
+            self.send_header('Content-Length', str(file_size))
+            self.end_headers()
+        except Exception:
+            self.send_response(500)
+            self.end_headers()
+
     def do_GET(self):
         if not os.path.exists(self.model_path):
             self.send_response(404)
@@ -114,74 +130,6 @@ class LoopbackServerThread(threading.Thread):
         if self.httpd:
             self.httpd.shutdown()
             self.httpd.server_close()
-
-class CloudUploadWorker(QThread):
-    log_message = Signal(str)
-    upload_finished = Signal(bool, str, str)  # success, error_or_url, model_name
-
-    def __init__(self, file_path, model_name, parent=None):
-        super().__init__(parent)
-        self.file_path = file_path
-        self.model_name = model_name
-
-    def run(self):
-        try:
-            self.log_message.emit("[BRIDGE] Uploading reconstructed 3D model to Proximap cloud...")
-            
-            # Read GLB file
-            with open(self.file_path, 'rb') as f:
-                glb_data = f.read()
-
-            # Create multipart form data payload
-            boundary = b'----WebKitFormBoundaryProximapBridge'
-            body = []
-            
-            # Add file parameter 'model'
-            body.append(b'--' + boundary)
-            body.append(b'Content-Disposition: form-data; name="model"; filename="model.glb"')
-            body.append(b'Content-Type: model/gltf-binary')
-            body.append(b'')
-            body.append(glb_data)
-            body.append(b'--' + boundary + b'--')
-            body.append(b'')
-            
-            payload = b'\r\n'.join(body)
-
-            # Request
-            url = "https://proximap.space/api/reconstructions/temp-upload"
-            
-            import urllib.request
-            import urllib.parse
-            import json
-            import ssl
-
-            # Create unverified SSL context to bypass potential certificate verification failures on local machines
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-
-            req = urllib.request.Request(url, data=payload)
-            req.add_header('Content-Type', b'multipart/form-data; boundary=' + boundary)
-            req.add_header('Content-Length', str(len(payload)))
-            
-            # Execute upload
-            with urllib.request.urlopen(req, context=ctx, timeout=180) as response:
-                res_data = response.read().decode('utf-8')
-                res_json = json.loads(res_data)
-                
-            if res_json.get('success') and res_json.get('model_url'):
-                model_url = res_json['model_url']
-                self.log_message.emit("[BRIDGE] Upload successful. Model cached in cloud.")
-                self.upload_finished.emit(True, model_url, self.model_name)
-            else:
-                error_msg = res_json.get('error', 'Unknown server response.')
-                self.log_message.emit(f"[BRIDGE ERROR] Server rejected upload: {error_msg}")
-                self.upload_finished.emit(False, error_msg, self.model_name)
-                
-        except Exception as e:
-            self.log_message.emit(f"[BRIDGE ERROR] Failed to perform background cloud upload: {e}")
-            self.upload_finished.emit(False, str(e), self.model_name)
-
 class DragDropArea(QFrame):
     """
     Custom widget designed as a prominent drag-and-drop landing container.
@@ -808,6 +756,68 @@ class PhotosTabWidget(QWidget):
         super().closeEvent(event)
 
 
+class UploadProgressDialog(QDialog):
+    """
+    Loading modal dialog indicating that a model is being uploaded to Proximap cloud.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent, Qt.WindowTitleHint | Qt.WindowCloseButtonHint)
+        self.setWindowTitle("Proximap Cloud Upload")
+        self.setFixedSize(380, 190)
+        self.setModal(True)
+        
+        # Inherit styling for consistent UI aesthetics
+        self.setStyleSheet(parent.styleSheet() if parent else "")
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(25, 25, 25, 25)
+        layout.setSpacing(15)
+        
+        self.title_label = QLabel("Uploading 3D Model...", self)
+        self.title_label.setStyleSheet("font-size: 15px; font-weight: bold; color: #ffffff;")
+        self.title_label.setAlignment(Qt.AlignCenter)
+        
+        self.info_label = QLabel(
+            "Please check your web browser window.\n"
+            "Your model is currently uploading from your local workspace.\n"
+            "Keep this dialog open until the browser confirms completion.", 
+            self
+        )
+        self.info_label.setStyleSheet("color: #a0a0a0; font-size: 11px;")
+        self.info_label.setAlignment(Qt.AlignCenter)
+        
+        self.done_btn = QPushButton("Done", self)
+        self.done_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #00E676;
+                color: #121212;
+                font-weight: bold;
+                padding: 8px 20px;
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #00FF87;
+            }
+            QPushButton:pressed {
+                background-color: #00B35C;
+            }
+        """)
+        self.done_btn.clicked.connect(self.accept)
+        
+        # Center the button horizontally
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.done_btn)
+        btn_layout.addStretch()
+        
+        layout.addWidget(self.title_label)
+        layout.addWidget(self.info_label)
+        layout.addLayout(btn_layout)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -977,6 +987,7 @@ class MainWindow(QMainWindow):
         self.export_btn.clicked.connect(self._export_mesh)
         
         self.upload_portal_btn = QPushButton("☁  Upload to Proximap", self.step3_box)
+        self.upload_portal_btn.setEnabled(False)
         self.upload_portal_btn.clicked.connect(self._upload_to_proximap)
         self.upload_portal_btn.setStyleSheet("""
             QPushButton {
@@ -1543,6 +1554,7 @@ class MainWindow(QMainWindow):
         self._set_process_btn_state("progress")
         self.browse_btn.setEnabled(False)
         self.step3_box.setEnabled(False)
+        self.upload_portal_btn.setEnabled(False)
         
         # Temp output dir inside the workspace or local appdata if not writable
         output_dir = get_reconstruction_out_dir()
@@ -1597,6 +1609,7 @@ class MainWindow(QMainWindow):
             self._set_process_btn_state("ready")
             self.console_text.append(f"[FINISHED] {msg}")
             self.step3_box.setEnabled(True)
+            self._update_upload_button_state()
             
             mvs_dir = os.path.join(get_reconstruction_out_dir(), "mvs")
             self.viewer_widget.set_mvs_directory(mvs_dir)
@@ -1711,6 +1724,14 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.console_text.append(f"[ERROR] Failed to export mesh: {e}")
 
+    def _update_upload_button_state(self):
+        output_dir = get_reconstruction_out_dir()
+        mvs_out = os.path.join(output_dir, "mvs")
+        src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
+        src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+        has_model = os.path.exists(src_glb) or os.path.exists(src_obj)
+        self.upload_portal_btn.setEnabled(has_model)
+
     def _check_existing_scene(self):
         """Checks if a previous reconstruction scene exists to enable the viewer button."""
         output_dir = get_reconstruction_out_dir()
@@ -1721,6 +1742,7 @@ class MainWindow(QMainWindow):
             self.view_scene_btn.setEnabled(True)
             self.step3_box.setEnabled(True)
             self.console_text.append("[INFO] Detected previous reconstruction. 3D Viewer is ready to display.")
+        self._update_upload_button_state()
 
     def _toggle_viewer_mode(self):
         """Reloads the embedded 3D viewer."""
@@ -1882,6 +1904,25 @@ class MainWindow(QMainWindow):
                 self.console_text.append("[BRIDGE ERROR] No reconstructed mesh found. Please run reconstruction first.")
                 return
 
+        self.console_text.append(f"[BRIDGE] Initializing local server to host model: {src_glb}")
+        
+        if hasattr(self, 'loopback_server') and self.loopback_server:
+            try:
+                self.loopback_server.stop()
+            except Exception:
+                pass
+                
+        import random
+        port = random.randint(53120, 53200)
+        self.loopback_server = LoopbackServerThread(src_glb, port=port)
+        self.loopback_server.start()
+        
+        import time
+        time.sleep(0.5)
+        
+        actual_port = self.loopback_server.port
+        local_url = f"http://127.0.0.1:{actual_port}/model.glb"
+        
         try:
             folder_name = os.path.basename(os.path.dirname(os.path.dirname(mvs_out)))
         except Exception:
@@ -1889,23 +1930,27 @@ class MainWindow(QMainWindow):
             
         model_name = folder_name if folder_name else "Reconstructed_Space"
         
-        # Spawn background cloud upload worker thread
-        self.upload_portal_btn.setEnabled(False)
-        self.upload_worker = CloudUploadWorker(src_glb, model_name, self)
-        self.upload_worker.log_message.connect(self._append_log)
-        self.upload_worker.upload_finished.connect(self._on_upload_finished)
-        self.upload_worker.start()
-
-    def _on_upload_finished(self, success: bool, result: str, model_name: str):
-        self.upload_portal_btn.setEnabled(True)
-        if success:
-            import urllib.parse
-            import webbrowser
-            bridge_url = f"https://proximap.space/gallery?model_url={urllib.parse.quote(result)}&name={urllib.parse.quote(model_name)}"
-            self.console_text.append(f"[BRIDGE] Directing system browser to: {bridge_url}")
-            webbrowser.open(bridge_url)
-        else:
-            self.console_text.append(f"[BRIDGE ERROR] Cloud upload failed: {result}")
+        import urllib.parse
+        encoded_url = urllib.parse.quote(local_url, safe='')
+        encoded_name = urllib.parse.quote(model_name, safe='')
+        bridge_url = f"https://proximap.space/upload-bridge?local_url={encoded_url}&name={encoded_name}"
+        
+        self.console_text.append(f"[BRIDGE] Directing system browser to: {bridge_url}")
+        import webbrowser
+        webbrowser.open(bridge_url)
+        
+        # Show progress dialog modally
+        dialog = UploadProgressDialog(self)
+        dialog.exec()
+        
+        # Stop loopback server when user clicks "Done"
+        self.console_text.append("[BRIDGE] Upload dialog closed. Terminating local server...")
+        if hasattr(self, 'loopback_server') and self.loopback_server:
+            try:
+                self.loopback_server.stop()
+            except Exception:
+                pass
+            self.loopback_server = None
 
 
 if __name__ == "__main__":
