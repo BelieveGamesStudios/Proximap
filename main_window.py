@@ -115,6 +115,69 @@ class LoopbackServerThread(threading.Thread):
             self.httpd.shutdown()
             self.httpd.server_close()
 
+class CloudUploadThread(threading.Thread):
+    def __init__(self, file_path, model_name, main_window):
+        super().__init__()
+        self.file_path = file_path
+        self.model_name = model_name
+        self.main_window = main_window
+        self.daemon = True
+
+    def run(self):
+        try:
+            self.main_window.console_text.append("[BRIDGE] Uploading reconstructed 3D model to Proximap cloud...")
+            
+            # Read GLB file
+            with open(self.file_path, 'rb') as f:
+                glb_data = f.read()
+
+            # Create multipart form data payload
+            boundary = b'----WebKitFormBoundaryProximapBridge'
+            body = []
+            
+            # Add file parameter 'model'
+            body.append(b'--' + boundary)
+            body.append(b'Content-Disposition: form-data; name="model"; filename="model.glb"')
+            body.append(b'Content-Type: model/gltf-binary')
+            body.append(b'')
+            body.append(glb_data)
+            body.append(b'--' + boundary + b'--')
+            body.append(b'')
+            
+            payload = b'\r\n'.join(body)
+
+            # Request
+            url = "https://proximap.space/api/reconstructions/temp-upload"
+            
+            import urllib.request
+            import urllib.parse
+            import json
+
+            req = urllib.request.Request(url, data=payload)
+            req.add_header('Content-Type', b'multipart/form-data; boundary=' + boundary)
+            req.add_header('Content-Length', str(len(payload)))
+            
+            # Execute upload
+            with urllib.request.urlopen(req, timeout=180) as response:
+                res_data = response.read().decode('utf-8')
+                res_json = json.loads(res_data)
+                
+            if res_json.get('success') and res_json.get('model_url'):
+                model_url = res_json['model_url']
+                self.main_window.console_text.append("[BRIDGE] Upload successful. Model cached in cloud.")
+                
+                # Direct user browser to gallery page with model_url and name
+                bridge_url = f"https://proximap.space/gallery?model_url={urllib.parse.quote(model_url)}&name={urllib.parse.quote(self.model_name)}"
+                self.main_window.console_text.append(f"[BRIDGE] Directing system browser to: {bridge_url}")
+                import webbrowser
+                webbrowser.open(bridge_url)
+            else:
+                error_msg = res_json.get('error', 'Unknown server response.')
+                self.main_window.console_text.append(f"[BRIDGE ERROR] Server rejected upload: {error_msg}")
+                
+        except Exception as e:
+            self.main_window.console_text.append(f"[BRIDGE ERROR] Failed to perform background cloud upload: {e}")
+
 class DragDropArea(QFrame):
     """
     Custom widget designed as a prominent drag-and-drop landing container.
@@ -1378,10 +1441,11 @@ class MainWindow(QMainWindow):
 
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("Confirm Background Removal")
-        msg_box.setIcon(QMessageBox.Warning)
-        msg_box.setText("Are you sure you want to remove the background of all imported images?")
+        msg_box.setIcon(QMessageBox.Question)
+        msg_box.setText("Do you want to remove the background of all loaded images?")
         msg_box.setInformativeText(
-            "This process is offline, irreversible, and will replace your original image files with transparent PNG versions.\n\n"
+            "This will create preprocessed working copies of the images in the project's temporary reconstruction folder and remove their backgrounds offline.\n\n"
+            "Your original camera files will NOT be modified.\n\n"
             "Do you want to proceed?"
         )
         msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
@@ -1409,9 +1473,38 @@ class MainWindow(QMainWindow):
         self.photos_tab.setEnabled(False)
         
         self.progress_bar.setValue(0)
-        self.status_label.setText("Starting background removal...")
+        self.status_label.setText("Preparing working copies...")
         
-        self.worker = BackgroundRemovalWorker(self.image_list, self)
+        # Create reconstruction out workspace folder for preprocessed images
+        import shutil
+        preprocessed_dir = os.path.join(get_reconstruction_out_dir(), "preprocessed_images")
+        
+        # Clean up any existing preprocessed folder to avoid mix-up
+        if os.path.exists(preprocessed_dir):
+            try:
+                shutil.rmtree(preprocessed_dir)
+            except Exception:
+                pass
+        os.makedirs(preprocessed_dir, exist_ok=True)
+        
+        self.console_text.append(f"[PREP] Copying {len(self.image_list)} images to workspace: {preprocessed_dir}")
+        
+        copied_list = []
+        for path in self.image_list:
+            filename = os.path.basename(path)
+            dest_path = os.path.join(preprocessed_dir, filename)
+            try:
+                shutil.copy2(path, dest_path)
+                copied_list.append(os.path.normpath(dest_path))
+            except Exception as e:
+                self.console_text.append(f"[ERROR] Failed to copy {filename} to workspace: {e}")
+                
+        if not copied_list:
+            self.console_text.append("[ERROR] No images could be prepared in the workspace directory.")
+            self._on_bg_removal_finished(False, self.image_list, "Failed to copy images to workspace.")
+            return
+
+        self.worker = BackgroundRemovalWorker(copied_list, self)
         self.worker.progress_changed.connect(self.progress_bar.setValue)
         self.worker.status_changed.connect(self.status_label.setText)
         self.worker.log_message.connect(self._append_log)
@@ -1775,25 +1868,6 @@ class MainWindow(QMainWindow):
                 self.console_text.append("[BRIDGE ERROR] No reconstructed mesh found. Please run reconstruction first.")
                 return
 
-        self.console_text.append(f"[BRIDGE] Initializing local server to host model: {src_glb}")
-        
-        if hasattr(self, 'loopback_server') and self.loopback_server:
-            try:
-                self.loopback_server.stop()
-            except Exception:
-                pass
-                
-        import random
-        port = random.randint(53120, 53200)
-        self.loopback_server = LoopbackServerThread(src_glb, port=port)
-        self.loopback_server.start()
-        
-        import time
-        time.sleep(0.5)
-        
-        actual_port = self.loopback_server.port
-        local_url = f"http://127.0.0.1:{actual_port}/model.glb"
-        
         try:
             folder_name = os.path.basename(os.path.dirname(os.path.dirname(mvs_out)))
         except Exception:
@@ -1801,11 +1875,9 @@ class MainWindow(QMainWindow):
             
         model_name = folder_name if folder_name else "Reconstructed_Space"
         
-        bridge_url = f"https://proximap.space/upload-bridge?local_url={local_url}&name={model_name}"
-        
-        self.console_text.append(f"[BRIDGE] Directing system browser to: {bridge_url}")
-        import webbrowser
-        webbrowser.open(bridge_url)
+        # Spawn background cloud upload thread
+        self.upload_thread = CloudUploadThread(src_glb, model_name, self)
+        self.upload_thread.start()
 
 
 if __name__ == "__main__":
