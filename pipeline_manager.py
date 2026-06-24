@@ -1305,3 +1305,75 @@ class PipelineWorker(QThread):
             f"  Holes closed:         {self._holes_closed}\n"
             f"{'='*60}"
         )
+
+
+class BackgroundRemovalWorker(QThread):
+    """
+    Worker thread that executes background removal offline on a list of image files.
+    """
+    progress_changed = Signal(int)
+    status_changed = Signal(str)
+    log_message = Signal(str)
+    finished = Signal(bool, list, str)
+
+    def __init__(self, image_paths: list, parent=None):
+        super().__init__(parent)
+        self.image_paths = image_paths
+        self.is_running = True
+
+    def run(self):
+        try:
+            import rembg
+            from PIL import Image
+        except Exception as e:
+            self.log_message.emit(f"[ERROR] Failed to import rembg or PIL: {e}")
+            self.finished.emit(False, self.image_paths, f"Required dependencies not installed: {e}")
+            return
+
+        updated_paths = []
+        total = len(self.image_paths)
+
+        self.log_message.emit(f"[START] Starting offline background removal for {total} images...")
+        
+        for i, path in enumerate(self.image_paths):
+            if not self.is_running:
+                self.log_message.emit("[INFO] Background removal cancelled.")
+                self.finished.emit(False, self.image_paths, "Background removal cancelled by user.")
+                return
+
+            self.status_changed.emit(f"Removing background: {i+1}/{total}")
+            self.progress_changed.emit(int((i / total) * 100))
+            self.log_message.emit(f"[BG_REMOVE] Processing: {os.path.basename(path)}")
+
+            try:
+                # Open image using Pillow
+                with Image.open(path) as img:
+                    # Run background removal
+                    output = rembg.remove(img)
+
+                    # We must save as PNG to preserve transparency
+                    base, ext = os.path.splitext(path)
+                    new_path = base + ".png"
+
+                    # Save output
+                    output.save(new_path, "PNG")
+
+                    # If the file path changed (e.g. from jpg to png), remove the original file
+                    if os.path.abspath(path) != os.path.abspath(new_path):
+                        if os.path.exists(path):
+                            os.remove(path)
+
+                    updated_paths.append(os.path.normpath(new_path))
+                    self.log_message.emit(f"[BG_REMOVE] Completed and saved as: {os.path.basename(new_path)}")
+
+            except Exception as e:
+                self.log_message.emit(f"[ERROR] Failed to process {os.path.basename(path)}: {e}")
+                # Fallback: keep original path
+                updated_paths.append(path)
+
+        self.progress_changed.emit(100)
+        self.status_changed.emit("Background removal complete!")
+        self.finished.emit(True, updated_paths, f"Successfully removed background of {total} images.")
+
+    def stop(self):
+        self.is_running = False

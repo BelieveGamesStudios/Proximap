@@ -6,13 +6,16 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QLabel, QPushButton, QProgressBar, QRadioButton, QButtonGroup,
     QFrame, QFileDialog, QTextEdit, QStackedWidget, QComboBox,
-    QScrollArea, QTabWidget, QGridLayout, QCheckBox, QSlider
+    QScrollArea, QTabWidget, QGridLayout, QCheckBox, QSlider,
+    QMessageBox
 )
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+os.environ["U2NET_HOME"] = os.path.join(get_base_dir(), "models")
 
 def get_reconstruction_out_dir():
     base_dir = get_base_dir()
@@ -39,7 +42,7 @@ from PySide6.QtCore import Qt, QSize, Signal, QTimer, QThread
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QFont, QWindow, QPixmap, QImage
 
 import hardware_profiler
-from pipeline_manager import PipelineWorker
+from pipeline_manager import PipelineWorker, BackgroundRemovalWorker
 
 import http.server
 import socketserver
@@ -824,11 +827,17 @@ class MainWindow(QMainWindow):
         self.browse_btn = QPushButton("Select Images Directory", step1_box)
         self.browse_btn.clicked.connect(self._open_dir_dialog)
         
+        self.bg_remove_btn = QPushButton("Remove Image Background", step1_box)
+        self.bg_remove_btn.setObjectName("BgRemoveBtn")
+        self.bg_remove_btn.setEnabled(False)
+        self.bg_remove_btn.clicked.connect(self._remove_backgrounds_clicked)
+        
         step1_layout.addWidget(s1_title)
         step1_layout.addWidget(self.img_count_label)
         step1_layout.addWidget(self.camera_label)
         step1_layout.addWidget(self.badge)
         step1_layout.addWidget(self.browse_btn)
+        step1_layout.addWidget(self.bg_remove_btn)
         scroll_content_layout.addWidget(step1_box)
         
         # STEP 2: Process
@@ -900,8 +909,8 @@ class MainWindow(QMainWindow):
         self.export_btn = QPushButton("Export...", self.step3_box)
         self.export_btn.clicked.connect(self._export_mesh)
         
-        self.upload_portal_btn = QPushButton("☁  Upload to ProximaXR", self.step3_box)
-        self.upload_portal_btn.clicked.connect(self._upload_to_proximaxr)
+        self.upload_portal_btn = QPushButton("☁  Upload to Proximap", self.step3_box)
+        self.upload_portal_btn.clicked.connect(self._upload_to_proximap)
         self.upload_portal_btn.setStyleSheet("""
             QPushButton {
                 background-color: #1A1A1A;
@@ -1173,6 +1182,23 @@ class MainWindow(QMainWindow):
                 color: #555555;
                 border-color: #2D2D2D;
             }
+            QPushButton#BgRemoveBtn {
+                background-color: #2a1b40;
+                color: #d8c8f0;
+                border: 1px solid #5a3d8c;
+            }
+            QPushButton#BgRemoveBtn:hover:enabled {
+                background-color: #3b275c;
+                border-color: #00E676;
+            }
+            QPushButton#BgRemoveBtn:pressed:enabled {
+                background-color: #1e1230;
+            }
+            QPushButton#BgRemoveBtn:disabled {
+                background-color: #202020;
+                color: #555555;
+                border-color: #2D2D2D;
+            }
             QComboBox {
                 background-color: #333333;
                 color: #ffffff;
@@ -1298,9 +1324,11 @@ class MainWindow(QMainWindow):
         if files:
             self.console_text.append(f"[INFO] Successfully imported {len(files)} files. Camera identified: {camera_name}")
             self._set_process_btn_state("ready")
+            self.bg_remove_btn.setEnabled(True)
         else:
             self.console_text.append("[INFO] Image list cleared.")
             self._set_process_btn_state("idle")
+            self.bg_remove_btn.setEnabled(False)
 
     def _remove_selected_photos(self):
         selected = self.photos_tab.get_selected_images()
@@ -1343,6 +1371,70 @@ class MainWindow(QMainWindow):
                 self._handle_dropped_images(files)
             else:
                 self.console_text.append("[WARNING] No valid images found in selected folder.")
+
+    def _remove_backgrounds_clicked(self):
+        if not self.image_list:
+            return
+
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Confirm Background Removal")
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setText("Are you sure you want to remove the background of all imported images?")
+        msg_box.setInformativeText(
+            "This process is offline, irreversible, and will replace your original image files with transparent PNG versions.\n\n"
+            "Do you want to proceed?"
+        )
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.No)
+        
+        # Apply the app stylesheet
+        msg_box.setStyleSheet(self.styleSheet())
+        
+        ret = msg_box.exec()
+        if ret == QMessageBox.Yes:
+            self._start_background_removal()
+
+    def _start_background_removal(self):
+        if not self.image_list:
+            return
+            
+        # Terminate any active viewer
+        self._terminate_viewer()
+        
+        # Disable inputs to avoid modification during processing
+        self.browse_btn.setEnabled(False)
+        self.bg_remove_btn.setEnabled(False)
+        self.process_btn.setEnabled(False)
+        self.step3_box.setEnabled(False)
+        self.photos_tab.setEnabled(False)
+        
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Starting background removal...")
+        
+        self.worker = BackgroundRemovalWorker(self.image_list, self)
+        self.worker.progress_changed.connect(self.progress_bar.setValue)
+        self.worker.status_changed.connect(self.status_label.setText)
+        self.worker.log_message.connect(self._append_log)
+        self.worker.finished.connect(self._on_bg_removal_finished)
+        
+        self.console_text.append("[START] Initializing background removal worker thread...")
+        self.worker.start()
+
+    def _on_bg_removal_finished(self, success: bool, updated_list: list, message: str):
+        self.browse_btn.setEnabled(True)
+        self.photos_tab.setEnabled(True)
+        
+        if success:
+            self.console_text.append(f"[FINISHED] {message}")
+            # Refresh photos list with the new files
+            self._handle_dropped_images(updated_list)
+        else:
+            self.console_text.append(f"[FAILED] Background removal failed: {message}")
+            # Re-enable controls with the current list
+            self._handle_dropped_images(self.image_list)
+            
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Status: Idle")
 
     def _start_processing(self):
         if not self.image_list:
@@ -1661,7 +1753,7 @@ class MainWindow(QMainWindow):
                 pass
         super().closeEvent(event)
 
-    def _upload_to_proximaxr(self):
+    def _upload_to_proximap(self):
         output_dir = get_reconstruction_out_dir()
         mvs_out = os.path.join(output_dir, "mvs")
         

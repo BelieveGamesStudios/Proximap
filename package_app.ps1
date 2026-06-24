@@ -37,9 +37,9 @@ if (Test-Path "app_icon.ico") {
 }
 
 if ($iconFlag) {
-    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy main_window.py
+    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy --collect-all rembg main_window.py
 } else {
-    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy main_window.py
+    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all rembg main_window.py
 }
 
 
@@ -95,6 +95,14 @@ foreach ($exe in $mvsExes) {
 # Copy toolchain mapping configuration
 Write-Host "  Copying toolchain map configuration..." -ForegroundColor DarkGray
 Copy-Item -Path "toolchain_map.json" -Destination "dist/Proximap/"
+
+# Copy offline background removal models
+Write-Host "  Copying offline background removal models..." -ForegroundColor DarkGray
+if (Test-Path "models") {
+    Copy-Item -Path "models" -Destination "dist/Proximap/" -Recurse
+} else {
+    Write-Warning "Models directory not found. Background removal will fail offline until models are placed in dist/Proximap/models/"
+}
 
 # 5. Compress the finalized distribution folder to ZIP
 Write-Host "[5/5] Compressing distribution into release ZIP..." -ForegroundColor Yellow
