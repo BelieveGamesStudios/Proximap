@@ -1801,7 +1801,7 @@ class MainWindow(QMainWindow):
             
         model_name = folder_name if folder_name else "Reconstructed_Space"
         
-        bridge_url = f"http://localhost:3000/upload-bridge?local_url={local_url}&name={model_name}"
+        bridge_url = f"https://proximap.space/upload-bridge?local_url={local_url}&name={model_name}"
         
         self.console_text.append(f"[BRIDGE] Directing system browser to: {bridge_url}")
         import webbrowser
