@@ -115,17 +115,18 @@ class LoopbackServerThread(threading.Thread):
             self.httpd.shutdown()
             self.httpd.server_close()
 
-class CloudUploadThread(threading.Thread):
-    def __init__(self, file_path, model_name, main_window):
-        super().__init__()
+class CloudUploadWorker(QThread):
+    log_message = Signal(str)
+    upload_finished = Signal(bool, str, str)  # success, error_or_url, model_name
+
+    def __init__(self, file_path, model_name, parent=None):
+        super().__init__(parent)
         self.file_path = file_path
         self.model_name = model_name
-        self.main_window = main_window
-        self.daemon = True
 
     def run(self):
         try:
-            self.main_window.console_text.append("[BRIDGE] Uploading reconstructed 3D model to Proximap cloud...")
+            self.log_message.emit("[BRIDGE] Uploading reconstructed 3D model to Proximap cloud...")
             
             # Read GLB file
             with open(self.file_path, 'rb') as f:
@@ -152,31 +153,34 @@ class CloudUploadThread(threading.Thread):
             import urllib.request
             import urllib.parse
             import json
+            import ssl
+
+            # Create unverified SSL context to bypass potential certificate verification failures on local machines
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
 
             req = urllib.request.Request(url, data=payload)
             req.add_header('Content-Type', b'multipart/form-data; boundary=' + boundary)
             req.add_header('Content-Length', str(len(payload)))
             
             # Execute upload
-            with urllib.request.urlopen(req, timeout=180) as response:
+            with urllib.request.urlopen(req, context=ctx, timeout=180) as response:
                 res_data = response.read().decode('utf-8')
                 res_json = json.loads(res_data)
                 
             if res_json.get('success') and res_json.get('model_url'):
                 model_url = res_json['model_url']
-                self.main_window.console_text.append("[BRIDGE] Upload successful. Model cached in cloud.")
-                
-                # Direct user browser to gallery page with model_url and name
-                bridge_url = f"https://proximap.space/gallery?model_url={urllib.parse.quote(model_url)}&name={urllib.parse.quote(self.model_name)}"
-                self.main_window.console_text.append(f"[BRIDGE] Directing system browser to: {bridge_url}")
-                import webbrowser
-                webbrowser.open(bridge_url)
+                self.log_message.emit("[BRIDGE] Upload successful. Model cached in cloud.")
+                self.upload_finished.emit(True, model_url, self.model_name)
             else:
                 error_msg = res_json.get('error', 'Unknown server response.')
-                self.main_window.console_text.append(f"[BRIDGE ERROR] Server rejected upload: {error_msg}")
+                self.log_message.emit(f"[BRIDGE ERROR] Server rejected upload: {error_msg}")
+                self.upload_finished.emit(False, error_msg, self.model_name)
                 
         except Exception as e:
-            self.main_window.console_text.append(f"[BRIDGE ERROR] Failed to perform background cloud upload: {e}")
+            self.log_message.emit(f"[BRIDGE ERROR] Failed to perform background cloud upload: {e}")
+            self.upload_finished.emit(False, str(e), self.model_name)
 
 class DragDropArea(QFrame):
     """
@@ -1664,24 +1668,34 @@ class MainWindow(QMainWindow):
                     dest_dir = os.path.dirname(file_path)
                     
                     if os.path.exists(src_mtl):
-                        # The MTL file might reference a different filename, so we keep the original name
-                        shutil.copy2(src_mtl, os.path.join(dest_dir, "scene_dense_mesh_texture.mtl"))
-                        
-                        # Parse the MTL to find the texture image(s) and copy them
-                        with open(src_mtl, 'r') as f:
-                            for line in f:
-                                if line.strip().startswith("map_Kd "):
-                                    tex_filename = line.strip().split(" ", 1)[1]
-                                    src_tex = os.path.join(mvs_out, tex_filename)
-                                    if os.path.exists(src_tex):
-                                        shutil.copy2(src_tex, os.path.join(dest_dir, tex_filename))
+                        try:
+                            # The MTL file might reference a different filename, so we keep the original name
+                            shutil.copy2(src_mtl, os.path.join(dest_dir, "scene_dense_mesh_texture.mtl"))
+                            
+                            # Parse the MTL to find the texture image(s) and copy them
+                            with open(src_mtl, 'r') as f:
+                                for line in f:
+                                    if line.strip().startswith("map_Kd "):
+                                        parts = line.strip().split(" ", 1)
+                                        if len(parts) > 1:
+                                            tex_filename = parts[1].strip()
+                                            src_tex = os.path.join(mvs_out, tex_filename)
+                                            if os.path.exists(src_tex):
+                                                shutil.copy2(src_tex, os.path.join(dest_dir, tex_filename))
+                        except Exception as tex_err:
+                            self.console_text.append(f"[WARNING] Failed to copy OBJ textures or material file: {tex_err}")
                         
                     self.console_text.append(f"[EXPORT] OBJ mesh and textures successfully written to {dest_dir}")
                 else:
                     self.console_text.append(f"[ERROR] Could not find reconstructed OBJ file at {src_obj}")
             elif fmt == ".glb":
+                src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
                 src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
-                if os.path.exists(src_obj):
+                
+                if os.path.exists(src_glb):
+                    shutil.copy2(src_glb, file_path)
+                    self.console_text.append(f"[EXPORT] GLB mesh successfully written to {file_path}")
+                elif os.path.exists(src_obj):
                     self.console_text.append("[INFO] Converting OBJ to GLB using obj2gltf...")
                     try:
                         import subprocess
@@ -1693,7 +1707,7 @@ class MainWindow(QMainWindow):
                     except Exception as e:
                         self.console_text.append(f"[ERROR] Failed to convert to GLB. Ensure Node.js and obj2gltf are installed: {e}")
                 else:
-                    self.console_text.append(f"[ERROR] Could not find reconstructed OBJ file at {src_obj}")
+                    self.console_text.append(f"[ERROR] Could not find reconstructed GLB or OBJ file at {mvs_out}")
         except Exception as e:
             self.console_text.append(f"[ERROR] Failed to export mesh: {e}")
 
@@ -1875,9 +1889,23 @@ class MainWindow(QMainWindow):
             
         model_name = folder_name if folder_name else "Reconstructed_Space"
         
-        # Spawn background cloud upload thread
-        self.upload_thread = CloudUploadThread(src_glb, model_name, self)
-        self.upload_thread.start()
+        # Spawn background cloud upload worker thread
+        self.upload_portal_btn.setEnabled(False)
+        self.upload_worker = CloudUploadWorker(src_glb, model_name, self)
+        self.upload_worker.log_message.connect(self._append_log)
+        self.upload_worker.upload_finished.connect(self._on_upload_finished)
+        self.upload_worker.start()
+
+    def _on_upload_finished(self, success: bool, result: str, model_name: str):
+        self.upload_portal_btn.setEnabled(True)
+        if success:
+            import urllib.parse
+            import webbrowser
+            bridge_url = f"https://proximap.space/gallery?model_url={urllib.parse.quote(result)}&name={urllib.parse.quote(model_name)}"
+            self.console_text.append(f"[BRIDGE] Directing system browser to: {bridge_url}")
+            webbrowser.open(bridge_url)
+        else:
+            self.console_text.append(f"[BRIDGE ERROR] Cloud upload failed: {result}")
 
 
 if __name__ == "__main__":
