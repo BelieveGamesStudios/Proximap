@@ -1102,13 +1102,38 @@ class MainWindow(QMainWindow):
         console_layout = QVBoxLayout(self.console_frame)
         console_layout.setContentsMargins(10, 10, 10, 10)
         
+        # Console Header Layout
+        console_header_layout = QHBoxLayout()
         console_title = QLabel("System Output Log", self.console_frame)
         console_title.setStyleSheet("font-weight: bold; color: #888888; font-size: 11px; text-transform: uppercase;")
+        
+        self.clear_console_btn = QPushButton("Clear", self.console_frame)
+        self.clear_console_btn.setCursor(Qt.PointingHandCursor)
+        self.clear_console_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #aaaaaa;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 2px 8px;
+                font-size: 10px;
+            }
+            QPushButton:hover {
+                background: #333333;
+                color: #ffffff;
+            }
+        """)
+        self.clear_console_btn.clicked.connect(lambda: self.console_text.clear())
+        
+        console_header_layout.addWidget(console_title)
+        console_header_layout.addStretch()
+        console_header_layout.addWidget(self.clear_console_btn)
+        
         self.console_text = QTextEdit(self.console_frame)
         self.console_text.setReadOnly(True)
         self.console_text.setObjectName("Console")
         
-        console_layout.addWidget(console_title)
+        console_layout.addLayout(console_header_layout)
         console_layout.addWidget(self.console_text)
         
         # Add tabs

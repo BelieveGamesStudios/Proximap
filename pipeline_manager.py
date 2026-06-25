@@ -79,6 +79,24 @@ class PipelineWorker(QThread):
         self._spikes_removed = 0
         self._spikes_removed = 0
         self._holes_closed = 0
+        self._image_names_map = {}
+
+    def _get_image_names_from_db(self, db_path: str) -> dict:
+        """Retrieves image IDs to names mapping from COLMAP database."""
+        import sqlite3
+        image_map = {}
+        if not os.path.exists(db_path):
+            return image_map
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT image_id, name FROM images ORDER BY image_id")
+            for row in cursor.fetchall():
+                image_map[row[0]] = row[1]
+            conn.close()
+        except Exception as e:
+            self.log_message.emit(f"[WARNING] Could not read COLMAP database for image names: {e}")
+        return image_map
 
     def _to_colmap_path(self, p: str) -> str:
         """Converts Windows backslashes to forward slashes to prevent COLMAP parsing errors."""
@@ -328,13 +346,15 @@ class PipelineWorker(QThread):
         """
         base_dir = get_base_dir()
         
-        # Clean up stale reconstruction directory to prevent legacy files impacting new scans
-        if os.path.exists(self.output_dir):
-            self.log_message.emit(f"[INFO] Cleaning up stale reconstruction directory: {self.output_dir}")
-            try:
-                shutil.rmtree(self.output_dir)
-            except Exception as e:
-                self.log_message.emit(f"[WARNING] Failed to clean output folder: {e}")
+        # Clean up stale reconstruction subdirectories to prevent legacy files impacting new scans
+        for subdir in ["colmap", "mvs"]:
+            sub_path = os.path.join(self.output_dir, subdir)
+            if os.path.exists(sub_path):
+                self.log_message.emit(f"[INFO] Cleaning up stale reconstruction directory: {sub_path}")
+                try:
+                    shutil.rmtree(sub_path)
+                except Exception as e:
+                    self.log_message.emit(f"[WARNING] Failed to clean output folder: {e}")
 
         colmap_out = self._to_colmap_path(os.path.join(self.output_dir, "colmap"))
         mvs_out = self._to_colmap_path(os.path.join(self.output_dir, "mvs"))
@@ -499,6 +519,10 @@ class PipelineWorker(QThread):
         # STEP 3/9 — Feature Matching
         # =========================================================================
         self.status_changed.emit("Step 3/9: Matching SIFT Features...")
+        
+        # Load image names mapping for enhanced log output
+        self._image_names_map = self._get_image_names_from_db(database_path)
+        
         cmd_match_gpu = [
             colmap_exe, "exhaustive_matcher",
             "--database_path", database_path,
@@ -532,7 +556,7 @@ class PipelineWorker(QThread):
         if db_stats["match_counts"]:
             self._match_counts = db_stats["match_counts"]
             
-        self._emit_matching_summary()
+        self._emit_matching_summary(database_path)
         self.progress_changed.emit(40)
 
         # =========================================================================
@@ -997,7 +1021,7 @@ class PipelineWorker(QThread):
         """Returns the number of calibrated images from the last run stats."""
         return self._last_reconstruction_stats.get("images", 999)
 
-    def _parse_feature_extraction_line(self, line: str) -> str or None:
+    def _parse_feature_extraction_line(self, line: str) -> str | None:
         """Parse COLMAP feature_extractor output into Metashape-style format."""
         import re
         
@@ -1027,15 +1051,41 @@ class PipelineWorker(QThread):
         
         return None  # Use raw line
 
-    def _parse_matching_line(self, line: str) -> str or None:
+    def _parse_matching_line(self, line: str) -> str | None:
         """Parse COLMAP exhaustive_matcher output."""
         import re
         
-        match = re.search(r'Matching block \[(\d+)/(\d+)', line)
+        match = re.search(r'Matching block \[(\d+)/(\d+),\s*(\d+)/(\d+)\]', line)
+        if match:
+            # We can try to approximate the image names being matched in this block if possible
+            # But the block indexing is quite complex (it depends on block size, max_num_matches etc).
+            # We'll just show the block progress for now unless we know the exact names.
+            current_1 = int(match.group(1))
+            total_1 = int(match.group(2))
+            current_2 = int(match.group(3))
+            total_2 = int(match.group(4))
+            return f"Processing match block [{current_1}/{total_1}, {current_2}/{total_2}]..."
+
+        # Alternatively, COLMAP outputs "Matching block [X/Y]" format sometimes:
+        match = re.search(r'Matching block \[(\d+)/(\d+)\]', line)
         if match:
             current = int(match.group(1))
             total = int(match.group(2))
-            return f"Processing match block {current}/{total}..."
+            
+            # Since exhaustive_matcher processes images in blocks, let's try to map the block index
+            # to image names if we have total images available.
+            # Usually exhaustive matcher uses block size of 50 by default.
+            block_size = 50 
+            start_idx = (current - 1) * block_size + 1
+            end_idx = min(current * block_size, self._total_images)
+            
+            start_name = self._image_names_map.get(start_idx, f"Image {start_idx}")
+            end_name = self._image_names_map.get(end_idx, f"Image {end_idx}")
+            
+            if start_idx == end_idx:
+                return f"Processing match block {current}/{total} (Image: {start_name})"
+            else:
+                return f"Processing match block {current}/{total} (Images: {start_name} to {end_name})"
         
         # Match pair results
         match = re.search(r'(\d+) matches for image pair', line)
@@ -1050,7 +1100,7 @@ class PipelineWorker(QThread):
         
         return None
 
-    def _parse_mapper_line(self, line: str) -> str or None:
+    def _parse_mapper_line(self, line: str) -> str | None:
         """Parse COLMAP mapper output into Metashape-style camera registration log."""
         import re
         
@@ -1105,7 +1155,7 @@ class PipelineWorker(QThread):
         
         return None
 
-    def _parse_densify_line(self, line: str) -> str or None:
+    def _parse_densify_line(self, line: str) -> str | None:
         """Parse OpenMVS DensifyPointCloud output."""
         import re
         
@@ -1142,7 +1192,7 @@ class PipelineWorker(QThread):
         
         return None
 
-    def _parse_mesh_line(self, line: str) -> str or None:
+    def _parse_mesh_line(self, line: str) -> str | None:
         """Parse OpenMVS ReconstructMesh output."""
         import re
         
@@ -1239,7 +1289,31 @@ class PipelineWorker(QThread):
                 "Consider: higher quality preset, better image overlap, or sharper images."
             )
 
-    def _emit_matching_summary(self):
+    def _emit_matching_summary(self, db_path: str = None):
+        top_pairs_str = ""
+        if db_path and os.path.exists(db_path):
+            try:
+                import sqlite3
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                # two_view_geometries structure: pair_id, rows, cols, data, config, F, E, H
+                # We can't easily join pair_id to image names because pair_id is computed as:
+                # image_id1 * 2147483647 + image_id2. Let's just do a simple query if we want, or just get max matches.
+                # Since pair_id is complex to decode in SQL without a function, we'll fetch rows and decode in Python.
+                cursor.execute("SELECT pair_id, rows FROM two_view_geometries WHERE rows > 0 ORDER BY rows DESC LIMIT 5")
+                top_pairs = cursor.fetchall()
+                if top_pairs and self._image_names_map:
+                    top_pairs_str = "\n  Top matched pairs:\n"
+                    for pair_id, matches in top_pairs:
+                        image_id2 = pair_id % 2147483647
+                        image_id1 = pair_id // 2147483647
+                        name1 = self._image_names_map.get(image_id1, f"Img {image_id1}")
+                        name2 = self._image_names_map.get(image_id2, f"Img {image_id2}")
+                        top_pairs_str += f"    {name1} ↔ {name2} : {matches} matches\n"
+                conn.close()
+            except Exception as e:
+                pass
+
         self.log_message.emit(
             f"\n{'='*60}\n"
             f"  FEATURE MATCHING SUMMARY\n"
@@ -1248,6 +1322,7 @@ class PipelineWorker(QThread):
             f"  Pairs with matches:   {self._pairs_matched}\n"
             f"  Match success rate:   {(self._pairs_matched/max(self._pairs_tested,1))*100:.1f}%\n"
             f"  Avg matches/pair:     {sum(self._match_counts)/max(len(self._match_counts),1):,.0f}\n"
+            f"{top_pairs_str}"
             f"{'='*60}"
         )
         
