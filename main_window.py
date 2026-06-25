@@ -636,7 +636,8 @@ class PhotosTabWidget(QWidget):
         self.btn_remove_selected.setToolTip("Remove Selected")
         self.btn_remove_selected.setStyleSheet("QPushButton { padding: 4px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
         
-        self.btn_add_photos = QPushButton("📂", self.toolbar)
+        self.btn_add_photos = QPushButton("", self.toolbar)
+        self.btn_add_photos.setIcon(QIcon(os.path.join(public_dir, "folder.png")))
         self.btn_add_photos.setToolTip("Add Photos")
         self.btn_add_photos.setStyleSheet("QPushButton { padding: 4px 8px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
         
