@@ -619,17 +619,22 @@ class PhotosTabWidget(QWidget):
         toolbar_layout.setSpacing(6)
         
         # Buttons matching reference UI functionality
-        self.btn_select_all = QPushButton("✔️", self.toolbar)
+        public_dir = os.path.join(get_base_dir(), "public")
+        
+        self.btn_select_all = QPushButton("", self.toolbar)
+        self.btn_select_all.setIcon(QIcon(os.path.join(public_dir, "all.png")))
         self.btn_select_all.setToolTip("Select All")
-        self.btn_select_all.setStyleSheet("QPushButton { padding: 4px 8px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
+        self.btn_select_all.setStyleSheet("QPushButton { padding: 4px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
         
-        self.btn_deselect_all = QPushButton("➖", self.toolbar)
+        self.btn_deselect_all = QPushButton("", self.toolbar)
+        self.btn_deselect_all.setIcon(QIcon(os.path.join(public_dir, "none.png")))
         self.btn_deselect_all.setToolTip("Deselect All")
-        self.btn_deselect_all.setStyleSheet("QPushButton { padding: 4px 8px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
+        self.btn_deselect_all.setStyleSheet("QPushButton { padding: 4px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
         
-        self.btn_remove_selected = QPushButton("❌", self.toolbar)
+        self.btn_remove_selected = QPushButton("", self.toolbar)
+        self.btn_remove_selected.setIcon(QIcon(os.path.join(public_dir, "trash.png")))
         self.btn_remove_selected.setToolTip("Remove Selected")
-        self.btn_remove_selected.setStyleSheet("QPushButton { padding: 4px 8px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
+        self.btn_remove_selected.setStyleSheet("QPushButton { padding: 4px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
         
         self.btn_add_photos = QPushButton("📂", self.toolbar)
         self.btn_add_photos.setToolTip("Add Photos")
@@ -984,6 +989,7 @@ class MainWindow(QMainWindow):
         self.radio_group.addButton(self.radio_ply)
         
         self.export_btn = QPushButton("Export...", self.step3_box)
+        self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self._export_mesh)
         
         self.upload_portal_btn = QPushButton("☁  Upload to Proximap", self.step3_box)
@@ -1037,6 +1043,26 @@ class MainWindow(QMainWindow):
             }
         """)
         scroll_content_layout.addWidget(self.view_scene_btn)
+        
+        self.retrieve_session_btn = QPushButton("Retrieve Last Session", scroll_content)
+        self.retrieve_session_btn.setVisible(False)
+        self.retrieve_session_btn.clicked.connect(self._retrieve_last_session)
+        self.retrieve_session_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #00E676;
+                color: #121212;
+                border: none;
+                border-radius: 4px;
+                padding: 8px;
+                font-size: 13px;
+                font-weight: bold;
+                margin-top: 5px;
+            }
+            QPushButton:hover {
+                background-color: #00C853;
+            }
+        """)
+        scroll_content_layout.addWidget(self.retrieve_session_btn)
         
         scroll_content_layout.addStretch()
         
@@ -1555,6 +1581,9 @@ class MainWindow(QMainWindow):
         self.browse_btn.setEnabled(False)
         self.step3_box.setEnabled(False)
         self.upload_portal_btn.setEnabled(False)
+        self.bg_remove_btn.setEnabled(False)
+        self.quality_combo.setEnabled(False)
+        self.gpu_combo.setEnabled(False)
         
         # Temp output dir inside the workspace or local appdata if not writable
         output_dir = get_reconstruction_out_dir()
@@ -1604,6 +1633,9 @@ class MainWindow(QMainWindow):
     def _on_pipeline_finished(self, success: bool, msg: str):
         self.browse_btn.setEnabled(True)
         self.view_scene_btn.setEnabled(True)
+        self.quality_combo.setEnabled(True)
+        self.gpu_combo.setEnabled(True)
+        self.bg_remove_btn.setEnabled(len(self.image_list) > 0)
         
         if success:
             self._set_process_btn_state("ready")
@@ -1731,18 +1763,51 @@ class MainWindow(QMainWindow):
         src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
         has_model = os.path.exists(src_glb) or os.path.exists(src_obj)
         self.upload_portal_btn.setEnabled(has_model)
+        self.export_btn.setEnabled(has_model)
 
     def _check_existing_scene(self):
-        """Checks if a previous reconstruction scene exists to enable the viewer button."""
+        """Checks if a previous reconstruction scene exists and shows the retrieve session button."""
         output_dir = get_reconstruction_out_dir()
         mvs_dir = os.path.join(output_dir, "mvs")
         scene_mvs = os.path.join(mvs_dir, "scene.mvs")
         if os.path.exists(scene_mvs):
             self.viewer_widget.set_mvs_directory(mvs_dir)
-            self.view_scene_btn.setEnabled(True)
-            self.step3_box.setEnabled(True)
-            self.console_text.append("[INFO] Detected previous reconstruction. 3D Viewer is ready to display.")
+            self.retrieve_session_btn.setVisible(True)
+            self.console_text.append("[INFO] Detected previous reconstruction. Click 'Retrieve Last Session' to load it.")
+
+    def _retrieve_last_session(self):
+        """Retrieves and displays the last session, and enables export/upload buttons."""
+        self.retrieve_session_btn.setVisible(False)
+        self.view_scene_btn.setEnabled(True)
+        self.step3_box.setEnabled(True)
+        self.console_text.append("[INFO] Retrieved last session. 3D Viewer is ready to display.")
         self._update_upload_button_state()
+        
+        # Determine the best view mode and load it immediately
+        output_dir = get_reconstruction_out_dir()
+        mvs_dir = os.path.join(output_dir, "mvs")
+        
+        self.viewer_widget.mode_select.blockSignals(True)
+        mesh_exists = False
+        for candidate in ["scene_dense_mesh_texture.ply", "scene_dense_mesh_texture.obj", "scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+            if os.path.exists(os.path.join(mvs_dir, candidate)):
+                mesh_exists = True
+                break
+        
+        dense_exists = os.path.exists(os.path.join(mvs_dir, "scene_dense.mvs"))
+        
+        if mesh_exists:
+            self.viewer_widget.mode_select.setCurrentIndex(2)
+        elif dense_exists:
+            self.viewer_widget.mode_select.setCurrentIndex(1)
+        else:
+            self.viewer_widget.mode_select.setCurrentIndex(0)
+            
+        self.viewer_widget.mode_select.blockSignals(False)
+        
+        path = self.viewer_widget.get_selected_file_path()
+        if path:
+            self._reload_viewer(path)
 
     def _toggle_viewer_mode(self):
         """Reloads the embedded 3D viewer."""

@@ -37,9 +37,9 @@ if (Test-Path "app_icon.ico") {
 }
 
 if ($iconFlag) {
-    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy main_window.py
+    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --copy-metadata pymatting main_window.py
 } else {
-    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy main_window.py
+    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --copy-metadata pymatting main_window.py
 }
 
 
@@ -102,6 +102,14 @@ if (Test-Path "models") {
     Copy-Item -Path "models" -Destination "dist/Proximap/" -Recurse
 } else {
     Write-Warning "Models directory not found. Background removal will fail offline until models are placed in dist/Proximap/models/"
+}
+
+# Copy public directory containing toolbar icons
+Write-Host "  Copying UI icons and public assets..." -ForegroundColor DarkGray
+if (Test-Path "public") {
+    Copy-Item -Path "public" -Destination "dist/Proximap/public" -Recurse
+} else {
+    Write-Warning "Public directory not found. UI icons will fail to load."
 }
 
 # 5. Compress the finalized distribution folder to ZIP
