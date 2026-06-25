@@ -46,7 +46,7 @@ An automation script has been provided at the project root to handle the cleanin
 1. Open **PowerShell** as an administrator.
 2. Navigate to your project root:
    ```powershell
-   cd "C:\Users\AFOLABI FUNMILADE\Proximap"
+   cd "C:\Users\USERNAME\Proximap"
    ```
 3. Run the automated packaging script:
    ```powershell
@@ -143,7 +143,7 @@ To use a custom icon for your installer:
    ```
 
 ### 3. NSIS Script Structure (`installer.nsi`)
-An example configuration file named [installer.nsi](file:///c:/Users/AFOLABI%20FUNMILADE/Proximap/installer.nsi) has been created at your project root.
+An example configuration file named [installer.nsi](file:///c:/Users/USERNAME/Proximap/installer.nsi) has been created at your project root.
 
 Key parts of the script to configure:
 * **Installer Icon**: Set the custom icon file path:
@@ -154,7 +154,7 @@ Key parts of the script to configure:
 * **Product Details**: Modify publisher, version, and folder names:
   ```nsis
   !define PRODUCT_NAME "Proximap"
-  !define PRODUCT_PUBLISHER "Believe Games Studios"
+  !define PRODUCT_PUBLISHER "Proximaxr Spatial Technologies"
   ```
 
 ### 4. Compile the Installer Setup Executable
@@ -166,6 +166,43 @@ To compile your installer:
    ```
    *(If `makensis` is not in your environment PATH, execute it by specifying the absolute path, e.g. `& "C:\Program Files (x86)\NSIS\makensis.exe" installer.nsi`)*
 3. When compilation finishes, a standalone setup installer named **`Proximap_Setup.exe`** will be generated in your project root. Users can run this file to launch the install wizard, select directory, install files, and automatically add desktop/start menu shortcuts.
+
+---
+
+## Method 4: Packaging for macOS
+
+To package the application on macOS (e.g., Apple Silicon M-series or Intel Macs), an automated bash script `package_app.sh` is provided in the project root. This handles the creation of a `.app` bundle using PyInstaller and includes all backend dependencies.
+
+### 1. Prerequisites
+- **macOS Backend Binaries**: Ensure that you have macOS-compatible builds (ARM64 or x86_64) of COLMAP and OpenMVS placed in `backend_bin/colmap` and `backend_bin/openMVS`. The Windows `.exe` files will not work on macOS.
+- **Python Dependencies**: Ensure PyInstaller and other requirements are installed in your Python environment (`pip install pyinstaller`).
+
+### 2. Run the Automation Script
+1. Open the Terminal and navigate to the project root:
+   ```bash
+   cd /path/to/Proximap
+   ```
+2. Make the script executable (if not already):
+   ```bash
+   chmod +x package_app.sh
+   ```
+3. Run the script:
+   ```bash
+   ./package_app.sh
+   ```
+
+### 3. Application Bundle (`.app`)
+The script uses PyInstaller's `--windowed` flag to generate a standard macOS application bundle (`dist/Proximap.app`).
+* The script automatically attempts to build an `app_icon.icns` file using the native `sips` and `iconutil` utilities if an `app_icon.png` is provided in the root directory.
+* Backend binaries, models, and public icons are selectively copied into the `Contents/MacOS` directory inside the `.app` bundle.
+
+### 4. Apple Notarization and Code Signing
+For commercial distribution outside of the Mac App Store, you **must** sign and notarize your application. Without this, macOS Gatekeeper will block the application with a warning that the developer cannot be verified.
+1. Sign the bundle with your Apple Developer ID:
+   ```bash
+   codesign --force --deep --sign "Developer ID Application: Your Name (TeamID)" dist/Proximap.app
+   ```
+2. Package the app into a `.dmg` or `.pkg` and submit to Apple's notary service using `xcrun notarytool`.
 
 ---
 

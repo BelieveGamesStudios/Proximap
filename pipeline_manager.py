@@ -77,7 +77,12 @@ class PipelineWorker(QThread):
         self._mesh_faces = 0               # Mesh face count
         self._spurious_removed = 0
         self._spikes_removed = 0
+        self._spikes_removed = 0
         self._holes_closed = 0
+
+    def _to_colmap_path(self, p: str) -> str:
+        """Converts Windows backslashes to forward slashes to prevent COLMAP parsing errors."""
+        return p.replace('\\', '/')
 
     def _load_toolchain_map(self) -> dict:
         """Loads the toolchain mapping config file."""
@@ -331,8 +336,8 @@ class PipelineWorker(QThread):
             except Exception as e:
                 self.log_message.emit(f"[WARNING] Failed to clean output folder: {e}")
 
-        colmap_out = os.path.join(self.output_dir, "colmap")
-        mvs_out = os.path.join(self.output_dir, "mvs")
+        colmap_out = self._to_colmap_path(os.path.join(self.output_dir, "colmap"))
+        mvs_out = self._to_colmap_path(os.path.join(self.output_dir, "mvs"))
         os.makedirs(colmap_out, exist_ok=True)
         os.makedirs(mvs_out, exist_ok=True)
         os.makedirs(os.path.join(colmap_out, "sparse"), exist_ok=True)
@@ -439,7 +444,8 @@ class PipelineWorker(QThread):
 
         colmap_exe = os.path.join(base_dir, self.toolchain_map["colmap"]["colmap"])
         colmap_env = self._get_colmap_env()
-        database_path = os.path.join(colmap_out, "database.db")
+        database_path = self._to_colmap_path(os.path.join(colmap_out, "database.db"))
+        working_image_dir = self._to_colmap_path(working_image_dir)
         if os.path.exists(database_path):
             try:
                 os.remove(database_path)
@@ -533,7 +539,7 @@ class PipelineWorker(QThread):
         # STEP 4/9 — Sparse Reconstruction (Mapper)
         # =========================================================================
         self.status_changed.emit("Step 4/9: Estimating Camera Poses (SfM)...")
-        sparse_dir = os.path.join(colmap_out, "sparse")
+        sparse_dir = self._to_colmap_path(os.path.join(colmap_out, "sparse"))
         if os.path.exists(sparse_dir):
             try:
                 shutil.rmtree(sparse_dir)
@@ -559,7 +565,7 @@ class PipelineWorker(QThread):
         if not self._run_process_realtime(cmd_mapper, timeout=3600.0, env=colmap_env, line_parser=self._parse_mapper_line):
             return False
 
-        best_model_dir = self._select_best_sparse_model(sparse_dir)
+        best_model_dir = self._to_colmap_path(self._select_best_sparse_model(sparse_dir)) if self._select_best_sparse_model(sparse_dir) else None
         if not best_model_dir:
             self.log_message.emit(
                 "[FAILED] SfM registered 0 camera poses. Feature matching produced "
@@ -570,7 +576,7 @@ class PipelineWorker(QThread):
             )
             return False
 
-        target_model_dir = os.path.join(sparse_dir, "0")
+        target_model_dir = self._to_colmap_path(os.path.join(sparse_dir, "0"))
         if os.path.abspath(best_model_dir) != os.path.abspath(target_model_dir):
             if os.path.exists(target_model_dir):
                 shutil.rmtree(target_model_dir)
