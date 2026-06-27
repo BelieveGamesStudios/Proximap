@@ -1913,8 +1913,7 @@ class MainWindow(QMainWindow):
             
         self.last_accessed_dir = os.path.dirname(file_path)
             
-        output_dir = get_reconstruction_out_dir()
-        mvs_out = os.path.join(output_dir, "mvs")
+        mvs_out = self._get_active_mvs_dir()
         
         import shutil
         try:
@@ -1983,9 +1982,15 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.console_text.append(f"[ERROR] Failed to export mesh: {e}")
 
-    def _update_upload_button_state(self):
+    def _get_active_mvs_dir(self):
+        viewer_mvs = self.viewer_widget.current_mvs_dir
+        if viewer_mvs and os.path.exists(viewer_mvs):
+            return viewer_mvs
         output_dir = get_reconstruction_out_dir()
-        mvs_out = os.path.join(output_dir, "mvs")
+        return os.path.join(output_dir, "mvs")
+
+    def _update_upload_button_state(self):
+        mvs_out = self._get_active_mvs_dir()
         src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
         src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
         has_model = os.path.exists(src_glb) or os.path.exists(src_obj)
@@ -2885,8 +2890,7 @@ class MainWindow(QMainWindow):
         self.overlay_label.adjustSize()
 
     def _upload_to_proximap(self):
-        output_dir = get_reconstruction_out_dir()
-        mvs_out = os.path.join(output_dir, "mvs")
+        mvs_out = self._get_active_mvs_dir()
         
         src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
         src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
