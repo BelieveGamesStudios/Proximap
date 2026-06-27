@@ -389,6 +389,7 @@ class PipelineWorker(QThread):
             max_image_dim  = 1024
             colmap_max_image_size = 1024
             colmap_max_num_features = 4096
+            colmap_max_num_matches = 16384
             colmap_first_octave = 0
             guided_matching = "0"
             nndr_ratio     = "0.8"
@@ -404,6 +405,7 @@ class PipelineWorker(QThread):
             max_image_dim  = 2048
             colmap_max_image_size = 2048
             colmap_max_num_features = 8192
+            colmap_max_num_matches = 16384
             colmap_first_octave = -1
             guided_matching = "0"
             nndr_ratio     = "0.8"
@@ -419,6 +421,7 @@ class PipelineWorker(QThread):
             max_image_dim  = 3200
             colmap_max_image_size = 3200
             colmap_max_num_features = 12288
+            colmap_max_num_matches = 32768
             colmap_first_octave = -1
             guided_matching = "1"
             nndr_ratio     = "0.8"
@@ -434,6 +437,7 @@ class PipelineWorker(QThread):
             max_image_dim  = None
             colmap_max_image_size = -1
             colmap_max_num_features = 16384
+            colmap_max_num_matches = 65536
             colmap_first_octave = -1
             guided_matching = "1"
             nndr_ratio     = "0.8"
@@ -529,6 +533,7 @@ class PipelineWorker(QThread):
             "--FeatureMatching.use_gpu", "1",
             "--FeatureMatching.guided_matching", guided_matching,
             "--SiftMatching.max_ratio", nndr_ratio,
+            "--SiftMatching.max_num_matches", str(colmap_max_num_matches),
             "--FeatureMatching.num_threads", str(num_threads),
         ]
         cmd_match_cpu = [
@@ -537,6 +542,7 @@ class PipelineWorker(QThread):
             "--FeatureMatching.use_gpu", "0",
             "--FeatureMatching.guided_matching", guided_matching,
             "--SiftMatching.max_ratio", nndr_ratio,
+            "--SiftMatching.max_num_matches", str(colmap_max_num_matches),
             "--FeatureMatching.num_threads", str(num_threads),
         ]
         self._match_counts = []
