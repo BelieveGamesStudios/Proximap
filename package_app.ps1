@@ -37,9 +37,9 @@ if (Test-Path "app_icon.ico") {
 }
 
 if ($iconFlag) {
-    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --copy-metadata pymatting main_window.py
+    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --collect-all vispy --copy-metadata pymatting main_window.py
 } else {
-    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --copy-metadata pymatting main_window.py
+    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --collect-all vispy --copy-metadata pymatting main_window.py
 }
 
 

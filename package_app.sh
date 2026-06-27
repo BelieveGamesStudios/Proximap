@@ -42,7 +42,7 @@ fi
 
 python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all numpy --collect-all rembg --collect-all scipy \
-    --collect-all pymatting --copy-metadata pymatting main_window.py
+    --collect-all pymatting --collect-all vispy --copy-metadata pymatting main_window.py
 
 if [ ! -d "dist/Proximap.app" ]; then
     echo "PyInstaller compilation failed! 'dist/Proximap.app' not found."

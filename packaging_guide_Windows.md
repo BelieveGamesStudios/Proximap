@@ -74,7 +74,7 @@ Remove-Item -Recurse -Force dist, build, *.log -ErrorAction SilentlyContinue
 ### Step 2: Compile the Python Application
 Use PyInstaller to compile the entrypoint `main_window.py`. We use `--onedir` for directory output (improving startup speed and avoiding antivirus issues) and `--noconsole` to hide the terminal window behind the GUI:
 ```powershell
-python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy main_window.py
+python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --collect-all vispy --copy-metadata pymatting main_window.py
 ```
 
 ### Step 3: Set up Backend Binaries (Pruned Layout)
@@ -139,7 +139,7 @@ To use a custom icon for your installer:
 1. Prepare a high-resolution `.ico` icon file (e.g. `app_icon.ico`) and place it in your project root.
 2. If compiling the Python application via PyInstaller, you can also embed the custom icon inside `Proximap.exe` itself:
    ```powershell
-   python -m PyInstaller --onedir --noconsole --icon=app_icon.ico --name Proximap --collect-all numpy main_window.py
+   python -m PyInstaller --onedir --noconsole --icon=app_icon.ico --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --collect-all vispy --copy-metadata pymatting main_window.py
    ```
 
 ### 3. NSIS Script Structure (`installer.nsi`)
