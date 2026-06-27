@@ -7,7 +7,6 @@
         "DensifyPointCloud": "backend_bin/openMVS/DensifyPointCloud.exe",
         "ReconstructMesh": "backend_bin/openMVS/ReconstructMesh.exe",
         "RefineMesh": "backend_bin/openMVS/RefineMesh.exe",
-        "TextureMesh": "backend_bin/openMVS/TextureMesh.exe",
-        "Viewer": "backend_bin/openMVS/Viewer.exe"
+        "TextureMesh": "backend_bin/openMVS/TextureMesh.exe"
     }
 }

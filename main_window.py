@@ -7,8 +7,11 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QProgressBar, QRadioButton, QButtonGroup,
     QFrame, QFileDialog, QTextEdit, QStackedWidget, QComboBox,
     QScrollArea, QTabWidget, QGridLayout, QCheckBox, QSlider,
-    QMessageBox, QDialog
+    QMessageBox, QDialog, QColorDialog, QMenu
 )
+
+from vispy import app, scene
+app.use_app("pyside6")
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
@@ -48,6 +51,29 @@ import http.server
 import socketserver
 import threading
 import webbrowser
+
+CAMERA_CONTROLS = {
+    0: "<b>Arcball Camera Controls:</b><br>"
+       "• Left Drag: Orbit camera<br>"
+       "• Right Drag / Scroll: Zoom / Dolly<br>"
+       "• Middle Drag / Shift+Left Drag: Pan",
+    1: "<b>Turntable Camera Controls:</b><br>"
+       "• Left Drag: Orbit (fixed Z-up)<br>"
+       "• Right Drag / Scroll: Zoom / Dolly<br>"
+       "• Middle Drag / Shift+Left Drag: Pan",
+    2: "<b>Fly Camera Controls:</b><br>"
+       "• Left Drag: Look around (pitch/yaw)<br>"
+       "• WASD / Arrow Keys: Fly around<br>"
+       "• Space / C: Fly up / down<br>"
+       "• Mouse Scroll: Adjust movement speed",
+    3: "<b>Pan-Zoom Camera Controls:</b><br>"
+       "• Left Drag: Pan 2D boundaries<br>"
+       "• Right Drag / Scroll: Zoom in/out",
+    4: "<b>Magnify Camera Controls:</b><br>"
+       "• Left Drag: Pan 2D boundaries<br>"
+       "• Scroll: Localized magnifying zoom<br>"
+       "• Shift + Mouse Move: Adjust focus area"
+}
 
 class ModelServerHandler(http.server.BaseHTTPRequestHandler):
     model_path = ""
@@ -195,14 +221,13 @@ class DragDropArea(QFrame):
 
 class ViewerWrapperWidget(QFrame):
     """
-    Widget wrapper that hosts the embedded OpenMVS Viewer.exe native window
-    and provides a control bar to reload or change MVS scene modes.
+    Widget wrapper that hosts the native VisPy 3D scene canvas
+    and provides a control bar to reload, switch cameras, or change MVS scene modes.
     Now also acts as the main drag-and-drop landing area!
     """
     images_dropped = Signal(list)
     reload_requested = Signal(str)  # Emits target file path to reload
-    external_launch_requested = Signal(str)  # Emits target file path to launch externally
-    back_requested = Signal()  # Emits when the user wants to go back to import view
+    camera_changed = Signal(int)  # Emits selected camera index (0: Arcball, 1: Turntable)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -222,24 +247,78 @@ class ViewerWrapperWidget(QFrame):
         control_layout = QHBoxLayout(self.control_bar)
         control_layout.setContentsMargins(10, 5, 10, 5)
         
-        self.back_btn = QPushButton("⬅ Back to Import", self.control_bar)
-        self.back_btn.setStyleSheet("""
+        title_label = QLabel("3D Spatial Visualization", self.control_bar)
+        title_label.setStyleSheet("font-weight: bold; color: #ffffff; font-size: 13px; margin-left: 5px;")
+        
+        # Dropdown File Menu next to title
+        self.file_menu_btn = QPushButton("File ▾", self.control_bar)
+        self.file_menu_btn.setStyleSheet("""
             QPushButton {
+                font-size: 11px;
+                padding: 4px 10px;
+                font-weight: normal;
                 background-color: #333333;
                 color: #ffffff;
-                font-size: 11px;
-                padding: 4px 8px;
-                font-weight: normal;
-                border-color: #444444;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                margin-left: 10px;
             }
             QPushButton:hover {
                 background-color: #444444;
                 border-color: #00E676;
             }
+            QPushButton::menu-indicator {
+                image: none;
+            }
         """)
+        self.file_menu = QMenu(self)
+        self.file_menu.setStyleSheet("""
+            QMenu {
+                background-color: #242424;
+                color: #ffffff;
+                border: 1px solid #2B2B2B;
+            }
+            QMenu::item {
+                padding: 6px 20px;
+            }
+            QMenu::item:selected {
+                background-color: #00E676;
+                color: #121212;
+            }
+            QMenu::item:disabled {
+                color: #555555;
+            }
+        """)
+        self.action_save = self.file_menu.addAction("Save Project (.pxm)")
+        self.action_load = self.file_menu.addAction("Load Project (.pxm)")
+        self.action_recover = self.file_menu.addAction("Recover Last Session")
+        self.file_menu_btn.setMenu(self.file_menu)
         
-        title_label = QLabel("3D Spatial Visualization", self.control_bar)
-        title_label.setStyleSheet("font-weight: bold; color: #ffffff; font-size: 13px; margin-left: 5px;")
+        # Dropdown to choose camera tracking style
+        self.cam_select = QComboBox(self.control_bar)
+        self.cam_select.setMinimumWidth(150)
+        self.cam_select.addItems([
+            "Arcball Camera",
+            "Turntable Camera",
+            "Fly Camera",
+            "Pan-Zoom Camera",
+            "Magnify Camera"
+        ])
+        
+        # Checkbox to toggle controls display overlay
+        self.show_controls_cb = QCheckBox("Show Controls", self.control_bar)
+        self.show_controls_cb.setStyleSheet("""
+            QCheckBox {
+                color: #ffffff;
+                font-size: 11px;
+                margin-left: 10px;
+                margin-right: 10px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+            }
+        """)
         
         # Dropdown to choose MVS scene mode
         self.mode_select = QComboBox(self.control_bar)
@@ -251,17 +330,33 @@ class ViewerWrapperWidget(QFrame):
         ])
         
         # Action buttons
-        self.reload_btn = QPushButton("🔄 Reload", self.control_bar)
-        self.reload_btn.setStyleSheet("font-size: 11px; padding: 4px 8px; font-weight: normal;")
-        self.external_btn = QPushButton("↗ Open Externally", self.control_bar)
-        self.external_btn.setStyleSheet("font-size: 11px; padding: 4px 8px; font-weight: normal;")
+        self.bg_btn = QPushButton("BG Color", self.control_bar)
+        self.bg_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 4px 8px;
+                font-weight: normal;
+                background-color: #333333;
+                color: #ffffff;
+                border: 1px solid #444444;
+            }
+            QPushButton:hover {
+                background-color: #444444;
+                border-color: #00E676;
+            }
+        """)
         
-        control_layout.addWidget(self.back_btn)
+        self.reload_btn = QPushButton("Reload", self.control_bar)
+        self.reload_btn.setStyleSheet("font-size: 11px; padding: 4px 8px; font-weight: normal;")
+        
         control_layout.addWidget(title_label)
+        control_layout.addWidget(self.file_menu_btn)
         control_layout.addStretch()
+        control_layout.addWidget(self.cam_select)
+        control_layout.addWidget(self.show_controls_cb)
         control_layout.addWidget(self.mode_select)
+        control_layout.addWidget(self.bg_btn)
         control_layout.addWidget(self.reload_btn)
-        control_layout.addWidget(self.external_btn)
         
         layout.addWidget(self.control_bar)
         
@@ -280,10 +375,9 @@ class ViewerWrapperWidget(QFrame):
         layout.addWidget(self.container_area)
         
         # Setup actions
-        self.back_btn.clicked.connect(self._on_back_clicked)
         self.reload_btn.clicked.connect(self._on_reload_clicked)
-        self.external_btn.clicked.connect(self._on_external_clicked)
         self.mode_select.currentIndexChanged.connect(self._on_mode_changed)
+        self.cam_select.currentIndexChanged.connect(self.camera_changed.emit)
         
         self.current_mvs_dir = None
 
@@ -332,11 +426,9 @@ class ViewerWrapperWidget(QFrame):
             return os.path.join(self.current_mvs_dir, "scene_dense.mvs")
         elif index == 2:
             # We want to load the textured mesh.
-            # OpenMVS Viewer.exe can load .ply, .obj, or .glb directly with textures.
-            # We check files in priority order (textured PLY first for Viewer.exe compatibility, then fallback candidates):
             for candidate in [
-                "scene_dense_mesh_texture.ply",
                 "scene_dense_mesh_texture.obj",
+                "scene_dense_mesh_texture.ply",
                 "scene_dense_mesh_refine.ply",
                 "scene_dense_mesh.ply",
                 "scene_mesh.ply",
@@ -348,7 +440,7 @@ class ViewerWrapperWidget(QFrame):
                 path = os.path.join(self.current_mvs_dir, candidate)
                 if os.path.exists(path):
                     return path
-            return os.path.join(self.current_mvs_dir, "scene_dense_mesh_texture.ply")
+            return os.path.join(self.current_mvs_dir, "scene_dense_mesh_texture.obj")
         return None
 
     def _on_back_clicked(self):
@@ -359,15 +451,105 @@ class ViewerWrapperWidget(QFrame):
         if path:
             self.reload_requested.emit(path)
 
-    def _on_external_clicked(self):
-        path = self.get_selected_file_path()
-        if path:
-            self.external_launch_requested.emit(path)
-
     def _on_mode_changed(self, index):
         path = self.get_selected_file_path()
         if path:
             self.reload_requested.emit(path)
+
+class ProjectProgressDialog(QDialog):
+    def __init__(self, title, message, parent=None):
+        super().__init__(parent, Qt.WindowTitleHint)
+        self.setWindowTitle(title)
+        self.setFixedSize(300, 120)
+        self.setModal(True)
+        if parent:
+            self.setStyleSheet(parent.styleSheet())
+            
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
+        
+        self.msg_label = QLabel(message, self)
+        self.msg_label.setStyleSheet("color: #ffffff; font-size: 12px;")
+        self.msg_label.setAlignment(Qt.AlignCenter)
+        
+        # A simple infinite progress bar to act as a loading indicator/spinner
+        self.progress = QProgressBar(self)
+        self.progress.setRange(0, 0) # Indeterminate mode
+        self.progress.setTextVisible(False)
+        self.progress.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #3A3A3A;
+                background-color: #222222;
+                height: 6px;
+                border-radius: 3px;
+            }
+            QProgressBar::chunk {
+                background-color: #00E676;
+                border-radius: 3px;
+            }
+        """)
+        
+        layout.addWidget(self.msg_label)
+        layout.addWidget(self.progress)
+
+
+class SaveWorker(QThread):
+    finished = Signal(bool, str) # Emits (success, message)
+    
+    def __init__(self, mvs_dir, file_path):
+        super().__init__()
+        self.mvs_dir = mvs_dir
+        self.file_path = file_path
+        
+    def run(self):
+        import zipfile
+        try:
+            with zipfile.ZipFile(self.file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                for root, _, files in os.walk(self.mvs_dir):
+                    for file in files:
+                        full_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(full_path, self.mvs_dir)
+                        zipf.write(full_path, rel_path)
+            self.finished.emit(True, "Project saved successfully.")
+        except Exception as e:
+            self.finished.emit(False, str(e))
+
+
+class LoadWorker(QThread):
+    finished = Signal(bool, str, str) # Emits (success, mvs_dir, message)
+    
+    def __init__(self, file_path, temp_root):
+        super().__init__()
+        self.file_path = file_path
+        self.temp_root = temp_root
+        
+    def run(self):
+        import zipfile
+        import uuid
+        try:
+            mvs_dir = os.path.join(self.temp_root, f"proximap_project_{uuid.uuid4()}")
+            os.makedirs(mvs_dir, exist_ok=True)
+            
+            with zipfile.ZipFile(self.file_path, 'r') as zipf:
+                zipf.extractall(mvs_dir)
+                
+            # Verify if it extracted scene.mvs
+            scene_mvs = os.path.join(mvs_dir, "scene.mvs")
+            if not os.path.exists(scene_mvs):
+                found_scene = None
+                for root, _, files in os.walk(mvs_dir):
+                    if "scene.mvs" in files:
+                        found_scene = os.path.join(root, "scene.mvs")
+                        mvs_dir = root
+                        break
+                if not found_scene:
+                    self.finished.emit(False, "", "Invalid project file: 'scene.mvs' not found in archive.")
+                    return
+            
+            self.finished.emit(True, mvs_dir, "Project loaded successfully.")
+        except Exception as e:
+            self.finished.emit(False, "", str(e))
 
 
 class ThumbnailWorker(QThread):
@@ -832,17 +1014,20 @@ class MainWindow(QMainWindow):
         self.image_list = []
         self.worker = None
         
-        # OpenMVS Viewer Subprocess States
-        self.viewer_process = None
-        self.viewer_hwnd = None
-        self.viewer_timer = QTimer(self)
-        self.viewer_timer.timeout.connect(self._check_for_viewer_window)
-        self.viewer_timer.setInterval(150)
-        
         # Load hardware properties
         self.total_ram_gb = hardware_profiler.get_total_memory() / (1024**3)
         self.available_ram_gb = hardware_profiler.get_available_memory() / (1024**3)
         self.dgpu_detected = not hardware_profiler.use_low_hardware_fallback
+        
+        # Initialize VisPy Canvas & Visual references
+        self.canvas = None
+        self.view = None
+        self.markers_visual = None
+        self.mesh_visual = None
+        self.cameras_visual = None
+        self._last_points = None
+        self.last_accessed_dir = os.path.expanduser("~")
+        self.viewport_bg_color = '#0C0C0C'
         
         self._init_ui()
         self._apply_styling()
@@ -993,7 +1178,7 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self._export_mesh)
         
-        self.upload_portal_btn = QPushButton("☁  Upload to Proximap", self.step3_box)
+        self.upload_portal_btn = QPushButton("Upload to Proximap", self.step3_box)
         self.upload_portal_btn.setEnabled(False)
         self.upload_portal_btn.clicked.connect(self._upload_to_proximap)
         self.upload_portal_btn.setStyleSheet("""
@@ -1045,26 +1230,6 @@ class MainWindow(QMainWindow):
         """)
         scroll_content_layout.addWidget(self.view_scene_btn)
         
-        self.retrieve_session_btn = QPushButton("Retrieve Last Session", scroll_content)
-        self.retrieve_session_btn.setVisible(False)
-        self.retrieve_session_btn.clicked.connect(self._retrieve_last_session)
-        self.retrieve_session_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #00E676;
-                color: #121212;
-                border: none;
-                border-radius: 4px;
-                padding: 8px;
-                font-size: 13px;
-                font-weight: bold;
-                margin-top: 5px;
-            }
-            QPushButton:hover {
-                background-color: #00C853;
-            }
-        """)
-        scroll_content_layout.addWidget(self.retrieve_session_btn)
-        
         scroll_content_layout.addStretch()
         
         scroll_area.setWidget(scroll_content)
@@ -1082,7 +1247,36 @@ class MainWindow(QMainWindow):
         self.viewer_widget = ViewerWrapperWidget(self)
         self.viewer_widget.images_dropped.connect(self._handle_dropped_images)
         self.viewer_widget.reload_requested.connect(self._reload_viewer)
-        self.viewer_widget.external_launch_requested.connect(self._launch_external_viewer)
+        self.viewer_widget.camera_changed.connect(self._on_camera_changed)
+        self.viewer_widget.action_save.triggered.connect(self._save_project)
+        self.viewer_widget.action_load.triggered.connect(self._load_project)
+        self.viewer_widget.action_recover.triggered.connect(self._retrieve_last_session)
+        
+        # Initialize VisPy Canvas
+        self.canvas = scene.SceneCanvas(keys='interactive', show=False, bgcolor=self.viewport_bg_color)
+        if hasattr(self.canvas, '_keys_check') and 'escape' in self.canvas._keys_check:
+            del self.canvas._keys_check['escape']
+        self.view = self.canvas.central_widget.add_view()
+        self.view.camera = 'arcball' # Default camera mode is Arcball
+        
+        # Add native VisPy canvas widget to the layout
+        self.viewer_widget.container_area_layout.addWidget(self.canvas.native)
+        self.viewer_widget.bg_btn.clicked.connect(self._choose_bg_color)
+        
+        # Initialize floating camera controls overlay
+        self.overlay_label = QLabel(self.viewer_widget.container_area)
+        self.overlay_label.setStyleSheet("""
+            QLabel {
+                background-color: rgba(20, 20, 20, 220);
+                color: #e0e0e0;
+                border: 1px solid #444444;
+                border-radius: 6px;
+                font-size: 11px;
+                padding: 10px;
+            }
+        """)
+        self.overlay_label.setVisible(False)
+        self.viewer_widget.show_controls_cb.stateChanged.connect(self._on_show_controls_changed)
         
         right_layout.addWidget(self.viewer_widget, stretch=4)
         
@@ -1475,9 +1669,10 @@ class MainWindow(QMainWindow):
 
     def _add_photos_dialog(self):
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Select Images to Add", "", "Image Files (*.png *.jpg *.jpeg *.tif *.tiff)"
+            self, "Select Images to Add", self.last_accessed_dir, "Image Files (*.png *.jpg *.jpeg *.tif *.tiff)"
         )
         if files:
+            self.last_accessed_dir = os.path.dirname(files[0])
             current_set = set(self.image_list)
             added_count = 0
             for f in files:
@@ -1490,8 +1685,9 @@ class MainWindow(QMainWindow):
                 self.console_text.append(f"[INFO] Added {added_count} new images.")
 
     def _open_dir_dialog(self):
-        dir_path = QFileDialog.getExistingDirectory(self, "Select Images Folder")
+        dir_path = QFileDialog.getExistingDirectory(self, "Select Images Folder", self.last_accessed_dir)
         if dir_path:
+            self.last_accessed_dir = dir_path
             files = []
             for root, _, filenames in os.walk(dir_path):
                 for filename in filenames:
@@ -1635,6 +1831,7 @@ class MainWindow(QMainWindow):
         
         self.console_text.append("[START] Initializing asynchronous reconstruction task thread...")
         self.worker.start()
+        self._update_file_menu_states()
 
     def _append_log(self, text: str):
         if text:
@@ -1697,6 +1894,7 @@ class MainWindow(QMainWindow):
         else:
             self._set_process_btn_state("failed")
             self.console_text.append(f"[FAILED] Reconstruction failed: {msg}")
+        self._update_file_menu_states()
 
     def _export_mesh(self):
         # Determine format selection
@@ -1707,10 +1905,12 @@ class MainWindow(QMainWindow):
             fmt = ".glb"
             
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Save Final Reconstruction Mesh", f"reconstructed_mesh{fmt}", f"Mesh Files (*{fmt})"
+            self, "Save Final Reconstruction Mesh", os.path.join(self.last_accessed_dir, f"reconstructed_mesh{fmt}"), f"Mesh Files (*{fmt})"
         )
         if not file_path:
             return
+            
+        self.last_accessed_dir = os.path.dirname(file_path)
             
         output_dir = get_reconstruction_out_dir()
         mvs_out = os.path.join(output_dir, "mvs")
@@ -1792,18 +1992,17 @@ class MainWindow(QMainWindow):
         self.export_btn.setEnabled(has_model)
 
     def _check_existing_scene(self):
-        """Checks if a previous reconstruction scene exists and shows the retrieve session button."""
+        """Checks if a previous reconstruction scene exists and updates recover action state."""
         output_dir = get_reconstruction_out_dir()
         mvs_dir = os.path.join(output_dir, "mvs")
         scene_mvs = os.path.join(mvs_dir, "scene.mvs")
         if os.path.exists(scene_mvs):
             self.viewer_widget.set_mvs_directory(mvs_dir)
-            self.retrieve_session_btn.setVisible(True)
-            self.console_text.append("[INFO] Detected previous reconstruction. Click 'Retrieve Last Session' to load it.")
+            self.console_text.append("[INFO] Detected previous reconstruction. Go to File Menu -> Recover Last Session to load it.")
+        self._update_file_menu_states()
 
     def _retrieve_last_session(self):
         """Retrieves and displays the last session, and enables export/upload buttons."""
-        self.retrieve_session_btn.setVisible(False)
         self.view_scene_btn.setEnabled(True)
         self.step3_box.setEnabled(True)
         self.console_text.append("[INFO] Retrieved last session. 3D Viewer is ready to display.")
@@ -1834,6 +2033,137 @@ class MainWindow(QMainWindow):
         path = self.viewer_widget.get_selected_file_path()
         if path:
             self._reload_viewer(path)
+            
+        self._update_file_menu_states()
+
+    def _save_project(self):
+        mvs_dir = self.viewer_widget.current_mvs_dir
+        if not mvs_dir or not os.path.exists(mvs_dir):
+            self.console_text.append("[ERROR] No active 3D reconstruction session to save.")
+            return
+            
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Project File",
+            self.last_accessed_dir,
+            "Proximap Project (*.pxm)"
+        )
+        if not file_path:
+            return
+            
+        if not file_path.lower().endswith(".pxm"):
+            file_path += ".pxm"
+            
+        self.last_accessed_dir = os.path.dirname(file_path)
+        self.console_text.append(f"[SAVE] Packing reconstruction assets from {mvs_dir} to {file_path}...")
+        
+        self.save_dialog = ProjectProgressDialog("Saving Project", "Compressing assets and saving project file...", self)
+        self.save_dialog.show()
+        
+        self.save_worker = SaveWorker(mvs_dir, file_path)
+        self.save_worker.finished.connect(self._on_save_finished)
+        self.save_worker.start()
+
+    def _on_save_finished(self, success, message):
+        if hasattr(self, 'save_dialog') and self.save_dialog:
+            self.save_dialog.accept()
+            self.save_dialog = None
+            
+        if success:
+            self.console_text.append(f"[SAVE SUCCESS] {message}")
+        else:
+            self.console_text.append(f"[ERROR] Failed to save project: {message}")
+
+    def _load_project(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Project File",
+            self.last_accessed_dir,
+            "Proximap Project (*.pxm)"
+        )
+        if not file_path:
+            return
+            
+        self.last_accessed_dir = os.path.dirname(file_path)
+        self.console_text.append(f"[LOAD] Unpacking project archive: {file_path}...")
+        
+        self.load_dialog = ProjectProgressDialog("Loading Project", "Extracting project assets...", self)
+        self.load_dialog.show()
+        
+        import tempfile
+        temp_root = tempfile.gettempdir()
+        
+        self.load_worker = LoadWorker(file_path, temp_root)
+        self.load_worker.finished.connect(self._on_load_finished)
+        self.load_worker.start()
+
+    def _on_load_finished(self, success, mvs_dir, message):
+        if hasattr(self, 'load_dialog') and self.load_dialog:
+            self.load_dialog.accept()
+            self.load_dialog = None
+            
+        if not success:
+            self.console_text.append(f"[ERROR] Failed to load project: {message}")
+            return
+            
+        self.console_text.append(f"[LOAD] {message} Cache directory: {mvs_dir}")
+        
+        # Update viewer state
+        self.viewer_widget.set_mvs_directory(mvs_dir)
+        self.view_scene_btn.setEnabled(True)
+        self.step3_box.setEnabled(True)
+        self._update_upload_button_state()
+        
+        # Determine the best view mode and load it immediately
+        self.viewer_widget.mode_select.blockSignals(True)
+        mesh_exists = False
+        for candidate in ["scene_dense_mesh_texture.ply", "scene_dense_mesh_texture.obj", "scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+            if os.path.exists(os.path.join(mvs_dir, candidate)):
+                mesh_exists = True
+                break
+        
+        dense_exists = os.path.exists(os.path.join(mvs_dir, "scene_dense.mvs"))
+        
+        if mesh_exists:
+            self.viewer_widget.mode_select.setCurrentIndex(2)
+        elif dense_exists:
+            self.viewer_widget.mode_select.setCurrentIndex(1)
+        else:
+            self.viewer_widget.mode_select.setCurrentIndex(0)
+            
+        self.viewer_widget.mode_select.blockSignals(False)
+        
+        path = self.viewer_widget.get_selected_file_path()
+        if path:
+            self._reload_viewer(path)
+            
+        self._update_file_menu_states()
+
+    def _update_file_menu_states(self):
+        # Is reconstruction running?
+        is_running = (self.worker is not None and self.worker.isRunning())
+        
+        if is_running:
+            self.viewer_widget.action_save.setEnabled(False)
+            self.viewer_widget.action_load.setEnabled(False)
+            self.viewer_widget.action_recover.setEnabled(False)
+            return
+            
+        # We can save if we have a valid MVS directory containing files
+        mvs_dir = self.viewer_widget.current_mvs_dir
+        has_assets = False
+        if mvs_dir and os.path.exists(mvs_dir):
+            if os.path.exists(os.path.join(mvs_dir, "scene.mvs")):
+                has_assets = True
+        self.viewer_widget.action_save.setEnabled(has_assets)
+        
+        # We can load at any time when not running
+        self.viewer_widget.action_load.setEnabled(True)
+        
+        # We can recover if there's an existing scene in the base reconstruction directory
+        output_dir = get_reconstruction_out_dir()
+        scene_mvs = os.path.join(output_dir, "mvs", "scene.mvs")
+        self.viewer_widget.action_recover.setEnabled(os.path.exists(scene_mvs))
 
     def _toggle_viewer_mode(self):
         """Reloads the embedded 3D viewer."""
@@ -1841,128 +2171,673 @@ class MainWindow(QMainWindow):
         if path:
             self._reload_viewer(path)
 
-    def _check_for_viewer_window(self):
-        if not self.viewer_process or self.viewer_process.poll() is not None:
-            self.viewer_timer.stop()
+    def _on_camera_changed(self, index):
+        if self.view is None:
             return
+            
+        # Switch camera mode (0: Arcball, 1: Turntable, 2: Fly, 3: PanZoom, 4: Magnify)
+        if index == 0:
+            self.view.camera = 'arcball'
+        elif index == 1:
+            self.view.camera = 'turntable'
+        elif index == 2:
+            self.view.camera = 'fly'
+            try:
+                from vispy.util.keys import SPACE
+                self.view.camera._keymap[SPACE] = (1, 3)
+            except Exception:
+                pass
+        elif index == 3:
+            self.view.camera = 'panzoom'
+        elif index == 4:
+            import vispy.scene.cameras as cams
+            self.view.camera = cams.MagnifyCamera()
+            
+        # Re-center and re-scale if we have loaded points
+        if self._last_points is not None and len(self._last_points) > 0:
+            import numpy as np
+            bbox_min = np.min(self._last_points, axis=0)
+            bbox_max = np.max(self._last_points, axis=0)
+            center = (bbox_min + bbox_max) / 2.0
+            scale = np.max(bbox_max - bbox_min)
+            
+            if hasattr(self.view.camera, 'rect'):
+                self.view.camera.rect = (bbox_min[0], bbox_min[1], scale, scale)
+            else:
+                if hasattr(self.view.camera, 'center'):
+                    self.view.camera.center = center
+                if hasattr(self.view.camera, 'distance'):
+                    self.view.camera.distance = max(0.1, scale * 1.5)
+                elif hasattr(self.view.camera, 'scale_factor'):
+                    self.view.camera.scale_factor = scale
+                    
+                if index == 1:
+                    self.view.camera.elevation = 30
+                    self.view.camera.azimuth = 45
+                    
+        # Update overlay content if visible
+        if hasattr(self, 'overlay_label') and self.overlay_label.isVisible():
+            self._update_overlay_content()
+            self._position_overlay()
 
-        target_pid = self.viewer_process.pid
-        hwnd_found = None
+    def _clear_visuals(self):
+        if hasattr(self, 'markers_visual') and self.markers_visual is not None:
+            try:
+                self.markers_visual.unparent()
+            except AttributeError:
+                self.markers_visual.parent = None
+            self.markers_visual = None
+        if hasattr(self, 'mesh_visual') and self.mesh_visual is not None:
+            try:
+                self.mesh_visual.unparent()
+            except AttributeError:
+                self.mesh_visual.parent = None
+            self.mesh_visual = None
+        if hasattr(self, 'cameras_visual') and self.cameras_visual is not None:
+            try:
+                self.cameras_visual.unparent()
+            except AttributeError:
+                self.cameras_visual.parent = None
+            self.cameras_visual = None
+        self._last_points = None
 
-        def enum_callback(hwnd, extra):
-            nonlocal hwnd_found
-            pid = ctypes.c_ulong()
-            ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value == target_pid:
-                if ctypes.windll.user32.IsWindowVisible(hwnd):
-                    hwnd_found = hwnd
-                    return False  # Stop enumeration
-            return True
-
-        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
-        ctypes.windll.user32.EnumWindows(EnumWindowsProc(enum_callback), 0)
-
-        if hwnd_found:
-            self.viewer_timer.stop()
-            self._embed_hwnd(hwnd_found)
-
-    def _embed_hwnd(self, hwnd):
-        self.viewer_hwnd = hwnd
+    def _read_points3d_binary(self, path_to_model_file):
+        import struct
+        import numpy as np
+        points = []
+        colors = []
+        if not os.path.exists(path_to_model_file):
+            return None, None
+        try:
+            with open(path_to_model_file, "rb") as fid:
+                num_points = struct.unpack("<Q", fid.read(8))[0]
+                for _ in range(num_points):
+                    binary_point_properties = struct.unpack("<QdddBBBd", fid.read(43))
+                    x, y, z = binary_point_properties[1:4]
+                    r, g, b = binary_point_properties[4:7]
+                    track_len = struct.unpack("<Q", fid.read(8))[0]
+                    fid.read(track_len * 8)
+                    points.append((x, y, z))
+                    colors.append((r, g, b))
+        except Exception as e:
+            self.console_text.append(f"[WARNING] Failed to parse points3D.bin: {e}")
         
-        # Win32 Style configuration for borderless child embedding
-        GWL_STYLE = -16
-        style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_STYLE)
-        style &= ~0x00C00000  # WS_CAPTION
-        style &= ~0x00040000  # WS_THICKFRAME
-        style &= ~0x00080000  # WS_SYSMENU
-        style |= 0x40000000   # WS_CHILD
-        
-        ctypes.windll.user32.SetWindowLongW(hwnd, GWL_STYLE, style)
-        ctypes.windll.user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027) # SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+        if len(points) == 0:
+            return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8)
+        return np.array(points, dtype=np.float32), np.array(colors, dtype=np.uint8)
 
-        window = QWindow.fromWinId(hwnd)
-        self._clear_viewer_container()
-        
-        self.qt_viewer_container = QWidget.createWindowContainer(window, self.viewer_widget.container_area)
-        self.viewer_widget.container_area_layout.addWidget(self.qt_viewer_container)
-        self.viewer_widget.fallback_label.hide()
+    def _read_images_binary(self, path_to_model_file):
+        import struct
+        import numpy as np
+        images_data = []
+        if not os.path.exists(path_to_model_file):
+            return images_data
+        try:
+            with open(path_to_model_file, "rb") as fid:
+                num_reg_images = struct.unpack("<Q", fid.read(8))[0]
+                for _ in range(num_reg_images):
+                    binary_image_properties = struct.unpack("<IdddddddI", fid.read(64))
+                    image_id = binary_image_properties[0]
+                    qvec = np.array(binary_image_properties[1:5])
+                    tvec = np.array(binary_image_properties[5:8])
+                    
+                    # Read image name (null-terminated string)
+                    image_name = b""
+                    while True:
+                        char = fid.read(1)
+                        if char == b"\x00" or not char:
+                            break
+                        image_name += char
+                    image_name = image_name.decode("utf-8", errors="ignore")
+                    
+                    num_points2D = struct.unpack("<Q", fid.read(8))[0]
+                    fid.read(num_points2D * 24)
+                    
+                    qw, qx, qy, qz = qvec
+                    R = np.array([
+                        [1 - 2*qy**2 - 2*qz**2, 2*qx*qy - 2*qz*qw, 2*qx*qz + 2*qy*qw],
+                        [2*qx*qy + 2*qz*qw, 1 - 2*qx**2 - 2*qz**2, 2*qy*qz - 2*qx*qw],
+                        [2*qx*qz - 2*qy*qw, 2*qy*qz + 2*qx*qw, 1 - 2*qx**2 - 2*qy**2]
+                    ])
+                    camera_center = -R.T @ tvec
+                    images_data.append({
+                        "center": camera_center,
+                        "R": R
+                    })
+        except Exception as e:
+            self.console_text.append(f"[WARNING] Failed to parse images.bin: {e}")
+        return images_data
 
-    def _clear_viewer_container(self):
-        layout = self.viewer_widget.container_area_layout
-        while layout.count() > 0:
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget:
-                if widget == self.viewer_widget.fallback_label:
-                    widget.hide()
+    def _read_ply(self, path):
+        import numpy as np
+        import struct
+        if not os.path.exists(path):
+            return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8), None
+            
+        try:
+            with open(path, 'rb') as f:
+                header_lines = []
+                while True:
+                    line = f.readline().decode('utf-8', errors='ignore').strip()
+                    header_lines.append(line)
+                    if line == 'end_header':
+                        break
+                        
+                # Parse header
+                num_vertices = 0
+                num_faces = 0
+                format_type = None
+                vertex_properties = []
+                element_type = None
+                
+                for line in header_lines:
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    if parts[0] == 'format':
+                        format_type = parts[1]
+                    elif parts[0] == 'element':
+                        element_type = parts[1]
+                        if element_type == 'vertex':
+                            num_vertices = int(parts[2])
+                        elif element_type == 'face':
+                            num_faces = int(parts[2])
+                    elif parts[0] == 'property':
+                        if element_type == 'vertex':
+                            if parts[1] == 'list':
+                                # List property under vertex element (e.g. property list uint8 uint32 view_indices)
+                                vertex_properties.append((parts[4], 'list', True, parts[2], parts[3]))
+                            else:
+                                vertex_properties.append((parts[2], parts[1], False, None, None))
+                                
+                type_map = {
+                    'char': (np.int8, 1), 'uchar': (np.uint8, 1),
+                    'short': (np.int16, 2), 'ushort': (np.uint16, 2),
+                    'int': (np.int32, 4), 'uint': (np.uint32, 4),
+                    'float': (np.float32, 4), 'double': (np.float64, 8),
+                    'int8': (np.int8, 1), 'uint8': (np.uint8, 1),
+                    'int16': (np.int16, 2), 'uint16': (np.uint16, 2),
+                    'int32': (np.int32, 4), 'uint32': (np.uint32, 4),
+                    'float32': (np.float32, 4), 'float64': (np.float64, 8)
+                }
+                
+                has_list = any(p[2] for p in vertex_properties)
+                
+                if 'binary' in format_type:
+                    if has_list:
+                        # Extract fixed size properties before the first list property
+                        fixed_properties = []
+                        list_properties = []
+                        for p in vertex_properties:
+                            if p[2]:
+                                list_properties.append(p)
+                            else:
+                                if not list_properties:
+                                    fixed_properties.append(p)
+                                    
+                        # Build struct character mapping
+                        fmt_chars = []
+                        type_char_map = {
+                            'char': 'b', 'uchar': 'B',
+                            'short': 'h', 'ushort': 'H',
+                            'int': 'i', 'uint': 'I',
+                            'float': 'f', 'double': 'd',
+                            'int8': 'b', 'uint8': 'B',
+                            'int16': 'h', 'uint16': 'H',
+                            'int32': 'i', 'uint32': 'I',
+                            'float32': 'f', 'float64': 'd'
+                        }
+                        
+                        fixed_size = 0
+                        type_sizes = {
+                            'b': 1, 'B': 1, 'h': 2, 'H': 2, 'i': 4, 'I': 4, 'f': 4, 'd': 8
+                        }
+                        
+                        for name, t, _, _, _ in fixed_properties:
+                            c = type_char_map[t]
+                            fmt_chars.append(c)
+                            fixed_size += type_sizes[c]
+                            
+                        fixed_format = '<' + ''.join(fmt_chars)
+                        fixed_struct = struct.Struct(fixed_format)
+                        
+                        points = np.zeros((num_vertices, 3), dtype=np.float32)
+                        colors = np.ones((num_vertices, 3), dtype=np.uint8) * 255
+                        
+                        names = [p[0] for p in fixed_properties]
+                        x_idx = names.index('x') if 'x' in names else -1
+                        y_idx = names.index('y') if 'y' in names else -1
+                        z_idx = names.index('z') if 'z' in names else -1
+                        
+                        r_name = 'red' if 'red' in names else ('r' if 'r' in names else None)
+                        g_name = 'green' if 'green' in names else ('g' if 'g' in names else None)
+                        b_name = 'blue' if 'blue' in names else ('b' if 'b' in names else None)
+                        
+                        r_idx = names.index(r_name) if r_name else -1
+                        g_idx = names.index(g_name) if g_name else -1
+                        b_idx = names.index(b_name) if b_name else -1
+                        
+                        data = f.read()
+                        offset = 0
+                        
+                        for i in range(num_vertices):
+                            val = fixed_struct.unpack_from(data, offset)
+                            if x_idx != -1: points[i, 0] = val[x_idx]
+                            if y_idx != -1: points[i, 1] = val[y_idx]
+                            if z_idx != -1: points[i, 2] = val[z_idx]
+                            
+                            if r_idx != -1: colors[i, 0] = val[r_idx]
+                            if g_idx != -1: colors[i, 1] = val[g_idx]
+                            if b_idx != -1: colors[i, 2] = val[b_idx]
+                            
+                            offset += fixed_size
+                            
+                            # Skip list properties dynamically
+                            for name, _, _, count_type, item_type in list_properties:
+                                c_char = type_char_map[count_type]
+                                c_size = type_sizes[c_char]
+                                count = struct.unpack_from('<' + c_char, data, offset)[0]
+                                offset += c_size
+                                
+                                i_char = type_char_map[item_type]
+                                i_size = type_sizes[i_char]
+                                offset += count * i_size
+                                
+                        faces = None
+                        if num_faces > 0:
+                            try:
+                                face_bytes = data[offset:]
+                                if len(face_bytes) >= num_faces * 13:
+                                    dt = np.dtype([('count', np.uint8), ('indices', np.int32, 3)])
+                                    face_data = np.frombuffer(face_bytes[:num_faces * 13], dtype=dt)
+                                    faces = face_data['indices'].copy()
+                            except Exception as face_err:
+                                self.console_text.append(f"[WARNING] Failed to parse PLY faces: {face_err}")
+                                
+                        return points, colors, faces
+                    else:
+                        vertex_dtype = []
+                        for name, t, _, _, _ in vertex_properties:
+                            dtype_t, _ = type_map[t]
+                            vertex_dtype.append((name, dtype_t))
+                            
+                        vertex_struct_dtype = np.dtype(vertex_dtype)
+                        vertex_data = np.frombuffer(f.read(num_vertices * vertex_struct_dtype.itemsize), dtype=vertex_struct_dtype)
+                        
+                        points = np.zeros((num_vertices, 3), dtype=np.float32)
+                        points[:, 0] = vertex_data['x']
+                        points[:, 1] = vertex_data['y']
+                        points[:, 2] = vertex_data['z']
+                        
+                        colors = np.ones((num_vertices, 3), dtype=np.uint8) * 255
+                        color_keys = [k for k in ['red', 'green', 'blue', 'r', 'g', 'b'] if k in vertex_data.dtype.names]
+                        if len(color_keys) >= 3:
+                            r_key = 'red' if 'red' in vertex_data.dtype.names else 'r'
+                            g_key = 'green' if 'green' in vertex_data.dtype.names else 'g'
+                            b_key = 'blue' if 'blue' in vertex_data.dtype.names else 'b'
+                            colors[:, 0] = vertex_data[r_key]
+                            colors[:, 1] = vertex_data[g_key]
+                            colors[:, 2] = vertex_data[b_key]
+                            
+                        faces = None
+                        if num_faces > 0:
+                            try:
+                                face_bytes = f.read()
+                                if len(face_bytes) >= num_faces * 13:
+                                    dt = np.dtype([('count', np.uint8), ('indices', np.int32, 3)])
+                                    face_data = np.frombuffer(face_bytes[:num_faces * 13], dtype=dt)
+                                    faces = face_data['indices'].copy()
+                            except Exception as face_err:
+                                self.console_text.append(f"[WARNING] Failed to parse PLY faces: {face_err}")
+                                
+                        return points, colors, faces
                 else:
-                    widget.deleteLater()
+                    # ASCII format
+                    lines = f.read().decode('utf-8', errors='ignore').splitlines()
+                    points = []
+                    colors = []
+                    faces = []
+                    
+                    for i in range(num_vertices):
+                        parts = lines[i].split()
+                        if len(parts) >= 3:
+                            points.append([float(parts[0]), float(parts[1]), float(parts[2])])
+                            if len(parts) >= 6:
+                                colors.append([int(parts[3]), int(parts[4]), int(parts[5])])
+                            else:
+                                colors.append([255, 255, 255])
+                                 
+                    start_face_idx = num_vertices
+                    for i in range(num_faces):
+                        if (start_face_idx + i) < len(lines):
+                            parts = lines[start_face_idx + i].split()
+                            if len(parts) >= 4 and int(parts[0]) == 3:
+                                faces.append([int(parts[1]), int(parts[2]), int(parts[3])])
+                                 
+                    points = np.array(points, dtype=np.float32)
+                    colors = np.array(colors, dtype=np.uint8)
+                    faces = np.array(faces, dtype=np.int32) if faces else None
+                    return points, colors, faces
+        except Exception as e:
+            self.console_text.append(f"[WARNING] Failed to parse PLY file: {e}")
+            return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8), None
+
+    def _read_obj(self, obj_path):
+        import numpy as np
+        temp_v = []
+        temp_vt = []
+        unpacked_map = {}
+        unpacked_v = []
+        unpacked_vt = []
+        faces = []
+        texture_filename = None
+        
+        # Parse companion MTL for texture filename
+        mtl_path = obj_path.replace('.obj', '.mtl')
+        if os.path.exists(mtl_path):
+            try:
+                with open(mtl_path, 'r') as f:
+                    for line in f:
+                        if line.strip().startswith('map_Kd'):
+                            parts = line.strip().split(None, 1)
+                            if len(parts) > 1:
+                                texture_filename = parts[1].strip()
+                                break
+            except Exception as e:
+                self.console_text.append(f"[WARNING] Failed to parse MTL file: {e}")
+                
+        # Parse OBJ file
+        try:
+            with open(obj_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    if parts[0] == 'v':
+                        temp_v.append([float(parts[1]), float(parts[2]), float(parts[3])])
+                    elif parts[0] == 'vt':
+                        temp_vt.append([float(parts[1]), float(parts[2])])
+                    elif parts[0] == 'f':
+                        face_indices = []
+                        for part in parts[1:4]:
+                            subparts = part.split('/')
+                            v_idx = int(subparts[0]) - 1
+                            vt_idx = int(subparts[1]) - 1 if len(subparts) > 1 and subparts[1] else -1
+                            
+                            key = (v_idx, vt_idx)
+                            if key not in unpacked_map:
+                                new_idx = len(unpacked_v)
+                                unpacked_map[key] = new_idx
+                                unpacked_v.append(temp_v[v_idx])
+                                if vt_idx != -1 and vt_idx < len(temp_vt):
+                                    unpacked_vt.append(temp_vt[vt_idx])
+                                else:
+                                    unpacked_vt.append([0.0, 0.0])
+                            face_indices.append(unpacked_map[key])
+                        faces.append(face_indices)
+        except Exception as e:
+            self.console_text.append(f"[WARNING] Failed to parse OBJ file: {e}")
+            
+        vertices = np.array(unpacked_v, dtype=np.float32)
+        texcoords = np.array(unpacked_vt, dtype=np.float32)
+        if len(texcoords) > 0:
+            # Flip V coordinate for OpenGL/VisPy compatibility
+            texcoords[:, 1] = 1.0 - texcoords[:, 1]
+        faces = np.array(faces, dtype=np.int32)
+        
+        # Locate texture file
+        texture_path = None
+        if texture_filename:
+            potential_paths = [
+                os.path.join(os.path.dirname(obj_path), texture_filename),
+                os.path.join(os.path.dirname(obj_path), os.path.basename(texture_filename))
+            ]
+            for path in potential_paths:
+                if os.path.exists(path):
+                    texture_path = path
+                    break
+        else:
+            dirname = os.path.dirname(obj_path)
+            if os.path.exists(dirname):
+                for filename in os.listdir(dirname):
+                    if filename.lower().endswith(('.png', '.jpg', '.jpeg')) and 'texture' in filename.lower():
+                        texture_path = os.path.join(dirname, filename)
+                        break
+                         
+        return vertices, texcoords, faces, texture_path
+
+    def _draw_cameras(self, cameras_data):
+        import numpy as np
+        if not cameras_data:
+            return
+            
+        d = 0.15 # depth of frustum
+        w = 0.12 # half-width of image plane
+        h = 0.08 # half-height of image plane
+        
+        local_corners = np.array([
+            [-w, -h, d],
+            [ w, -h, d],
+            [ w,  h, d],
+            [-w,  h, d]
+        ])
+        
+        line_vertices = []
+        for cam in cameras_data:
+            C = cam["center"]
+            R = cam["R"]
+            R_cw = R.T
+            
+            world_corners = []
+            for corner in local_corners:
+                world_corners.append(R_cw @ corner + C)
+                
+            # Line segments connections
+            for wc in world_corners:
+                line_vertices.append(C)
+                line_vertices.append(wc)
+                
+            line_vertices.append(world_corners[0])
+            line_vertices.append(world_corners[1])
+            
+            line_vertices.append(world_corners[1])
+            line_vertices.append(world_corners[2])
+            
+            line_vertices.append(world_corners[2])
+            line_vertices.append(world_corners[3])
+            
+            line_vertices.append(world_corners[3])
+            line_vertices.append(world_corners[0])
+            
+        if line_vertices:
+            pos = np.array(line_vertices, dtype=np.float32)
+            self.cameras_visual = scene.visuals.Line(
+                pos=pos,
+                color='#00E676',
+                width=1.5,
+                connect='segments'
+            )
+            self.cameras_visual.parent = self.view.scene
+
+    def _render_in_vispy(self, file_path, mode):
+        import numpy as np
+        from PIL import Image
+        
+        self._clear_visuals()
+        
+        points = None
+        colors = None
+        faces = None
+        texcoords = None
+        texture_path = None
+        
+        if mode == 0:
+            # Sparse Point Cloud & Cameras
+            output_dir = get_reconstruction_out_dir()
+            points_bin = os.path.join(output_dir, "colmap", "sparse", "points3D.bin")
+            if not os.path.exists(points_bin):
+                points_bin = os.path.join(output_dir, "colmap", "sparse", "0", "points3D.bin")
+                
+            if os.path.exists(points_bin):
+                points, colors = self._read_points3d_binary(points_bin)
+            else:
+                scene_ply = os.path.join(output_dir, "mvs", "scene.ply")
+                if os.path.exists(scene_ply):
+                    points, colors, _ = self._read_ply(scene_ply)
+                    
+            images_bin = os.path.join(output_dir, "colmap", "sparse", "images.bin")
+            if not os.path.exists(images_bin):
+                images_bin = os.path.join(output_dir, "colmap", "sparse", "0", "images.bin")
+                
+            if os.path.exists(images_bin):
+                cameras_data = self._read_images_binary(images_bin)
+                if cameras_data:
+                    self._draw_cameras(cameras_data)
+                    
+        elif mode == 1:
+            # Dense Point Cloud
+            ply_path = file_path.replace(".mvs", ".ply")
+            if not os.path.exists(ply_path):
+                ply_path = file_path
+            if os.path.exists(ply_path):
+                points, colors, _ = self._read_ply(ply_path)
+                
+        elif mode == 2:
+            # Textured Mesh
+            if file_path.lower().endswith(".obj"):
+                vertices, texcoords, faces, texture_path = self._read_obj(file_path)
+                points = vertices
+            elif file_path.lower().endswith(".ply"):
+                points, colors, faces = self._read_ply(file_path)
+            else:
+                dirname = os.path.dirname(file_path)
+                cand_obj = os.path.join(dirname, "scene_dense_mesh_texture.obj")
+                obj_cand = file_path.replace(".ply", ".obj").replace(".mvs", ".obj")
+                if os.path.exists(cand_obj):
+                    vertices, texcoords, faces, texture_path = self._read_obj(cand_obj)
+                    points = vertices
+                elif os.path.exists(obj_cand):
+                    vertices, texcoords, faces, texture_path = self._read_obj(obj_cand)
+                    points = vertices
+                else:
+                    points, colors, faces = self._read_ply(file_path)
+                    
+        if mode == 2 and faces is not None and len(faces) > 0:
+            mesh_colors = None
+            if colors is not None and len(colors) > 0:
+                mesh_colors = colors.astype(np.float32) / 255.0
+                
+            self.mesh_visual = scene.visuals.Mesh(
+                vertices=points,
+                faces=faces,
+                vertex_colors=mesh_colors,
+                color='white',
+                parent=self.view.scene
+            )
+            
+            if texture_path and texcoords is not None and len(texcoords) > 0:
+                try:
+                    texture_image = np.array(Image.open(texture_path))
+                    from vispy.visuals.filters import TextureFilter
+                    tex_filter = TextureFilter(texture_image, texcoords)
+                    self.mesh_visual.attach(tex_filter)
+                except Exception as tex_err:
+                    self.console_text.append(f"[WARNING] Could not apply texture filter: {tex_err}")
+                    
+        elif points is not None and len(points) > 0:
+            marker_colors = None
+            if colors is not None and len(colors) > 0:
+                marker_colors = colors.astype(np.float32) / 255.0
+                if marker_colors.shape[1] == 3:
+                    alphas = np.ones((marker_colors.shape[0], 1), dtype=np.float32)
+                    marker_colors = np.hstack([marker_colors, alphas])
+            else:
+                marker_colors = 'white'
+                
+            self.markers_visual = scene.visuals.Markers(parent=self.view.scene)
+            self.markers_visual.set_data(
+                pos=points,
+                face_color=marker_colors,
+                size=2,
+                edge_width=0
+            )
+            
+        else:
+            self.canvas.native.hide()
+            self.viewer_widget.fallback_label.setText("No valid 3D points or faces could be parsed.")
+            self.viewer_widget.fallback_label.show()
+            return
+            
+        # Store points reference for camera switches
+        self._last_points = points
+        
+        self.canvas.native.show()
+        self.viewer_widget.fallback_label.hide()
+        
+        # Center and zoom camera
+        bbox_min = np.min(points, axis=0)
+        bbox_max = np.max(points, axis=0)
+        center = (bbox_min + bbox_max) / 2.0
+        scale = np.max(bbox_max - bbox_min)
+        
+        self.view.camera.center = center
+        self.view.camera.distance = max(0.1, scale * 1.5)
+        # Apply turntable elevation/azimuth if selected
+        if self.viewer_widget.cam_select.currentIndex() == 1:
+            self.view.camera.elevation = 30
+            self.view.camera.azimuth = 45
+            
+        self.canvas.update()
 
     def _reload_viewer(self, file_path):
-        self._terminate_viewer()
-        
         if not os.path.exists(file_path):
             self.viewer_widget.fallback_label.setText(f"File not found: {os.path.basename(file_path)}\nRun reconstruction to generate this file first.")
             self.viewer_widget.fallback_label.show()
             self.console_text.append(f"[WARNING] 3D file not found: {file_path}")
             return
             
-        viewer_exe = os.path.join(get_base_dir(), "backend_bin", "openMVS", "Viewer.exe")
-        if not os.path.exists(viewer_exe):
-            self.console_text.append(f"[ERROR] Viewer.exe not found at {viewer_exe}")
-            return
-            
-        self.viewer_widget.fallback_label.setText("Loading 3D scene in embedded view...")
+        mode = self.viewer_widget.mode_select.currentIndex()
+        mode_names = ["Sparse Point Cloud", "Dense Point Cloud", "Textured Mesh"]
+        mode_name = mode_names[mode] if mode < len(mode_names) else "3D Scene"
+        
+        self.viewer_widget.fallback_label.setText(f"Loading {mode_name}...\n(This may take a few seconds for large models)")
         self.viewer_widget.fallback_label.show()
+        if self.canvas and self.canvas.native:
+            self.canvas.native.hide()
+            
+        # Force Qt event loop to repaint UI before we enter the heavy OBJ/PLY parsing
+        QApplication.processEvents()
         
         try:
-            import sys
-            import subprocess
-            creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-            self.viewer_process = subprocess.Popen(
-                [viewer_exe, file_path],
-                cwd=os.path.dirname(file_path),
-                creationflags=creationflags
-            )
-            self.viewer_timer.start()
-            self.console_text.append(f"[INFO] Launched Viewer.exe on {os.path.basename(file_path)}")
+            self._render_in_vispy(file_path, mode)
+            self.console_text.append(f"[INFO] Successfully rendered {os.path.basename(file_path)} in VisPy canvas.")
         except Exception as e:
-            self.console_text.append(f"[ERROR] Failed to start Viewer.exe: {e}")
- 
-    def _launch_external_viewer(self, file_path):
-        if not os.path.exists(file_path):
-            self.console_text.append(f"[WARNING] File not found for external viewer: {file_path}")
-            return
-            
-        viewer_exe = os.path.join(get_base_dir(), "backend_bin", "openMVS", "Viewer.exe")
-        import sys
-        import subprocess
-        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-        try:
-            subprocess.Popen(
-                [viewer_exe, file_path],
-                cwd=os.path.dirname(file_path),
-                creationflags=creationflags
-            )
-            self.console_text.append(f"[INFO] Launched external Viewer.exe window on {os.path.basename(file_path)}")
-        except Exception as e:
-            self.console_text.append(f"[ERROR] Failed to launch external viewer: {e}")
+            self.console_text.append(f"[ERROR] VisPy rendering failed: {e}")
+            self.viewer_widget.fallback_label.setText(f"Rendering failed:\n{e}")
+            self.viewer_widget.fallback_label.show()
+            if self.canvas and self.canvas.native:
+                self.canvas.native.hide()
 
     def _terminate_viewer(self):
-        self.viewer_timer.stop()
-        if self.viewer_process:
-            try:
-                self.viewer_process.terminate()
-                self.viewer_process.wait(timeout=1.0)
-            except Exception:
-                try:
-                    self.viewer_process.kill()
-                except Exception:
-                    pass
-            self.viewer_process = None
-        self.viewer_hwnd = None
+        self._clear_visuals()
         self.viewer_widget.fallback_label.setText("3D Viewer Idle")
         self.viewer_widget.fallback_label.show()
+        if self.canvas and self.canvas.native:
+            self.canvas.native.hide()
+
+    def _choose_bg_color(self):
+        from PySide6.QtGui import QColor
+        current_color = QColor(self.viewport_bg_color)
+        color = QColorDialog.getColor(current_color, self, "Select Viewport Background Color")
+        if color.isValid():
+            hex_color = color.name()
+            self.viewport_bg_color = hex_color
+            if self.canvas:
+                self.canvas.bgcolor = hex_color
+                self.canvas.update()
 
     def closeEvent(self, event):
         self._terminate_viewer()
@@ -1972,6 +2847,41 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         super().closeEvent(event)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_overlay()
+
+    def _position_overlay(self):
+        if hasattr(self, 'overlay_label') and self.overlay_label.isVisible():
+            container_w = self.viewer_widget.container_area.width()
+            container_h = self.viewer_widget.container_area.height()
+            
+            label_w = self.overlay_label.width()
+            label_h = self.overlay_label.height()
+            if label_w <= 16 or label_h <= 16:
+                label_size = self.overlay_label.sizeHint()
+                label_w = label_size.width()
+                label_h = label_size.height()
+                
+            margin = 15
+            x = container_w - label_w - margin
+            y = container_h - label_h - margin
+            self.overlay_label.setGeometry(x, y, label_w, label_h)
+            self.overlay_label.raise_()
+
+    def _on_show_controls_changed(self, state):
+        visible = (state == Qt.Checked.value or state == 2)
+        self.overlay_label.setVisible(visible)
+        if visible:
+            self._update_overlay_content()
+            self._position_overlay()
+
+    def _update_overlay_content(self):
+        index = self.viewer_widget.cam_select.currentIndex()
+        controls_text = CAMERA_CONTROLS.get(index, "")
+        self.overlay_label.setText(controls_text)
+        self.overlay_label.adjustSize()
 
     def _upload_to_proximap(self):
         output_dir = get_reconstruction_out_dir()
@@ -2045,7 +2955,29 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    # Fix taskbar icon grouping on Windows
+    if sys.platform == 'win32':
+        import ctypes
+        myappid = 'believegamesstudios.proximap.photogrammetry.1.0'
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except Exception:
+            pass
+
     app = QApplication(sys.argv)
+    
+    # Resolve app icon path
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    icon_path = os.path.join(base_dir, "public", "app_icon.png")
+    if not os.path.exists(icon_path):
+        icon_path = os.path.join(base_dir, "app_icon.ico")
+        
+    if os.path.exists(icon_path):
+        app_icon = QIcon(icon_path)
+        app.setWindowIcon(app_icon)
+        
     window = MainWindow()
+    if os.path.exists(icon_path):
+        window.setWindowIcon(QIcon(icon_path))
     window.show()
     sys.exit(app.exec())

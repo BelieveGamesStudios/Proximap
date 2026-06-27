@@ -81,8 +81,7 @@ $mvsExes = @(
     "InterfaceCOLMAP.exe",
     "ReconstructMesh.exe",
     "RefineMesh.exe",
-    "TextureMesh.exe",
-    "Viewer.exe"
+    "TextureMesh.exe"
 )
 foreach ($exe in $mvsExes) {
     if (Test-Path "backend_bin/openMVS/$exe") {
