@@ -65,6 +65,7 @@ CAMERA_CONTROLS = {
        "• Left Drag: Look around (pitch/yaw)<br>"
        "• WASD / Arrow Keys: Fly around<br>"
        "• Space / C: Fly up / down<br>"
+       "• Q / E: Roll camera left / right<br>"
        "• Mouse Scroll: Adjust movement speed",
     3: "<b>Pan-Zoom Camera Controls:</b><br>"
        "• Left Drag: Pan 2D boundaries<br>"
