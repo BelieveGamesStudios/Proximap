@@ -1135,6 +1135,9 @@ class MainWindow(QMainWindow):
             "Force CPU Fallback"
         ])
         
+        self.plain_surfaces_checkbox = QCheckBox("Surface is flat/smooth", step2_box)
+        self.plain_surfaces_checkbox.setChecked(False)
+        
         self.process_btn = QPushButton("▶  Start Processing", step2_box)
         self.process_btn.setObjectName("ProcessBtn")
         self.process_btn.setEnabled(False)
@@ -1152,6 +1155,7 @@ class MainWindow(QMainWindow):
         step2_layout.addWidget(self.quality_combo)
         step2_layout.addWidget(self.gpu_label)
         step2_layout.addWidget(self.gpu_combo)
+        step2_layout.addWidget(self.plain_surfaces_checkbox)
         step2_layout.addWidget(self.process_btn)
         step2_layout.addWidget(self.progress_bar)
         step2_layout.addWidget(self.status_label)
@@ -1807,6 +1811,7 @@ class MainWindow(QMainWindow):
         self.bg_remove_btn.setEnabled(False)
         self.quality_combo.setEnabled(False)
         self.gpu_combo.setEnabled(False)
+        self.plain_surfaces_checkbox.setEnabled(False)
         
         # Temp output dir inside the workspace or local appdata if not writable
         output_dir = get_reconstruction_out_dir()
@@ -1817,12 +1822,14 @@ class MainWindow(QMainWindow):
         gpu_modes = ["auto", "force_gpu", "force_cpu"]
         quality_preset = quality_presets[self.quality_combo.currentIndex()]
         gpu_mode = gpu_modes[self.gpu_combo.currentIndex()]
+        has_plain = self.plain_surfaces_checkbox.isChecked()
 
         self.worker = PipelineWorker(
             os.path.dirname(self.image_list[0]), 
             output_dir, 
             quality_preset=quality_preset, 
             gpu_mode=gpu_mode, 
+            has_plain_surfaces=has_plain,
             parent=self
         )
         self.worker.progress_changed.connect(self._on_progress_changed)
@@ -1859,6 +1866,7 @@ class MainWindow(QMainWindow):
         self.view_scene_btn.setEnabled(True)
         self.quality_combo.setEnabled(True)
         self.gpu_combo.setEnabled(True)
+        self.plain_surfaces_checkbox.setEnabled(True)
         self.bg_remove_btn.setEnabled(len(self.image_list) > 0)
         
         if success:

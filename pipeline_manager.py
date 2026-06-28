@@ -50,12 +50,13 @@ class PipelineWorker(QThread):
     log_message = Signal(str)
     finished = Signal(bool, str)
 
-    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", parent=None):
+    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, parent=None):
         super().__init__(parent)
         self.image_dir = image_dir
         self.output_dir = output_dir
         self.quality_preset = quality_preset
         self.gpu_mode = gpu_mode
+        self.has_plain_surfaces = has_plain_surfaces
         self.is_running = True
         self.toolchain_map = self._load_toolchain_map()
         self.last_output_lines = []
@@ -116,6 +117,7 @@ class PipelineWorker(QThread):
     def run(self):
         try:
             self.status_changed.emit("Initializing Pipeline...")
+            self.log_message.emit(f"[INFO] Plain/Smooth Surfaces optimization: {'Enabled' if self.has_plain_surfaces else 'Disabled'}")
             self.progress_changed.emit(5)
             time.sleep(0.5)
 
@@ -407,7 +409,7 @@ class PipelineWorker(QThread):
             colmap_max_num_features = 8192
             colmap_max_num_matches = 16384
             colmap_first_octave = -1
-            guided_matching = "0"
+            guided_matching = "1" if self.has_plain_surfaces else "0"
             nndr_ratio     = "0.8"
             ba_global_max_refinements = 5
             run_bundle_adjuster = False
@@ -505,6 +507,14 @@ class PipelineWorker(QThread):
             "--SiftExtraction.first_octave", str(colmap_first_octave),
             "--FeatureExtraction.num_threads", str(num_threads),
         ]
+        if self.has_plain_surfaces:
+            # Tune SIFT thresholds to detect low-contrast/weak features on smooth surfaces
+            additional_flags = [
+                "--SiftExtraction.peak_threshold", "0.002",
+                "--SiftExtraction.edge_threshold", "15"
+            ]
+            cmd_extract_gpu.extend(additional_flags)
+            cmd_extract_cpu.extend(additional_flags)
         self._feature_counts = []
         if not self._run_with_gpu_fallback(
             cmd_extract_gpu, cmd_extract_cpu, timeout=3600.0, env=colmap_env,
@@ -533,7 +543,7 @@ class PipelineWorker(QThread):
             "--FeatureMatching.use_gpu", "1",
             "--FeatureMatching.guided_matching", guided_matching,
             "--SiftMatching.max_ratio", nndr_ratio,
-            "--SiftMatching.max_num_matches", str(colmap_max_num_matches),
+            "--FeatureMatching.max_num_matches", str(colmap_max_num_matches),
             "--FeatureMatching.num_threads", str(num_threads),
         ]
         cmd_match_cpu = [
@@ -542,7 +552,7 @@ class PipelineWorker(QThread):
             "--FeatureMatching.use_gpu", "0",
             "--FeatureMatching.guided_matching", guided_matching,
             "--SiftMatching.max_ratio", nndr_ratio,
-            "--SiftMatching.max_num_matches", str(colmap_max_num_matches),
+            "--FeatureMatching.max_num_matches", str(colmap_max_num_matches),
             "--FeatureMatching.num_threads", str(num_threads),
         ]
         self._match_counts = []
