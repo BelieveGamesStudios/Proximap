@@ -108,10 +108,28 @@ class PipelineWorker(QThread):
         if os.path.exists(map_path):
             try:
                 with open(map_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    return self._normalize_toolchain_map(json.load(f))
             except Exception as e:
                 self.log_message.emit(f"Error reading toolchain_map.json: {e}")
         return {}
+
+    def _normalize_toolchain_map(self, toolchain_map: dict) -> dict:
+        """Resolve Windows .exe mappings to extensionless macOS binaries when present."""
+        if sys.platform == "win32":
+            return toolchain_map
+
+        normalized = {}
+        for group, binaries in toolchain_map.items():
+            if not isinstance(binaries, dict):
+                normalized[group] = binaries
+                continue
+
+            normalized[group] = {}
+            for name, rel_path in binaries.items():
+                mac_rel_path = rel_path[:-4] if rel_path.lower().endswith(".exe") else rel_path
+                mac_abs_path = os.path.join(get_base_dir(), mac_rel_path)
+                normalized[group][name] = mac_rel_path if os.path.exists(mac_abs_path) else rel_path
+        return normalized
 
     def run(self):
         try:
@@ -177,7 +195,8 @@ class PipelineWorker(QThread):
         colmap_plugins = os.path.join(colmap_dir, "plugins")
         
         env = os.environ.copy()
-        env["QT_PLUGIN_PATH"] = colmap_plugins
+        if os.path.isdir(colmap_plugins):
+            env["QT_PLUGIN_PATH"] = colmap_plugins
         # Remove any conflicting Qt env vars from the parent process
         env.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
         return env
@@ -545,6 +564,24 @@ class PipelineWorker(QThread):
             line_parser=self._parse_matching_line
         ):
             return False
+
+        db_stats = self._query_colmap_database_stats(database_path)
+        if self._total_images > 1 and db_stats["num_pairs"] == 0:
+            self.log_message.emit(
+                "[WARNING] Feature matching produced 0 verified pairs. "
+                "Retrying with CPU matcher and relaxed matching thresholds..."
+            )
+            self._clear_colmap_match_tables(database_path)
+            relaxed_cpu_match = list(cmd_match_cpu)
+            self._set_colmap_option(relaxed_cpu_match, "--FeatureMatching.guided_matching", "1")
+            self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_ratio", "0.95")
+            self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_distance", "0.9")
+            self._using_gpu_sift = False
+            if not self._run_process_realtime(
+                relaxed_cpu_match, timeout=3600.0, env=colmap_env,
+                line_parser=self._parse_matching_line
+            ):
+                return False
             
         # Query database for exact matching stats
         db_stats = self._query_colmap_database_stats(database_path)
@@ -952,6 +989,11 @@ class PipelineWorker(QThread):
 
     def _run_with_gpu_fallback(self, cmd_gpu: list, cmd_cpu: list, timeout: float, cwd=None, env=None, line_parser=None) -> bool:
         """Try GPU first, fall back to CPU if GPU fails."""
+        if self.gpu_mode == "force_cpu":
+            self.log_message.emit("[INFO] CPU-only mode selected. Skipping GPU execution.")
+            self._using_gpu_sift = False
+            return self._run_process_realtime(cmd_cpu, timeout=timeout, cwd=cwd, env=env, line_parser=line_parser)
+
         self.log_message.emit("[INFO] Attempting GPU-accelerated execution (OpenGL)...")
         self._using_gpu_sift = True
         if self._run_process_realtime(cmd_gpu, timeout=timeout, cwd=cwd, env=env, line_parser=line_parser):
@@ -959,6 +1001,30 @@ class PipelineWorker(QThread):
         self.log_message.emit("[WARNING] GPU execution failed. Falling back to CPU-only mode...")
         self._using_gpu_sift = False
         return self._run_process_realtime(cmd_cpu, timeout=timeout, cwd=cwd, env=env, line_parser=line_parser)
+
+    def _set_colmap_option(self, cmd: list, option: str, value: str):
+        """Set or append a COLMAP command-line option in a mutable command list."""
+        try:
+            index = cmd.index(option)
+            if index + 1 < len(cmd):
+                cmd[index + 1] = value
+                return
+        except ValueError:
+            pass
+        cmd.extend([option, value])
+
+    def _clear_colmap_match_tables(self, database_path: str):
+        """Clear existing COLMAP match rows so a retry recomputes all pairs."""
+        try:
+            import sqlite3
+            conn = sqlite3.connect(database_path)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM matches")
+            cursor.execute("DELETE FROM two_view_geometries")
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            self.log_message.emit(f"[WARNING] Could not clear COLMAP match tables before retry: {e}")
 
     def _select_best_sparse_model(self, sparse_dir: str) -> str:
         """Find the sparse model subdirectory with the most registered images."""
