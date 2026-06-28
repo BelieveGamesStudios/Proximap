@@ -2191,6 +2191,7 @@ class MainWindow(QMainWindow):
             try:
                 from vispy.util.keys import SPACE
                 self.view.camera._keymap[SPACE] = (1, 3)
+                self.view.camera.auto_roll = False
             except Exception:
                 pass
         elif index == 3:
