@@ -1135,7 +1135,7 @@ class MainWindow(QMainWindow):
             "Force CPU Fallback"
         ])
         
-        self.plain_surfaces_checkbox = QCheckBox("Surface is flat/smooth", step2_box)
+        self.plain_surfaces_checkbox = QCheckBox("Surface is plain/smooth", step2_box)
         self.plain_surfaces_checkbox.setChecked(False)
         
         self.process_btn = QPushButton("▶  Start Processing", step2_box)
