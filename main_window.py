@@ -248,8 +248,8 @@ class ViewerWrapperWidget(QFrame):
         control_layout = QHBoxLayout(self.control_bar)
         control_layout.setContentsMargins(10, 5, 10, 5)
         
-        title_label = QLabel("3D Spatial Visualization", self.control_bar)
-        title_label.setStyleSheet("font-weight: bold; color: #ffffff; font-size: 13px; margin-left: 5px;")
+        self.title_label = QLabel("3D Spatial Visualization", self.control_bar)
+        self.title_label.setStyleSheet("font-weight: bold; color: #ffffff; font-size: 13px; margin-left: 5px;")
         
         # Dropdown File Menu next to title
         self.file_menu_btn = QPushButton("File ▾", self.control_bar)
@@ -350,7 +350,7 @@ class ViewerWrapperWidget(QFrame):
         self.reload_btn = QPushButton("Reload", self.control_bar)
         self.reload_btn.setStyleSheet("font-size: 11px; padding: 4px 8px; font-weight: normal;")
         
-        control_layout.addWidget(title_label)
+        control_layout.addWidget(self.title_label)
         control_layout.addWidget(self.file_menu_btn)
         control_layout.addStretch()
         control_layout.addWidget(self.cam_select)
@@ -381,6 +381,25 @@ class ViewerWrapperWidget(QFrame):
         self.cam_select.currentIndexChanged.connect(self.camera_changed.emit)
         
         self.current_mvs_dir = None
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        w = self.width()
+        if w < 720:
+            self.title_label.setVisible(False)
+        else:
+            self.title_label.setVisible(True)
+            
+        if w < 600:
+            self.show_controls_cb.setText("Controls")
+            self.cam_select.setMinimumWidth(100)
+            self.mode_select.setMinimumWidth(140)
+            self.bg_btn.setText("Color")
+        else:
+            self.show_controls_cb.setText("Show Controls")
+            self.cam_select.setMinimumWidth(150)
+            self.mode_select.setMinimumWidth(200)
+            self.bg_btn.setText("BG Color")
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
