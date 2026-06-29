@@ -12,7 +12,7 @@ Proximap is an intuitive desktop application built in Python and PySide6 that pr
 * **Hardware Profiler**: Automatically profiles local system resources (RAM size, discrete GPU availability) and sets fallback limits for low-resource environments.
 * **Reconstruction Quality Presets**: Select from Preview, Medium, High, or Ultra configuration presets to balance speed and fidelity.
 * **Interactive Embedded 3D Viewer**: Interactively view reconstructed stages (Sparse Cloud & Cameras, Dense Cloud, and Textured Mesh) embedded directly inside the GUI application.
-* **Multi-Format Export**: Export final textured 3D models directly as `.obj`, `.glb`, or `.ply`.
+* **Multi-Format Export**: Export final textured 3D models directly as `.obj`, `.glb`, or `.ply`. GLB export and upload conversion are handled in-app without requiring a global `obj2gltf` install.
 
 ---
 
