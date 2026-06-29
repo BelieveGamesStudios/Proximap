@@ -95,6 +95,12 @@ foreach ($exe in $mvsExes) {
 Write-Host "  Copying toolchain map configuration..." -ForegroundColor DarkGray
 Copy-Item -Path "toolchain_map.json" -Destination "dist/Proximap/"
 
+# Copy application icon for runtime usage
+if (Test-Path "app_icon.ico") {
+    Write-Host "  Copying app_icon.ico to dist directory..." -ForegroundColor DarkGray
+    Copy-Item -Path "app_icon.ico" -Destination "dist/Proximap/"
+}
+
 # Copy offline background removal models
 Write-Host "  Copying offline background removal models..." -ForegroundColor DarkGray
 if (Test-Path "models") {

@@ -2989,10 +2989,10 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     
     # Resolve app icon path
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    icon_path = os.path.join(base_dir, "public", "app_icon.png")
+    base_dir = get_base_dir()
+    icon_path = os.path.join(base_dir, "app_icon.ico")
     if not os.path.exists(icon_path):
-        icon_path = os.path.join(base_dir, "app_icon.ico")
+        icon_path = os.path.join(base_dir, "public", "app_icon.png")
         
     if os.path.exists(icon_path):
         app_icon = QIcon(icon_path)
