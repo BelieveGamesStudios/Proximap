@@ -1,5 +1,7 @@
 import os
 import sys
+import json
+import struct
 import subprocess
 import ctypes
 from PySide6.QtWidgets import (
@@ -1983,16 +1985,12 @@ class MainWindow(QMainWindow):
                     shutil.copy2(src_glb, file_path)
                     self.console_text.append(f"[EXPORT] GLB mesh successfully written to {file_path}")
                 elif os.path.exists(src_obj):
-                    self.console_text.append("[INFO] Converting OBJ to GLB using obj2gltf...")
+                    self.console_text.append("[INFO] Converting OBJ to GLB...")
                     try:
-                        import subprocess
-                        import sys
-                        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-                        # Run obj2gltf to convert obj to glb with embedded textures (-b)
-                        subprocess.run(["obj2gltf", "-i", src_obj, "-o", file_path, "-b"], capture_output=True, text=True, check=True, shell=True, creationflags=creationflags)
+                        self._convert_obj_to_glb(src_obj, file_path)
                         self.console_text.append(f"[EXPORT] GLB mesh successfully written to {file_path}")
                     except Exception as e:
-                        self.console_text.append(f"[ERROR] Failed to convert to GLB. Ensure Node.js and obj2gltf are installed: {e}")
+                        self.console_text.append(f"[ERROR] Failed to convert OBJ to GLB: {e}")
                 else:
                     self.console_text.append(f"[ERROR] Could not find reconstructed GLB or OBJ file at {mvs_out}")
         except Exception as e:
@@ -2012,6 +2010,202 @@ class MainWindow(QMainWindow):
         has_model = os.path.exists(src_glb) or os.path.exists(src_obj)
         self.upload_portal_btn.setEnabled(has_model)
         self.export_btn.setEnabled(has_model)
+
+    @staticmethod
+    def _convert_obj_to_glb(obj_path: str, glb_path: str):
+        """Convert a textured OBJ mesh to binary glTF without external CLI tools."""
+        obj_dir = os.path.dirname(obj_path)
+        positions = []
+        texcoords = []
+        normals = []
+        indices = []
+        packed_positions = []
+        packed_texcoords = []
+        packed_normals = []
+        vertex_map = {}
+        mtllibs = []
+        active_texture = None
+
+        def resolve_index(raw_value: str, items: list) -> int | None:
+            if not raw_value:
+                return None
+            index = int(raw_value)
+            if index > 0:
+                return index - 1
+            return len(items) + index
+
+        def add_vertex(token: str) -> int:
+            if token in vertex_map:
+                return vertex_map[token]
+
+            parts = token.split("/")
+            position_index = resolve_index(parts[0], positions)
+            texcoord_index = resolve_index(parts[1], texcoords) if len(parts) > 1 else None
+            normal_index = resolve_index(parts[2], normals) if len(parts) > 2 else None
+
+            if position_index is None or position_index < 0 or position_index >= len(positions):
+                raise ValueError(f"OBJ face references invalid vertex: {token}")
+
+            packed_positions.append(positions[position_index])
+            if texcoord_index is not None and 0 <= texcoord_index < len(texcoords):
+                u, v = texcoords[texcoord_index]
+                packed_texcoords.append((u, 1.0 - v))
+            else:
+                packed_texcoords.append((0.0, 0.0))
+
+            if normal_index is not None and 0 <= normal_index < len(normals):
+                packed_normals.append(normals[normal_index])
+            else:
+                packed_normals.append((0.0, 0.0, 1.0))
+
+            vertex_index = len(packed_positions) - 1
+            vertex_map[token] = vertex_index
+            return vertex_index
+
+        with open(obj_path, "r", encoding="utf-8", errors="replace") as obj_file:
+            for line in obj_file:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+
+                parts = stripped.split()
+                keyword = parts[0]
+                if keyword == "v" and len(parts) >= 4:
+                    positions.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                elif keyword == "vt" and len(parts) >= 3:
+                    texcoords.append((float(parts[1]), float(parts[2])))
+                elif keyword == "vn" and len(parts) >= 4:
+                    normals.append((float(parts[1]), float(parts[2]), float(parts[3])))
+                elif keyword == "mtllib" and len(parts) >= 2:
+                    mtllibs.append(" ".join(parts[1:]))
+                elif keyword == "usemtl" and len(parts) >= 2 and active_texture is None:
+                    active_texture = MainWindow._find_obj_material_texture(obj_dir, mtllibs, parts[1])
+                elif keyword == "f" and len(parts) >= 4:
+                    face = [add_vertex(token) for token in parts[1:]]
+                    for i in range(1, len(face) - 1):
+                        indices.extend((face[0], face[i], face[i + 1]))
+
+        if not packed_positions or not indices:
+            raise ValueError("OBJ contains no convertible mesh faces")
+
+        if active_texture is None:
+            active_texture = MainWindow._find_obj_material_texture(obj_dir, mtllibs, None)
+
+        MainWindow._write_glb(glb_path, packed_positions, packed_texcoords, packed_normals, indices, active_texture)
+
+    @staticmethod
+    def _find_obj_material_texture(obj_dir: str, mtllibs: list[str], material_name: str | None) -> str | None:
+        for mtllib in mtllibs:
+            mtl_path = os.path.join(obj_dir, mtllib)
+            if not os.path.exists(mtl_path):
+                continue
+
+            current_material = None
+            with open(mtl_path, "r", encoding="utf-8", errors="replace") as mtl_file:
+                for line in mtl_file:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+
+                    parts = stripped.split(maxsplit=1)
+                    if len(parts) < 2:
+                        continue
+                    if parts[0] == "newmtl":
+                        current_material = parts[1].strip()
+                    elif parts[0] == "map_Kd" and (material_name is None or current_material == material_name):
+                        texture_path = os.path.join(obj_dir, parts[1].strip())
+                        return texture_path if os.path.exists(texture_path) else None
+        return None
+
+    @staticmethod
+    def _write_glb(
+        glb_path: str,
+        positions: list[tuple[float, float, float]],
+        texcoords: list[tuple[float, float]],
+        normals: list[tuple[float, float, float]],
+        indices: list[int],
+        texture_path: str | None,
+    ):
+        def align(data: bytes, padding: bytes = b"\x00") -> bytes:
+            remainder = len(data) % 4
+            if remainder == 0:
+                return data
+            return data + (padding * (4 - remainder))
+
+        def append_buffer(buffer: bytearray, data: bytes, target: int | None = None) -> int:
+            while len(buffer) % 4:
+                buffer.append(0)
+            offset = len(buffer)
+            buffer.extend(align(data))
+            view = {"buffer": 0, "byteOffset": offset, "byteLength": len(data)}
+            if target is not None:
+                view["target"] = target
+            buffer_views.append(view)
+            return len(buffer_views) - 1
+
+        binary = bytearray()
+        buffer_views = []
+        accessors = []
+
+        position_bytes = b"".join(struct.pack("<3f", *value) for value in positions)
+        texcoord_bytes = b"".join(struct.pack("<2f", *value) for value in texcoords)
+        normal_bytes = b"".join(struct.pack("<3f", *value) for value in normals)
+        index_bytes = b"".join(struct.pack("<I", value) for value in indices)
+
+        position_view = append_buffer(binary, position_bytes, 34962)
+        texcoord_view = append_buffer(binary, texcoord_bytes, 34962)
+        normal_view = append_buffer(binary, normal_bytes, 34962)
+        index_view = append_buffer(binary, index_bytes, 34963)
+
+        mins = [min(axis) for axis in zip(*positions)]
+        maxs = [max(axis) for axis in zip(*positions)]
+
+        accessors.extend([
+            {"bufferView": position_view, "componentType": 5126, "count": len(positions), "type": "VEC3", "min": mins, "max": maxs},
+            {"bufferView": texcoord_view, "componentType": 5126, "count": len(texcoords), "type": "VEC2"},
+            {"bufferView": normal_view, "componentType": 5126, "count": len(normals), "type": "VEC3"},
+            {"bufferView": index_view, "componentType": 5125, "count": len(indices), "type": "SCALAR"},
+        ])
+
+        gltf = {
+            "asset": {"version": "2.0", "generator": "Proximap"},
+            "scene": 0,
+            "scenes": [{"nodes": [0]}],
+            "nodes": [{"mesh": 0}],
+            "meshes": [{
+                "primitives": [{
+                    "attributes": {"POSITION": 0, "TEXCOORD_0": 1, "NORMAL": 2},
+                    "indices": 3,
+                    "material": 0,
+                }]
+            }],
+            "materials": [{"doubleSided": True, "pbrMetallicRoughness": {"baseColorFactor": [1, 1, 1, 1], "roughnessFactor": 1, "metallicFactor": 0}}],
+            "buffers": [{"byteLength": 0}],
+            "bufferViews": buffer_views,
+            "accessors": accessors,
+        }
+
+        if texture_path:
+            with open(texture_path, "rb") as texture_file:
+                texture_bytes = texture_file.read()
+            texture_view = append_buffer(binary, texture_bytes)
+            ext = os.path.splitext(texture_path)[1].lower()
+            mime_type = "image/png" if ext == ".png" else "image/jpeg"
+            gltf["images"] = [{"bufferView": texture_view, "mimeType": mime_type}]
+            gltf["textures"] = [{"source": 0}]
+            gltf["materials"][0]["pbrMetallicRoughness"]["baseColorTexture"] = {"index": 0}
+
+        gltf["buffers"][0]["byteLength"] = len(binary)
+        json_chunk = align(json.dumps(gltf, separators=(",", ":")).encode("utf-8"), b" ")
+        bin_chunk = align(bytes(binary))
+        total_length = 12 + 8 + len(json_chunk) + 8 + len(bin_chunk)
+
+        with open(glb_path, "wb") as glb_file:
+            glb_file.write(struct.pack("<III", 0x46546C67, 2, total_length))
+            glb_file.write(struct.pack("<I4s", len(json_chunk), b"JSON"))
+            glb_file.write(json_chunk)
+            glb_file.write(struct.pack("<I4s", len(bin_chunk), b"BIN\x00"))
+            glb_file.write(bin_chunk)
 
     def _check_existing_scene(self):
         """Checks if a previous reconstruction scene exists and updates recover action state."""
@@ -2915,12 +3109,9 @@ class MainWindow(QMainWindow):
             if os.path.exists(src_obj):
                 self.console_text.append("[BRIDGE] Pre-converting reconstructed OBJ to GLB for upload...")
                 try:
-                    import subprocess
-                    import sys
-                    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-                    subprocess.run(["obj2gltf", "-i", src_obj, "-o", src_glb, "-b"], capture_output=True, text=True, check=True, shell=True, creationflags=creationflags)
+                    self._convert_obj_to_glb(src_obj, src_glb)
                 except Exception as e:
-                    self.console_text.append(f"[BRIDGE ERROR] Could not convert model to GLB. Ensure obj2gltf is installed: {e}")
+                    self.console_text.append(f"[BRIDGE ERROR] Could not convert OBJ model to GLB: {e}")
                     return
             else:
                 self.console_text.append("[BRIDGE ERROR] No reconstructed mesh found. Please run reconstruction first.")
