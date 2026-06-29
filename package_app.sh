@@ -77,6 +77,10 @@ else
     echo "  [WARNING] OpenMVS binaries not found in backend_bin/openMVS"
 fi
 
+echo "  Pruning Windows-only backend artifacts from macOS bundle..."
+find "$MAC_OS_DIR/backend_bin" -type f \( -name "*.exe" -o -name "*.dll" -o -name "*.bat" -o -name "*.pdb" -o -name "*.lib" \) -delete
+find "$MAC_OS_DIR/backend_bin" -type d -empty -delete
+
 echo "  Copying toolchain map configuration..."
 if [ -f "toolchain_map.json" ]; then
     cp "toolchain_map.json" "$MAC_OS_DIR/"

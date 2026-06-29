@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QProgressBar, QRadioButton, QButtonGroup,
     QFrame, QFileDialog, QTextEdit, QStackedWidget, QComboBox,
     QScrollArea, QTabWidget, QGridLayout, QCheckBox, QSlider,
-    QMessageBox, QDialog, QColorDialog, QMenu
+    QMessageBox, QDialog, QColorDialog, QMenu, QSizePolicy
 )
 
 from vispy import app, scene
@@ -1086,6 +1086,9 @@ class MainWindow(QMainWindow):
         
         self.img_count_label = QLabel("Images Loaded: 0", step1_box)
         self.camera_label = QLabel("Camera: Undetected", step1_box)
+        self.camera_label.setTextFormat(Qt.PlainText)
+        self.camera_label.setWordWrap(True)
+        self.camera_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         
         # Hardware Status Badge
         self.badge = QLabel("Memory Check...", step1_box)
@@ -1645,7 +1648,9 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
                 
-        self.camera_label.setText(f"Camera: {camera_name}")
+        display_camera_name = self._camera_name_for_display(camera_name)
+        self.camera_label.setText(f"Camera: {display_camera_name}")
+        self.camera_label.setToolTip(camera_name if camera_name else "Undetected")
         if files:
             self.console_text.append(f"[INFO] Successfully imported {len(files)} files. Camera identified: {camera_name}")
             self._set_process_btn_state("ready")
@@ -1654,6 +1659,17 @@ class MainWindow(QMainWindow):
             self.console_text.append("[INFO] Image list cleared.")
             self._set_process_btn_state("idle")
             self.bg_remove_btn.setEnabled(False)
+
+    def _camera_name_for_display(self, camera_name: str) -> str:
+        """Return a compact, printable camera name that cannot stretch the sidebar."""
+        cleaned = "".join(ch if ch.isprintable() else " " for ch in str(camera_name or "Undetected"))
+        cleaned = " ".join(cleaned.split())
+        if not cleaned:
+            return "Undetected"
+        max_chars = 36
+        if len(cleaned) <= max_chars:
+            return cleaned
+        return f"{cleaned[:max_chars - 1]}..."
 
     def _remove_selected_photos(self):
         selected = self.photos_tab.get_selected_images()

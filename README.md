@@ -16,6 +16,18 @@ Proximap is an intuitive desktop application built in Python and PySide6 that pr
 
 ---
 
+## Downloads
+
+### macOS Client
+
+Optimized for Apple Silicon (M1/M2/M3) and compatible with Intel Macs on macOS 11 or later. The macOS package includes the Proximap desktop client plus bundled COLMAP and OpenMVS reconstruction tools.
+
+[Download Proximap for macOS](https://github.com/BelieveGamesStudios/Proximap/releases/latest/download/Proximap_Mac_Release.zip)
+
+After downloading, unzip `Proximap_Mac_Release.zip`, open `Proximap.app`, and select a folder of overlapping photos to start a reconstruction.
+
+---
+
 ## Repository Structure
 
 ```text
@@ -78,7 +90,19 @@ python main_window.py
 
 ## Standalone Packaging & Distribution
 
-You can bundle Proximap into a standalone zip file or Windows setup installer.
+You can bundle Proximap into a standalone zip file or platform installer.
+
+### macOS
+
+Follow the [macOS ARM64 Packaging Guide](PACKAGING_GUIDE_MACOS_ARM64.md) and run:
+
+```bash
+bash package_app.sh
+```
+
+The macOS package is written to `Proximap_Mac_Release.zip`.
+
+### Windows
 
 1. Place your custom logo as `app_icon.png` in the project root.
 2. Run the automated PowerShell script as an Administrator:
