@@ -1,0 +1,426 @@
+import os
+import time
+import numpy as np
+import pyrr
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
+from PySide6.QtCore import Qt, Signal, QPoint
+from PySide6.QtGui import QMouseEvent, QKeyEvent, QWheelEvent, QAction
+
+import OpenGL.GL as gl
+from mesh_editor.scene import Camera, Scene, Object, create_cube_mesh, create_plane_mesh, create_sphere_mesh
+from mesh_editor.gizmo import ImGuiBridge
+
+class MeshEditorViewport(QOpenGLWidget):
+    """3D OpenGL Viewport for Mesh Editing. Integrates camera controls, grid, and ImGuizmo."""
+    selection_changed = Signal(object) # Emits the newly selected Object (or None)
+    transform_changed = Signal(object) # Emits the selected Object when transformed by the gizmo
+    delete_pressed = Signal() # Emits when Delete/Backspace key is pressed
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setMouseTracking(True)
+        
+        # State containers
+        self.camera = Camera()
+        self.scene = Scene()
+        self.imgui_bridge = ImGuiBridge()
+        
+        # Viewport customizable properties (defaults)
+        self.bg_color = np.array([0.18, 0.18, 0.18], dtype=np.float32)       # Blender-style dark-grey background
+        self.grid_color_1 = np.array([0.35, 0.35, 0.35, 1.0], dtype=np.float32)  # Major grid lines
+        self.grid_color_2 = np.array([0.25, 0.25, 0.25, 0.4], dtype=np.float32)  # Minor grid lines
+        self.axis_color_x = np.array([0.8, 0.2, 0.2, 1.0], dtype=np.float32)   # X-axis (Red)
+        self.axis_color_y = np.array([0.2, 0.8, 0.2, 1.0], dtype=np.float32)   # Y-axis (Green)
+        self.grid_fade = 60.0
+        self.grid_thickness = 1.0
+        self.grid_subdivisions = 10.0
+        
+        # Orbital Navigation mouse states
+        self.last_mouse_pos = QPoint()
+        self.is_orbiting = False
+        self.is_panning = False
+        self.is_zooming = False
+        
+        # GPU buffers & shader programs
+        self.object_program = None
+        self.grid_program = None
+        
+        # Grid quad VAO
+        self.grid_vao = None
+        self.grid_vbo = None
+        self.grid_ebo = None
+
+    def initializeGL(self):
+        # Initialize OpenGL context
+        print("[Viewport] Initializing OpenGL...")
+        
+        # Load Shaders from disk
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        shaders_dir = os.path.join(base_dir, "shaders")
+        
+        with open(os.path.join(shaders_dir, "object.vert"), "r") as f:
+            obj_vert_src = f.read()
+        with open(os.path.join(shaders_dir, "object.frag"), "r") as f:
+            obj_frag_src = f.read()
+        with open(os.path.join(shaders_dir, "grid.vert"), "r") as f:
+            grid_vert_src = f.read()
+        with open(os.path.join(shaders_dir, "grid.frag"), "r") as f:
+            grid_frag_src = f.read()
+            
+        self.object_program = self._compile_and_link_shaders(obj_vert_src, obj_frag_src)
+        self.grid_program = self._compile_and_link_shaders(grid_vert_src, grid_frag_src)
+        
+        # Setup infinite grid full-screen quad VAO
+        self._setup_grid_quad()
+        
+        # Initialize ImGui context inside this GL context
+        self.imgui_bridge.initialize("#version 150")
+        
+        # Scene starts empty on startup. Primitives/meshes can be imported using the Import button.
+        pass
+        
+        # Enable depth testing
+        gl.glEnable(gl.GL_DEPTH_TEST)
+        gl.glDepthFunc(gl.GL_LEQUAL)
+
+    def paintGL(self):
+        # 1. Clear background
+        gl.glClearColor(self.bg_color[0], self.bg_color[1], self.bg_color[2], 1.0)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+        
+        # Retrieve physical vs logical sizes
+        dpr = self.devicePixelRatioF()
+        w_logical = self.width()
+        h_logical = self.height()
+        w_physical = int(w_logical * dpr)
+        h_physical = int(h_logical * dpr)
+        
+        gl.glViewport(0, 0, w_physical, h_physical)
+        
+        aspect = w_logical / max(h_logical, 1.0)
+        view_matrix = self.camera.get_view_matrix()
+        proj_matrix = self.camera.get_projection_matrix(aspect)
+        
+        # 2. Render Scene Objects
+        gl.glUseProgram(self.object_program)
+        
+        # Setup global lighting direction (directional light moving with the camera eye)
+        eye = self.camera.get_position()
+        light_dir = eye - self.camera.target
+        # Normalize direction
+        norm_light_dir = light_dir / np.linalg.norm(light_dir)
+        
+        # Pass camera and lighting uniforms
+        gl.glUniform3fv(gl.glGetUniformLocation(self.object_program, "lightDir"), 1, norm_light_dir)
+        gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.object_program, "view"), 1, gl.GL_FALSE, view_matrix)
+        gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.object_program, "proj"), 1, gl.GL_FALSE, proj_matrix)
+        
+        # Render each object
+        for obj in self.scene.objects:
+            model_matrix = obj.get_model_matrix()
+            gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.object_program, "model"), 1, gl.GL_FALSE, model_matrix)
+            
+            # Object base color (greyish blue)
+            color = np.array([0.45, 0.55, 0.65], dtype=np.float32)
+            gl.glUniform3fv(gl.glGetUniformLocation(self.object_program, "objectColor"), 1, color)
+            gl.glUniform1i(gl.glGetUniformLocation(self.object_program, "useOverrideColor"), 0)
+            
+            # Pass texture uniforms
+            has_tex = obj.mesh.texture_id is not None
+            gl.glUniform1i(gl.glGetUniformLocation(self.object_program, "useTexture"), 1 if has_tex else 0)
+            gl.glUniform1i(gl.glGetUniformLocation(self.object_program, "textureSampler"), 0)
+            
+            # Draw standard geometry
+            obj.mesh.draw()
+            
+            # Draw wireframe selection highlight if selected
+            if self.scene.selected_object == obj:
+                gl.glEnable(gl.GL_POLYGON_OFFSET_LINE)
+                gl.glPolygonOffset(-1.5, -1.5) # Shift depth forward slightly to prevent z-fighting
+                
+                # Draw thick wireframe outlines (Blender selection style)
+                gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_LINE)
+                gl.glLineWidth(2.0)
+                
+                gl.glUniform1i(gl.glGetUniformLocation(self.object_program, "useOverrideColor"), 1)
+                orange_highlight = np.array([1.0, 0.5, 0.0, 1.0], dtype=np.float32)
+                gl.glUniform4fv(gl.glGetUniformLocation(self.object_program, "overrideColor"), 1, orange_highlight)
+                
+                obj.mesh.draw()
+                
+                # Restore defaults
+                gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
+                gl.glDisable(gl.GL_POLYGON_OFFSET_LINE)
+                gl.glLineWidth(1.0)
+                
+        # 3. Render Infinite Grid (Semi-transparent overlay)
+        gl.glUseProgram(self.grid_program)
+        
+        gl.glEnable(gl.GL_BLEND)
+        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+        
+        # View matrices
+        gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.grid_program, "view"), 1, gl.GL_FALSE, view_matrix)
+        gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.grid_program, "proj"), 1, gl.GL_FALSE, proj_matrix)
+        # Inverse view/projection matrices for screen-space unprojection
+        inv_view = pyrr.matrix44.inverse(view_matrix)
+        inv_proj = pyrr.matrix44.inverse(proj_matrix)
+        gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.grid_program, "invView"), 1, gl.GL_FALSE, inv_view)
+        gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.grid_program, "invProj"), 1, gl.GL_FALSE, inv_proj)
+        
+        # Grid parameters
+        gl.glUniform4fv(gl.glGetUniformLocation(self.grid_program, "gridColor1"), 1, self.grid_color_1)
+        gl.glUniform4fv(gl.glGetUniformLocation(self.grid_program, "gridColor2"), 1, self.grid_color_2)
+        gl.glUniform4fv(gl.glGetUniformLocation(self.grid_program, "axisColorX"), 1, self.axis_color_x)
+        gl.glUniform4fv(gl.glGetUniformLocation(self.grid_program, "axisColorY"), 1, self.axis_color_y)
+        gl.glUniform1f(gl.glGetUniformLocation(self.grid_program, "gridFade"), self.grid_fade)
+        gl.glUniform1f(gl.glGetUniformLocation(self.grid_program, "gridThickness"), self.grid_thickness)
+        gl.glUniform1f(gl.glGetUniformLocation(self.grid_program, "subdivisions"), self.grid_subdivisions)
+        
+        # Draw full screen quad
+        gl.glBindVertexArray(self.grid_vao)
+        gl.glDrawElements(gl.GL_TRIANGLES, 6, gl.GL_UNSIGNED_INT, None)
+        gl.glBindVertexArray(0)
+        
+        gl.glDisable(gl.GL_BLEND)
+        
+        # 4. Render ImGuizmo Overlay
+        try:
+            self.imgui_bridge.new_frame(w_logical, h_logical, dpr)
+            
+            if self.scene.selected_object is not None:
+                modified = self.imgui_bridge.draw_gizmo(
+                    self.scene.selected_object,
+                    self.camera,
+                    w_logical,
+                    h_logical
+                )
+                if modified:
+                    self.transform_changed.emit(self.scene.selected_object)
+                    
+            self.imgui_bridge.render()
+        except Exception as e:
+            try:
+                from imgui_bundle import imgui
+                imgui.end_frame()
+            except Exception:
+                pass
+            print(f"[Viewport Error] ImGui render failed: {e}")
+
+    def resizeGL(self, w, h):
+        gl.glViewport(0, 0, w, h)
+
+    def cleanupGL(self):
+        # Shut down ImGui bridge
+        self.imgui_bridge.shutdown()
+        
+        # Clean up shaders and VAOs
+        try:
+            if self.object_program:
+                gl.glDeleteProgram(self.object_program)
+            if self.grid_program:
+                gl.glDeleteProgram(self.grid_program)
+            if self.grid_vao:
+                gl.glDeleteVertexArrays(1, [self.grid_vao])
+                gl.glDeleteBuffers(1, [self.grid_vbo])
+                gl.glDeleteBuffers(1, [self.grid_ebo])
+        except Exception:
+            pass
+            
+        # Clean up scene mesh VBOs/VAOs
+        for obj in self.scene.objects:
+            obj.mesh.cleanup()
+
+    def hideEvent(self, event):
+        # Reset input events during tab switch to prevent stuck states
+        self.imgui_bridge.reset_input_state()
+        super().hideEvent(event)
+
+    def closeEvent(self, event):
+        self.makeCurrent()
+        self.cleanupGL()
+        self.doneCurrent()
+        super().closeEvent(event)
+
+    # Event handlers
+    def mouseMoveEvent(self, event: QMouseEvent):
+        pos = event.position()
+        dx = pos.x() - self.last_mouse_pos.x()
+        dy = pos.y() - self.last_mouse_pos.y()
+        
+        # 1. Forward to ImGui first
+        captured = self.imgui_bridge.process_mouse_move(pos.x(), pos.y())
+        
+        # 2. If not captured by ImGui window/gizmo, handle viewport camera movement
+        if not captured:
+            if self.is_orbiting:
+                # Orbiting navigation (Middle click drag or Alt + LMB drag)
+                self.camera.orbit(-dx * 0.005, -dy * 0.005)
+                self.update()
+            elif self.is_panning:
+                # Panning navigation (Shift + Middle drag or Alt + Shift + LMB drag)
+                self.camera.pan(dx, dy)
+                self.update()
+            elif self.is_zooming:
+                # Zooming navigation (Alt + Ctrl + LMB drag)
+                zoom_speed = self.camera.distance * 0.005 if self.camera.is_perspective else self.camera.ortho_scale * 0.005
+                self.camera.zoom(-dy * zoom_speed)
+                self.update()
+                
+        self.last_mouse_pos = pos.toPoint()
+        super().mouseMoveEvent(event)
+ 
+    def mousePressEvent(self, event: QMouseEvent):
+        pos = event.position()
+        self.last_mouse_pos = pos.toPoint()
+        
+        # 1. Forward to ImGui first
+        captured = self.imgui_bridge.process_mouse_button(event.button(), True, pos.x(), pos.y())
+        
+        # 2. Handle viewport cameras or selection if not captured
+        if not captured:
+            # Check for Alt modifier for trackpad navigation fallbacks
+            if event.modifiers() & Qt.KeyboardModifier.AltModifier and event.button() == Qt.MouseButton.LeftButton:
+                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    self.is_zooming = True
+                elif event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    self.is_panning = True
+                else:
+                    self.is_orbiting = True
+            elif event.button() == Qt.MouseButton.MiddleButton:
+                # Shift+MMB = Pan, MMB = Orbit
+                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                    self.is_panning = True
+                else:
+                    self.is_orbiting = True
+            elif event.button() == Qt.MouseButton.LeftButton:
+                # Raycasting selection against objects
+                old_selection = self.scene.selected_object
+                self.scene.perform_picking(pos.x(), pos.y(), self.width(), self.height(), self.camera)
+                if self.scene.selected_object != old_selection:
+                    self.selection_changed.emit(self.scene.selected_object)
+                self.update()
+                
+        super().mousePressEvent(event)
+ 
+    def mouseReleaseEvent(self, event: QMouseEvent):
+        pos = event.position()
+        
+        # 1. Forward to ImGui
+        captured = self.imgui_bridge.process_mouse_button(event.button(), False, pos.x(), pos.y())
+        
+        # 2. Clear camera movement states
+        if event.button() == Qt.MouseButton.MiddleButton or (event.button() == Qt.MouseButton.LeftButton and (self.is_orbiting or self.is_panning or self.is_zooming)):
+            self.is_orbiting = False
+            self.is_panning = False
+            self.is_zooming = False
+            
+        super().mouseReleaseEvent(event)
+        self.update()
+
+    def wheelEvent(self, event: QWheelEvent):
+        # 1. Forward to ImGui
+        delta_x = event.angleDelta().x() / 120.0
+        delta_y = event.angleDelta().y() / 120.0
+        captured = self.imgui_bridge.process_wheel(delta_x, delta_y)
+        
+        # 2. Orbit camera zoom
+        if not captured:
+            # Scale zoom speed based on distance
+            zoom_speed = self.camera.distance * 0.1 if self.camera.is_perspective else self.camera.ortho_scale * 0.1
+            self.camera.zoom(delta_y * zoom_speed)
+            self.update()
+            
+        super().wheelEvent(event)
+
+    def keyPressEvent(self, event: QKeyEvent):
+        # 1. Forward to ImGui
+        captured = self.imgui_bridge.process_key(event.key(), True, event.text())
+        
+        # 2. Apply editor shortcuts if ImGui isn't focusing inputs
+        if not captured:
+            key = event.key()
+            if key == Qt.Key.Key_G:
+                # G: Translate
+                from imgui_bundle import imguizmo
+                self.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.translate
+                self.update()
+            elif key == Qt.Key.Key_R:
+                # R: Rotate
+                from imgui_bundle import imguizmo
+                self.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.rotate
+                self.update()
+            elif key == Qt.Key.Key_S:
+                # S: Scale
+                from imgui_bundle import imguizmo
+                self.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.scale
+                self.update()
+            elif key in [Qt.Key.Key_Delete, Qt.Key.Key_Backspace]:
+                # Delete/Backspace: Remove Selected Object
+                self.delete_pressed.emit()
+                event.accept()
+                return
+                
+        super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event: QKeyEvent):
+        self.imgui_bridge.process_key(event.key(), False)
+        super().keyReleaseEvent(event)
+
+    # Shaders compile/link helper
+    def _compile_and_link_shaders(self, vert_src: str, frag_src: str) -> int:
+        def compile_shader(shader_type, source):
+            shader = gl.glCreateShader(shader_type)
+            gl.glShaderSource(shader, source)
+            gl.glCompileShader(shader)
+            if not gl.glGetShaderiv(shader, gl.GL_COMPILE_STATUS):
+                log = gl.glGetShaderInfoLog(shader).decode('utf-8')
+                raise RuntimeError(f"Shader compilation failed:\n{log}")
+            return shader
+
+        vert = compile_shader(gl.GL_VERTEX_SHADER, vert_src)
+        frag = compile_shader(gl.GL_FRAGMENT_SHADER, frag_src)
+        
+        program = gl.glCreateProgram()
+        gl.glAttachShader(program, vert)
+        gl.glAttachShader(program, frag)
+        gl.glLinkProgram(program)
+        
+        if not gl.glGetProgramiv(program, gl.GL_LINK_STATUS):
+            log = gl.glGetProgramInfoLog(program).decode('utf-8')
+            raise RuntimeError(f"Shader linking failed:\n{log}")
+            
+        gl.glDeleteShader(vert)
+        gl.glDeleteShader(frag)
+        return program
+
+    # Create full screen quad geometry in Z=0 plane for infinite grid unprojection
+    def _setup_grid_quad(self):
+        vertices = np.array([
+            -1.0, -1.0, 0.0,
+             1.0, -1.0, 0.0,
+             1.0,  1.0, 0.0,
+            -1.0,  1.0, 0.0
+        ], dtype=np.float32)
+        
+        indices = np.array([
+            0, 1, 2,
+            2, 3, 0
+        ], dtype=np.uint32)
+        
+        self.grid_vao = gl.glGenVertexArrays(1)
+        gl.glBindVertexArray(self.grid_vao)
+        
+        self.grid_vbo = gl.glGenBuffers(1)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.grid_vbo)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, vertices.nbytes, vertices, gl.GL_STATIC_DRAW)
+        
+        self.grid_ebo = gl.glGenBuffers(1)
+        gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.grid_ebo)
+        gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, gl.GL_STATIC_DRAW)
+        
+        gl.glEnableVertexAttribArray(0)
+        gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
+        
+        gl.glBindVertexArray(0)

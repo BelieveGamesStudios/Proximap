@@ -1,0 +1,580 @@
+import numpy as np
+import pyrr
+
+class Camera:
+    def __init__(self):
+        # Focus/Target point in world coordinates (Z-up)
+        self.target = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        # Yaw (rotation around Z axis) in radians
+        self.yaw = 0.785  # ~45 degrees
+        # Pitch (angle above XY plane) in radians
+        self.pitch = 0.523  # ~30 degrees
+        # Distance from target
+        self.distance = 8.0
+        # Projection settings
+        self.is_perspective = True
+        self.fov = 45.0  # Field of View in Y direction (degrees)
+        self.ortho_scale = 6.0  # Height of the orthographic view area
+
+    def get_position(self):
+        # Calculate eye position in Z-up system:
+        # X = tx + r * cos(pitch) * sin(yaw)
+        # Y = ty - r * cos(pitch) * cos(yaw)
+        # Z = tz + r * sin(pitch)
+        cos_pitch = np.cos(self.pitch)
+        x = self.target[0] + self.distance * cos_pitch * np.sin(self.yaw)
+        y = self.target[1] - self.distance * cos_pitch * np.cos(self.yaw)
+        z = self.target[2] + self.distance * np.sin(self.pitch)
+        return np.array([x, y, z], dtype=np.float32)
+
+    def get_view_matrix(self):
+        eye = self.get_position()
+        up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        # Guard against looking straight up/down where cross product would fail
+        if np.abs(np.cos(self.pitch)) < 1e-4:
+            up = np.array([0.0, 1.0, 0.0], dtype=np.float32) if self.pitch > 0 else np.array([0.0, -1.0, 0.0], dtype=np.float32)
+        return pyrr.matrix44.create_look_at(eye, self.target, up)
+
+    def get_projection_matrix(self, aspect):
+        if self.is_perspective:
+            return pyrr.matrix44.create_perspective_projection(self.fov, aspect, 0.1, 100.0)
+        else:
+            half_h = self.ortho_scale * 0.5
+            half_w = half_h * aspect
+            return pyrr.matrix44.create_orthogonal_projection(-half_w, half_w, -half_h, half_h, 0.1, 100.0)
+
+    def orbit(self, delta_yaw, delta_pitch):
+        self.yaw += delta_yaw
+        # Constrain pitch to avoid flipping over the poles (-89 to +89 degrees)
+        max_pitch = np.radians(89.0)
+        self.pitch = np.clip(self.pitch + delta_pitch, -max_pitch, max_pitch)
+
+    def pan(self, delta_x, delta_y):
+        # Pan relative to the camera's orientation
+        # 1. Compute view direction and camera right/up vectors
+        eye = self.get_position()
+        forward = self.target - eye
+        forward = forward / np.linalg.norm(forward)
+        
+        world_up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        if np.abs(np.dot(forward, world_up)) > 0.99:
+            world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+            
+        right = np.cross(forward, world_up)
+        right = right / np.linalg.norm(right)
+        
+        up = np.cross(right, forward)
+        up = up / np.linalg.norm(up)
+        
+        # Scale movement based on zoom distance
+        scale = self.distance * 0.0015
+        if not self.is_perspective:
+            scale = self.ortho_scale * 0.0015
+            
+        self.target += right * (-delta_x * scale) + up * (delta_y * scale)
+
+    def zoom(self, factor):
+        if self.is_perspective:
+            self.distance = max(self.distance - factor, 0.5)
+        else:
+            self.ortho_scale = max(self.ortho_scale - factor, 0.5)
+
+
+class Mesh:
+    """Represents a GL Mesh container with vertices, indices, normals, UVs, texture, and AABB."""
+    def __init__(self, vertices, indices, normals, local_aabb_min, local_aabb_max, texcoords=None, texture_data=None):
+        self.vertices = np.array(vertices, dtype=np.float32)
+        self.indices = np.array(indices, dtype=np.uint32)
+        self.normals = np.array(normals, dtype=np.float32)
+        self.texcoords = np.array(texcoords, dtype=np.float32) if texcoords is not None else None
+        
+        # PIL Image or None
+        self.texture_data = texture_data
+        
+        # Local space Axis-Aligned Bounding Box (AABB)
+        self.local_aabb_min = np.array(local_aabb_min, dtype=np.float32)
+        self.local_aabb_max = np.array(local_aabb_max, dtype=np.float32)
+        
+        # OpenGL buffer/texture handles
+        self.vao = None
+        self.vbo = None
+        self.ebo = None
+        self.vbo_normals = None
+        self.vbo_texcoords = None
+        self.texture_id = None
+
+    def setup_buffers(self):
+        # Deferred binding to be called with an active OpenGL context
+        import OpenGL.GL as gl
+        
+        # Create and bind VAO
+        self.vao = gl.glGenVertexArrays(1)
+        gl.glBindVertexArray(self.vao)
+        
+        # VBO for positions (layout = 0)
+        self.vbo = gl.glGenBuffers(1)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.vbo)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, self.vertices.nbytes, self.vertices, gl.GL_STATIC_DRAW)
+        gl.glEnableVertexAttribArray(0)
+        gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
+        
+        # VBO for normals (layout = 1)
+        self.vbo_normals = gl.glGenBuffers(1)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.vbo_normals)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, self.normals.nbytes, self.normals, gl.GL_STATIC_DRAW)
+        gl.glEnableVertexAttribArray(1)
+        gl.glVertexAttribPointer(1, 3, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
+        
+        # VBO for texture coordinates (layout = 2)
+        if self.texcoords is not None and len(self.texcoords) > 0:
+            self.vbo_texcoords = gl.glGenBuffers(1)
+            gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.vbo_texcoords)
+            gl.glBufferData(gl.GL_ARRAY_BUFFER, self.texcoords.nbytes, self.texcoords, gl.GL_STATIC_DRAW)
+            gl.glEnableVertexAttribArray(2)
+            gl.glVertexAttribPointer(2, 2, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
+            
+        # EBO for indices
+        self.ebo = gl.glGenBuffers(1)
+        gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.ebo)
+        gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, self.indices.nbytes, self.indices, gl.GL_STATIC_DRAW)
+        
+        gl.glBindVertexArray(0)
+        
+        # Upload texture to OpenGL
+        if self.texture_data is not None:
+            try:
+                image = self.texture_data
+                if image.mode not in ('RGB', 'RGBA'):
+                    image = image.convert('RGBA')
+                img_width, img_height = image.size
+                
+                # Flip vertically for OpenGL's bottom-left UV coordinate origin
+                img_np = np.array(image)
+                img_np = np.flipud(img_np)
+                img_bytes = img_np.tobytes()
+                
+                img_format = gl.GL_RGBA if image.mode == 'RGBA' else gl.GL_RGB
+                
+                self.texture_id = gl.glGenTextures(1)
+                gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_id)
+                
+                # Setup texture filtering/wrapping
+                gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_S, gl.GL_REPEAT)
+                gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_WRAP_T, gl.GL_REPEAT)
+                gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR_MIPMAP_LINEAR)
+                gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+                
+                gl.glTexImage2D(
+                    gl.GL_TEXTURE_2D, 0, img_format, img_width, img_height,
+                    0, img_format, gl.GL_UNSIGNED_BYTE, img_bytes
+                )
+                gl.glGenerateMipmap(gl.GL_TEXTURE_2D)
+                gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+            except Exception as e:
+                print(f"[Mesh Setup GL Texture Error]: {e}")
+                self.texture_id = None
+
+    def draw(self):
+        import OpenGL.GL as gl
+        if self.vao is not None:
+            # Bind texture if available
+            if self.texture_id is not None:
+                gl.glBindTexture(gl.GL_TEXTURE_2D, self.texture_id)
+            gl.glBindVertexArray(self.vao)
+            gl.glDrawElements(gl.GL_TRIANGLES, len(self.indices), gl.GL_UNSIGNED_INT, None)
+            gl.glBindVertexArray(0)
+            if self.texture_id is not None:
+                gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+
+    def cleanup(self):
+        import OpenGL.GL as gl
+        # Safely clean up buffers if context is alive
+        try:
+            if self.vao is not None:
+                gl.glDeleteVertexArrays(1, [self.vao])
+                gl.glDeleteBuffers(1, [self.vbo])
+                gl.glDeleteBuffers(1, [self.vbo_normals])
+                if self.vbo_texcoords is not None:
+                    gl.glDeleteBuffers(1, [self.vbo_texcoords])
+                gl.glDeleteBuffers(1, [self.ebo])
+                if self.texture_id is not None:
+                    gl.glDeleteTextures(1, [self.texture_id])
+                self.vao = self.vbo = self.vbo_normals = self.ebo = None
+        except Exception:
+            pass
+
+
+class Object:
+    """A Node in the scene. Holds transform properties and a reference to a Mesh."""
+    def __init__(self, name: str, mesh: Mesh):
+        self.name = name
+        self.mesh = mesh
+        
+        # Transform properties
+        self.position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        # Rotation stored natively as Euler angles in degrees (X, Y, Z)
+        self.rotation = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        self.scale = np.array([1.0, 1.0, 1.0], dtype=np.float32)
+
+    def get_model_matrix(self) -> np.ndarray:
+        # Build translation matrix
+        t_mat = pyrr.matrix44.create_from_translation(self.position)
+        
+        # Build rotation matrix from Euler degrees (X -> Y -> Z order)
+        rx = np.radians(self.rotation[0])
+        ry = np.radians(self.rotation[1])
+        rz = np.radians(self.rotation[2])
+        r_mat_x = pyrr.matrix44.create_from_x_rotation(rx)
+        r_mat_y = pyrr.matrix44.create_from_y_rotation(ry)
+        r_mat_z = pyrr.matrix44.create_from_z_rotation(rz)
+        # Combine rotations
+        r_mat = pyrr.matrix44.multiply(r_mat_x, r_mat_y)
+        r_mat = pyrr.matrix44.multiply(r_mat, r_mat_z)
+        
+        # Build scale matrix
+        s_mat = pyrr.matrix44.create_from_scale(self.scale)
+        
+        # Combine transforms: M = S * R * T (Wait, pyrr matrix multiply order is typically model = Scale * Rotate * Translate)
+        # Let's multiply Scale -> Rotate -> Translate
+        model_mat = pyrr.matrix44.multiply(s_mat, r_mat)
+        model_mat = pyrr.matrix44.multiply(model_mat, t_mat)
+        return model_mat
+
+    def get_world_aabb(self) -> tuple:
+        """Computes the world-space bounding box by transforming the local AABB."""
+        model_mat = self.get_model_matrix()
+        local_min = self.mesh.local_aabb_min
+        local_max = self.mesh.local_aabb_max
+        
+        # Compute all 8 corners of the local bounding box
+        corners = [
+            np.array([local_min[0], local_min[1], local_min[2], 1.0]),
+            np.array([local_min[0], local_min[1], local_max[2], 1.0]),
+            np.array([local_min[0], local_max[1], local_min[2], 1.0]),
+            np.array([local_min[0], local_max[1], local_max[2], 1.0]),
+            np.array([local_max[0], local_min[1], local_min[2], 1.0]),
+            np.array([local_max[0], local_min[1], local_max[2], 1.0]),
+            np.array([local_max[0], local_max[1], local_min[2], 1.0]),
+            np.array([local_max[0], local_max[1], local_max[2], 1.0]),
+        ]
+        
+        # Transform corners to world space
+        world_corners = [pyrr.matrix44.apply_to_vector(model_mat, c)[:3] for c in corners]
+        
+        # Extract new min and max bounds from world corners
+        world_corners = np.array(world_corners)
+        world_min = np.min(world_corners, axis=0)
+        world_max = np.max(world_corners, axis=0)
+        return world_min, world_max
+
+
+# Procedural geometry creators
+def create_cube_mesh() -> Mesh:
+    # 24 vertices (4 per face to support independent normals)
+    vertices = [
+        # Z+ (Top)
+        -0.5, -0.5, 0.5,   0.5, -0.5, 0.5,   0.5, 0.5, 0.5,  -0.5, 0.5, 0.5,
+        # Z- (Bottom)
+        -0.5, -0.5, -0.5,  0.5, -0.5, -0.5,  0.5, 0.5, -0.5, -0.5, 0.5, -0.5,
+        # X+ (Right)
+         0.5, -0.5, -0.5,  0.5,  0.5, -0.5,  0.5, 0.5,  0.5,  0.5, -0.5,  0.5,
+        # X- (Left)
+        -0.5, -0.5, -0.5, -0.5,  0.5, -0.5, -0.5, 0.5,  0.5, -0.5, -0.5,  0.5,
+        # Y+ (Back)
+        -0.5,  0.5, -0.5,  0.5,  0.5, -0.5,  0.5, 0.5,  0.5, -0.5, 0.5,  0.5,
+        # Y- (Front)
+        -0.5, -0.5, -0.5,  0.5, -0.5, -0.5,  0.5, -0.5, 0.5, -0.5, -0.5, 0.5
+    ]
+    
+    normals = [
+        # Z+
+        0.0, 0.0, 1.0,   0.0, 0.0, 1.0,   0.0, 0.0, 1.0,   0.0, 0.0, 1.0,
+        # Z-
+        0.0, 0.0, -1.0,  0.0, 0.0, -1.0,  0.0, 0.0, -1.0,  0.0, 0.0, -1.0,
+        # X+
+        1.0, 0.0, 0.0,   1.0, 0.0, 0.0,   1.0, 0.0, 0.0,   1.0, 0.0, 0.0,
+        # X-
+        -1.0, 0.0, 0.0,  -1.0, 0.0, 0.0,  -1.0, 0.0, 0.0,  -1.0, 0.0, 0.0,
+        # Y+
+        0.0, 1.0, 0.0,   0.0, 1.0, 0.0,   0.0, 1.0, 0.0,   0.0, 1.0, 0.0,
+        # Y-
+        0.0, -1.0, 0.0,  0.0, -1.0, 0.0,  0.0, -1.0, 0.0,  0.0, -1.0, 0.0
+    ]
+    
+    indices = [
+        0, 1, 2,  2, 3, 0,        # Z+
+        4, 6, 5,  6, 4, 7,        # Z- (flipped winding order for proper inside-out)
+        8, 9, 10, 10, 11, 8,      # X+
+        12, 14, 13, 14, 12, 15,   # X-
+        16, 17, 18, 18, 19, 16,   # Y+
+        20, 22, 21, 22, 20, 23    # Y-
+    ]
+    
+    return Mesh(vertices, indices, normals, [-0.5, -0.5, -0.5], [0.5, 0.5, 0.5])
+
+
+def create_plane_mesh() -> Mesh:
+    # A single square plane in the XY flat space
+    vertices = [
+        -1.0, -1.0, 0.0,
+         1.0, -1.0, 0.0,
+         1.0,  1.0, 0.0,
+        -1.0,  1.0, 0.0
+    ]
+    normals = [
+        0.0, 0.0, 1.0,
+        0.0, 0.0, 1.0,
+        0.0, 0.0, 1.0,
+        0.0, 0.0, 1.0
+    ]
+    indices = [
+        0, 1, 2,
+        2, 3, 0
+    ]
+    return Mesh(vertices, indices, normals, [-1.0, -1.0, 0.0], [1.0, 1.0, 0.0])
+
+
+def create_sphere_mesh(rings=16, sectors=32) -> Mesh:
+    vertices = []
+    normals = []
+    indices = []
+    
+    R = 1.0 / float(rings - 1)
+    S = 1.0 / float(sectors - 1)
+    
+    for r in range(rings):
+        for s in range(sectors):
+            y = np.sin(-np.pi/2.0 + np.pi * r * R)
+            x = np.cos(2.0 * np.pi * s * S) * np.sin(np.pi * r * R)
+            z = np.sin(2.0 * np.pi * s * S) * np.sin(np.pi * r * R)
+            
+            # Since this is a Z-up, let's swap z and y for standard Z-up sphere
+            # Z points up, X/Y form horizontal ground.
+            vx, vy, vz = x, z, y
+            
+            vertices.extend([vx, vy, vz])
+            normals.extend([vx, vy, vz])  # Unit sphere normals match vertex positions
+            
+    for r in range(rings - 1):
+        for s in range(sectors - 1):
+            i00 = r * sectors + s
+            i01 = r * sectors + (s + 1)
+            i10 = (r + 1) * sectors + s
+            i11 = (r + 1) * sectors + (s + 1)
+            
+            indices.extend([i00, i01, i11])
+            indices.extend([i11, i10, i00])
+            
+    return Mesh(vertices, indices, normals, [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
+
+
+class Scene:
+    """Manages scene objects, selection state, and ray-AABB intersections."""
+    def __init__(self):
+        self.objects = []
+        self.selected_object = None
+
+    def add_object(self, obj: Object):
+        self.objects.append(obj)
+
+    def remove_object(self, obj: Object):
+        if obj in self.objects:
+            self.objects.remove(obj)
+            if self.selected_object == obj:
+                self.selected_object = None
+
+    def clear(self):
+        self.objects.clear()
+        self.selected_object = None
+
+    def perform_picking(self, mouse_x: float, mouse_y: float, viewport_width: float, viewport_height: float, camera: Camera):
+        """
+        Calculates world-space ray and runs Ray-AABB Slab intersection test
+        against all active objects. Selects the closest hit object.
+        """
+        # 1. Convert mouse coordinates to Normalized Device Coordinates (NDC)
+        # NDC range: x in [-1, 1], y in [-1, 1] (y is up in NDC, so we invert screen y)
+        ndc_x = (2.0 * mouse_x) / viewport_width - 1.0
+        ndc_y = 1.0 - (2.0 * mouse_y) / viewport_height
+        
+        # NDC ray starts at near plane and ends at far plane
+        ray_ndc_near = np.array([ndc_x, ndc_y, -1.0, 1.0], dtype=np.float32)
+        ray_ndc_far = np.array([ndc_x, ndc_y, 1.0, 1.0], dtype=np.float32)
+        
+        # 2. Get matrices
+        aspect = viewport_width / max(viewport_height, 1.0)
+        view_mat = camera.get_view_matrix()
+        proj_mat = camera.get_projection_matrix(aspect)
+        
+        vp_mat = pyrr.matrix44.multiply(view_mat, proj_mat)
+        inv_vp_mat = pyrr.matrix44.inverse(vp_mat)
+        
+        # 3. Unproject ray to world coordinates
+        world_near = pyrr.matrix44.apply_to_vector(inv_vp_mat, ray_ndc_near)
+        world_far = pyrr.matrix44.apply_to_vector(inv_vp_mat, ray_ndc_far)
+        
+        # Normalize projective coordinate w
+        world_near = world_near[:3] / world_near[3]
+        world_far = world_far[:3] / world_far[3]
+        
+        ray_origin = world_near
+        ray_dir = world_far - world_near
+        ray_dir = ray_dir / np.linalg.norm(ray_dir)
+        
+        closest_hit_obj = None
+        min_t = float('inf')
+        
+        # 4. Slab Method Ray-AABB Intersection check for each object
+        for obj in self.objects:
+            bounds_min, bounds_max = obj.get_world_aabb()
+            hit, t = self.ray_aabb_intersect(ray_origin, ray_dir, bounds_min, bounds_max)
+            if hit and t < min_t:
+                min_t = t
+                closest_hit_obj = obj
+                
+        self.selected_object = closest_hit_obj
+        return closest_hit_obj
+
+    @staticmethod
+    def ray_aabb_intersect(origin, direction, box_min, box_max) -> tuple:
+        """
+        Slab method for Ray-AABB intersection.
+        Returns (has_hit: bool, t_intersection: float)
+        """
+        t_min = -float('inf')
+        t_max = float('inf')
+        
+        for i in range(3):
+            if np.abs(direction[i]) < 1e-6:
+                # Ray is parallel to the slab; check if origin is inside the slab limits
+                if origin[i] < box_min[i] or origin[i] > box_max[i]:
+                    return False, 0.0
+            else:
+                t1 = (box_min[i] - origin[i]) / direction[i]
+                t2 = (box_max[i] - origin[i]) / direction[i]
+                
+                t_entry = min(t1, t2)
+                t_exit = max(t1, t2)
+                
+                t_min = max(t_min, t_entry)
+                t_max = min(t_max, t_exit)
+                
+        if t_min <= t_max and t_max >= 0.0:
+            # If t_min is negative, the ray origin is inside the bounding box
+            t_hit = t_min if t_min >= 0.0 else t_max
+            return True, t_hit
+            
+        return False, 0.0
+
+
+def load_mesh_file(file_path: str) -> Mesh:
+    """Loads a mesh file (.obj, .glb, .gltf, .ply) using trimesh and returns a Mesh instance."""
+    import trimesh
+    mesh_data = trimesh.load(file_path)
+    
+    # If the loaded data is a Scene (which contains multiple meshes, e.g. from glb/gltf)
+    if isinstance(mesh_data, trimesh.Scene):
+        if not mesh_data.geometry:
+            raise ValueError("The loaded 3D scene contains no geometries.")
+        # Concatenate all geometries into a single mesh for editing
+        geoms = list(mesh_data.geometry.values())
+        mesh_data = trimesh.util.concatenate(geoms)
+        
+    vertices = mesh_data.vertices.astype(np.float32)
+    indices = mesh_data.faces.astype(np.uint32)
+    
+    # Extract normals, compute if missing
+    if hasattr(mesh_data, 'vertex_normals') and mesh_data.vertex_normals is not None and len(mesh_data.vertex_normals) > 0:
+        normals = mesh_data.vertex_normals.astype(np.float32)
+    else:
+        mesh_data.vertex_normals = trimesh.geometry.weighted_vertex_normals(
+            len(mesh_data.vertices), mesh_data.faces, mesh_data.face_normals, mesh_data.face_angles
+        )
+        normals = mesh_data.vertex_normals.astype(np.float32)
+        
+    # Extract texture coords and material texture image if present
+    texcoords = None
+    texture_data = None
+    if hasattr(mesh_data, 'visual') and mesh_data.visual is not None:
+        if hasattr(mesh_data.visual, 'uv') and mesh_data.visual.uv is not None and len(mesh_data.visual.uv) > 0:
+            texcoords = mesh_data.visual.uv.astype(np.float32)
+            
+            # Extract material image
+            if hasattr(mesh_data.visual, 'material') and mesh_data.visual.material is not None:
+                if hasattr(mesh_data.visual.material, 'image') and mesh_data.visual.material.image is not None:
+                    texture_data = mesh_data.visual.material.image
+                    
+    local_min = mesh_data.bounds[0].astype(np.float32)
+    local_max = mesh_data.bounds[1].astype(np.float32)
+    
+    return Mesh(
+        vertices.flatten(), 
+        indices.flatten(), 
+        normals.flatten(), 
+        local_min, 
+        local_max, 
+        texcoords.flatten() if texcoords is not None else None, 
+        texture_data
+    )
+
+
+def export_scene_to_file(scene, file_path: str):
+    """Parent all scene objects to a single world mesh and export it to OBJ or GLB."""
+    import trimesh
+    import numpy as np
+    
+    if not scene.objects:
+        raise ValueError("No objects in the scene to export.")
+        
+    meshes_to_merge = []
+    
+    for obj in scene.objects:
+        vertices = obj.mesh.vertices.reshape(-1, 3)
+        faces = obj.mesh.indices.reshape(-1, 3)
+        
+        # Transform the vertices to world space using the object's model matrix
+        model_mat = obj.get_model_matrix()
+        world_vertices = []
+        for v in vertices:
+            v4 = np.array([v[0], v[1], v[2], 1.0], dtype=np.float32)
+            wv = pyrr.matrix44.apply_to_vector(model_mat, v4)[:3]
+            world_vertices.append(wv)
+        world_vertices = np.array(world_vertices, dtype=np.float32)
+        
+        # Create trimesh for this object
+        t_mesh = trimesh.Trimesh(vertices=world_vertices, faces=faces)
+        
+        # Transform normals if present
+        if obj.mesh.normals is not None and len(obj.mesh.normals) > 0:
+            normals = obj.mesh.normals.reshape(-1, 3)
+            try:
+                inv_trans_model = np.linalg.inv(model_mat).T
+                world_normals = []
+                for n in normals:
+                    n4 = np.array([n[0], n[1], n[2], 0.0], dtype=np.float32)
+                    wn = pyrr.matrix44.apply_to_vector(inv_trans_model, n4)[:3]
+                    length = np.linalg.norm(wn)
+                    if length > 0.0:
+                        wn /= length
+                    world_normals.append(wn)
+                t_mesh.vertex_normals = np.array(world_normals, dtype=np.float32)
+            except Exception:
+                # Fallback to computing normal vector if inverse fails (e.g. scale is 0)
+                pass
+                
+        # Handle UVs and texture mapping
+        if obj.mesh.texcoords is not None and len(obj.mesh.texcoords) > 0 and obj.mesh.texture_data is not None:
+            t_mesh.visual = trimesh.visual.TextureVisuals(
+                uv=obj.mesh.texcoords.reshape(-1, 2),
+                material=trimesh.visual.material.SimpleMaterial(image=obj.mesh.texture_data)
+            )
+            
+        meshes_to_merge.append(t_mesh)
+        
+    # Concatenate all meshes
+    combined_mesh = trimesh.util.concatenate(meshes_to_merge)
+    
+    # Export to chosen format
+    combined_mesh.export(file_path)
+
+
