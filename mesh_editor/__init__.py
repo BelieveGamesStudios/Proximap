@@ -11,8 +11,8 @@ from mesh_editor.viewport import MeshEditorViewport
 from mesh_editor.scene import Object, load_mesh_file
 
 class MeshImportWorker(QThread):
-    # Signals: finished (success, mesh, error_message)
-    finished = Signal(bool, object, str)
+    # Signals: finished (success, meshes, error_message)
+    finished = Signal(bool, list, str)
     
     def __init__(self, file_path: str):
         super().__init__()
@@ -21,12 +21,31 @@ class MeshImportWorker(QThread):
     def run(self):
         try:
             # Load mesh in the worker thread (heavy CPU task)
-            mesh = load_mesh_file(self.file_path)
-            self.finished.emit(True, mesh, "")
+            meshes = load_mesh_file(self.file_path)
+            self.finished.emit(True, meshes, "")
         except Exception as e:
             import traceback
             err_details = traceback.format_exc()
             self.finished.emit(False, None, f"{str(e)}\n\n{err_details}")
+
+class MeshExportWorker(QThread):
+    # Signals: finished (success, error_message)
+    finished = Signal(bool, str)
+    
+    def __init__(self, scene, file_path: str):
+        super().__init__()
+        self.scene = scene
+        self.file_path = file_path
+        
+    def run(self):
+        try:
+            from mesh_editor.scene import export_scene_to_file
+            export_scene_to_file(self.scene, self.file_path)
+            self.finished.emit(True, "")
+        except Exception as e:
+            import traceback
+            err_details = traceback.format_exc()
+            self.finished.emit(False, f"{str(e)}\n\n{err_details}")
 
 class MeshImportProgressDialog(QDialog):
     def __init__(self, parent=None):
@@ -372,10 +391,21 @@ class MeshEditorWidget(QWidget):
         
         # 1. File Menu
         file_menu = QMenu("File", self.menu_bar)
+        
         action_import = file_menu.addAction("Import Mesh (.obj, .glb)")
         action_import.triggered.connect(self._on_import_model_clicked)
+        
+        action_load_recon = file_menu.addAction("Load Reconstructed Model")
+        action_load_recon.triggered.connect(self._on_load_reconstructed_model_clicked)
+        
+        action_import_pxm = file_menu.addAction("Import .PXM")
+        action_import_pxm.triggered.connect(self._on_import_pxm_clicked)
+        
+        file_menu.addSeparator()
+        
         action_export = file_menu.addAction("Export Scene (.obj, .glb)")
         action_export.triggered.connect(self._on_export_scene_clicked)
+        
         self.menu_bar.addMenu(file_menu)
         
         # 2. Edit Menu
@@ -434,8 +464,80 @@ class MeshEditorWidget(QWidget):
         
         viewport_layout.addWidget(self.menu_bar)
         
+        # Horizontal layout for the toolbar and the viewport
+        viewport_hbox = QHBoxLayout()
+        viewport_hbox.setContentsMargins(0, 0, 0, 0)
+        viewport_hbox.setSpacing(0)
+        
+        # Create Vertical Toolbar Frame
+        self.trans_toolbar = QFrame(viewport_container)
+        self.trans_toolbar.setObjectName("ViewportToolbar")
+        self.trans_toolbar.setFixedWidth(42)
+        self.trans_toolbar.setStyleSheet("""
+            QFrame#ViewportToolbar {
+                background-color: #1A1A1A;
+                border-right: 1px solid #2D2D2D;
+            }
+            QPushButton {
+                background-color: transparent;
+                color: #aaaaaa;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                font-size: 16px;
+                font-weight: bold;
+                margin: 4px;
+                padding: 6px;
+            }
+            QPushButton:hover {
+                background-color: #2D2D2D;
+                color: #ffffff;
+                border: 1px solid #444444;
+            }
+            QPushButton:checked {
+                background-color: #00E676;
+                color: #121212;
+                border: 1px solid #00E676;
+            }
+        """)
+        
+        toolbar_layout = QVBoxLayout(self.trans_toolbar)
+        toolbar_layout.setContentsMargins(0, 4, 0, 4)
+        toolbar_layout.setSpacing(4)
+        
+        from PySide6.QtWidgets import QButtonGroup
+        self.tool_group = QButtonGroup(self)
+        self.tool_group.setExclusive(True)
+        
+        # Translate Tool Button
+        self.btn_tool_translate = QPushButton("✥", self.trans_toolbar)
+        self.btn_tool_translate.setCheckable(True)
+        self.btn_tool_translate.setChecked(True)
+        self.btn_tool_translate.setToolTip("Translate (G)")
+        self.tool_group.addButton(self.btn_tool_translate)
+        toolbar_layout.addWidget(self.btn_tool_translate)
+        
+        # Rotate Tool Button
+        self.btn_tool_rotate = QPushButton("⟳", self.trans_toolbar)
+        self.btn_tool_rotate.setCheckable(True)
+        self.btn_tool_rotate.setToolTip("Rotate (R)")
+        self.tool_group.addButton(self.btn_tool_rotate)
+        toolbar_layout.addWidget(self.btn_tool_rotate)
+        
+        # Scale Tool Button
+        self.btn_tool_scale = QPushButton("⤢", self.trans_toolbar)
+        self.btn_tool_scale.setCheckable(True)
+        self.btn_tool_scale.setToolTip("Scale (S)")
+        self.tool_group.addButton(self.btn_tool_scale)
+        toolbar_layout.addWidget(self.btn_tool_scale)
+        
+        toolbar_layout.addStretch()
+        
+        viewport_hbox.addWidget(self.trans_toolbar)
+        
         self.viewport = MeshEditorViewport(viewport_container)
-        viewport_layout.addWidget(self.viewport, stretch=1)
+        viewport_hbox.addWidget(self.viewport, stretch=1)
+        
+        viewport_layout.addLayout(viewport_hbox, stretch=1)
         
         layout.addWidget(viewport_container, stretch=4)
         
@@ -479,6 +581,12 @@ class MeshEditorWidget(QWidget):
         
         # 10. Viewport key shortcuts
         self.viewport.delete_pressed.connect(self._delete_selected_object)
+        
+        # 11. Toolbar events
+        self.btn_tool_translate.clicked.connect(self._change_tool_to_translate)
+        self.btn_tool_rotate.clicked.connect(self._change_tool_to_rotate)
+        self.btn_tool_scale.clicked.connect(self._change_tool_to_scale)
+        self.viewport.tool_changed.connect(self._on_viewport_tool_changed)
 
     def _populate_outliner(self):
         self.outliner_list.blockSignals(True)
@@ -520,10 +628,12 @@ class MeshEditorWidget(QWidget):
         else:
             # Sync outliner selection
             self.outliner_list.blockSignals(True)
+            self.outliner_list.clearSelection()
             for i in range(self.outliner_list.count()):
                 item_name = self.outliner_list.item(i).text()
                 if item_name == selected_obj.name:
                     self.outliner_list.setCurrentRow(i)
+                    self.outliner_list.item(i).setSelected(True)
                     break
             self.outliner_list.blockSignals(False)
             
@@ -537,12 +647,12 @@ class MeshEditorWidget(QWidget):
 
     def _on_outliner_row_changed(self, row: int):
         if row < 0 or row >= len(self.viewport.scene.objects):
-            self.viewport.scene.selected_object = None
+            selected_obj = None
         else:
             selected_obj = self.viewport.scene.objects[row]
-            self.viewport.scene.selected_object = selected_obj
-            self._set_properties_enabled(True)
-            self._sync_properties_from_object(selected_obj)
+            
+        self.viewport.scene.selected_object = selected_obj
+        self._on_viewport_selection_changed(selected_obj)
         self.viewport.update()
 
     def _sync_properties_from_object(self, obj: Object):
@@ -639,11 +749,11 @@ class MeshEditorWidget(QWidget):
             self.viewport.grid_color_1 = np.array([r, g, b, a], dtype=np.float32)
             self.viewport.update()
 
-    def _on_import_model_clicked(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Import 3D Model", "", "3D Mesh Files (*.obj *.glb *.gltf *.ply)"
-        )
-        if not file_path:
+    def _import_mesh_from_path(self, file_path: str):
+        if not file_path or not os.path.exists(file_path):
+            QMessageBox.critical(
+                self, "Import Error", f"Model file not found:\n{file_path}"
+            )
             return
             
         # Display modal dialog
@@ -657,7 +767,110 @@ class MeshEditorWidget(QWidget):
         self.import_worker.start()
         self.import_dialog.exec()
 
-    def _on_import_finished(self, success: bool, mesh, error_msg: str):
+    def _on_import_model_clicked(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Import 3D Model", "", "3D Mesh Files (*.obj *.glb *.gltf *.ply)"
+        )
+        if file_path:
+            self._import_mesh_from_path(file_path)
+
+    def _on_load_reconstructed_model_clicked(self):
+        # Traverse up parent to find active mvs_dir
+        mvs_dir = None
+        curr = self.parent()
+        while curr is not None:
+            if hasattr(curr, '_get_active_mvs_dir'):
+                mvs_dir = curr._get_active_mvs_dir()
+                break
+            curr = curr.parent()
+            
+        if not mvs_dir:
+            try:
+                from main_window import get_reconstruction_out_dir
+                mvs_dir = os.path.join(get_reconstruction_out_dir(), "mvs")
+            except Exception:
+                local_appdata = os.environ.get("LOCALAPPDATA")
+                if local_appdata:
+                    mvs_dir = os.path.join(local_appdata, "Proximap", "reconstruction_out", "mvs")
+                else:
+                    mvs_dir = os.path.join(os.path.expanduser("~"), ".proximap", "reconstruction_out", "mvs")
+                    
+        # Check candidates
+        found_path = None
+        for candidate in [
+            "scene_dense_mesh_texture.obj",
+            "scene_dense_mesh_texture.glb",
+            "scene_dense_mesh_texture.ply",
+            "scene_dense_mesh_refine.ply",
+            "scene_dense_mesh.ply",
+            "scene_mesh.ply"
+        ]:
+            path = os.path.join(mvs_dir, candidate)
+            if os.path.exists(path):
+                found_path = path
+                break
+                
+        if found_path:
+            self._import_mesh_from_path(found_path)
+        else:
+            QMessageBox.warning(
+                self, 
+                "Reconstruction Model Not Found", 
+                f"No reconstructed model could be found in the current session folder:\n{mvs_dir}\n\nPlease run the dense reconstruction/texturing step first."
+            )
+
+    def _on_import_pxm_clicked(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Import Proximap Project", "", "Proximap Project Files (*.pxm)"
+        )
+        if not file_path:
+            return
+            
+        import zipfile
+        import tempfile
+        import uuid
+        
+        try:
+            # Create a temporary extraction directory inside temp root
+            temp_dir = os.path.join(tempfile.gettempdir(), f"proximap_pxm_import_{uuid.uuid4().hex}")
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # Extract zip contents
+            with zipfile.ZipFile(file_path, 'r') as zipf:
+                zipf.extractall(temp_dir)
+                
+            # Scan for candidate 3D mesh files
+            found_mesh_path = None
+            standard_obj = os.path.join(temp_dir, "scene_dense_mesh_texture.obj")
+            if os.path.exists(standard_obj):
+                found_mesh_path = standard_obj
+            else:
+                for root, _, files in os.walk(temp_dir):
+                    for file in files:
+                        if file.lower().endswith(('.obj', '.glb', '.gltf', '.ply')):
+                            found_mesh_path = os.path.join(root, file)
+                            break
+                    if found_mesh_path:
+                        break
+                        
+            if found_mesh_path:
+                self._import_mesh_from_path(found_mesh_path)
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Import PXM Error",
+                    "The selected .pxm file was successfully unpacked, but no 3D model files (.obj, .glb, etc.) were found inside."
+                )
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(
+                self,
+                "Import PXM Error",
+                f"Failed to extract and import .pxm file:\n{str(e)}"
+            )
+
+    def _on_import_finished(self, success: bool, meshes: list, error_msg: str):
         # 1. Close modal dialog
         if hasattr(self, 'import_dialog') and self.import_dialog:
             self.import_dialog.accept()
@@ -673,33 +886,38 @@ class MeshEditorWidget(QWidget):
         try:
             # 2. Setup OpenGL buffers on the main thread with context active
             self.viewport.makeCurrent()
-            mesh.setup_buffers()
+            file_path = self.import_worker.file_path
+            base_file_name = os.path.basename(file_path)
+            existing_names = [o.name for o in self.viewport.scene.objects]
+            
+            created_objects = []
+            for node_name, mesh in meshes:
+                mesh.setup_buffers()
+                
+                # Prefer geometry's own node name, fallback to base file name
+                name = node_name if node_name else base_file_name
+                unique_name = name
+                idx = 1
+                while unique_name in existing_names:
+                    unique_name = f"{name} ({idx})"
+                    idx += 1
+                existing_names.append(unique_name)
+                
+                obj = Object(unique_name, mesh)
+                self.viewport.scene.add_object(obj)
+                created_objects.append(obj)
+                
             self.viewport.doneCurrent()
             
-            # 3. Create the scene object (using filename as object name)
-            file_path = self.import_worker.file_path
-            name = os.path.basename(file_path)
-            # Ensure unique name in outliner
-            base_name = name
-            idx = 1
-            existing_names = [o.name for o in self.viewport.scene.objects]
-            while name in existing_names:
-                name = f"{base_name} ({idx})"
-                idx += 1
-                
-            obj = Object(name, mesh)
-            
-            # Add to scene
-            self.viewport.scene.add_object(obj)
-            
-            # Refresh outliner list and select it
+            # 3. Refresh outliner list
             self._populate_outliner()
             
-            # Select the newly imported object
-            self.viewport.scene.selected_object = obj
-            self._on_viewport_selection_changed(obj)
-            
-            # Update rendering
+            # 4. Select the last created object (or first)
+            if created_objects:
+                self.viewport.scene.selected_object = created_objects[-1]
+                self._on_viewport_selection_changed(created_objects[-1])
+                
+            # 5. Update rendering
             self.viewport.update()
             
         except Exception as e:
@@ -740,17 +958,74 @@ class MeshEditorWidget(QWidget):
         file_path, _ = QFileDialog.getSaveFileName(
             self, "Export Scene", "", "3D Mesh Files (*.obj *.glb)"
         )
-        if file_path:
-            try:
-                # Perform the export
-                from mesh_editor.scene import export_scene_to_file
-                export_scene_to_file(self.viewport.scene, file_path)
-                QMessageBox.information(
-                    self, "Export Success", f"Successfully exported scene to:\n{file_path}"
-                )
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
-                QMessageBox.critical(
-                    self, "Export Error", f"Failed to export scene:\n{str(e)}"
-                )
+        if not file_path:
+            return
+            
+        # Create and configure the waiting dialog
+        self.export_dialog = QDialog(self, Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint)
+        self.export_dialog.setWindowTitle("Exporting Scene")
+        self.export_dialog.setMinimumSize(280, 100)
+        self.export_dialog.setModal(True)
+        
+        dialog_layout = QVBoxLayout(self.export_dialog)
+        dialog_layout.setContentsMargins(20, 20, 20, 20)
+        dialog_layout.setSpacing(10)
+        
+        lbl_msg = QLabel("Merging and exporting scene objects...\nPlease wait.", self.export_dialog)
+        lbl_msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_msg.setStyleSheet("color: #ffffff; font-size: 11px;")
+        dialog_layout.addWidget(lbl_msg)
+        
+        progress_bar = QProgressBar(self.export_dialog)
+        progress_bar.setRange(0, 0)  # Infinite progress bar
+        dialog_layout.addWidget(progress_bar)
+        
+        # Start export thread
+        self.export_worker = MeshExportWorker(self.viewport.scene, file_path)
+        self.export_worker.finished.connect(self._on_export_finished)
+        self.export_worker.start()
+        
+        self.export_dialog.exec()
+
+    def _on_export_finished(self, success: bool, error_msg: str):
+        if hasattr(self, "export_dialog") and self.export_dialog:
+            self.export_dialog.accept()
+            self.export_dialog = None
+            
+        if success:
+            QMessageBox.information(
+                self, "Export Success", "Successfully consolidated and exported the scene!"
+            )
+        else:
+            QMessageBox.critical(
+                self, "Export Error", f"Consolidation/export failed:\n{error_msg}"
+            )
+            
+        self.export_worker = None
+
+    def _change_tool_to_translate(self):
+        from imgui_bundle import imguizmo
+        self.viewport.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.translate
+        self.btn_tool_translate.setChecked(True)
+        self.viewport.update()
+
+    def _change_tool_to_rotate(self):
+        from imgui_bundle import imguizmo
+        self.viewport.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.rotate
+        self.btn_tool_rotate.setChecked(True)
+        self.viewport.update()
+
+    def _change_tool_to_scale(self):
+        from imgui_bundle import imguizmo
+        self.viewport.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.scale
+        self.btn_tool_scale.setChecked(True)
+        self.viewport.update()
+
+    def _on_viewport_tool_changed(self, operation):
+        from imgui_bundle import imguizmo
+        if operation == imguizmo.im_guizmo.OPERATION.translate:
+            self.btn_tool_translate.setChecked(True)
+        elif operation == imguizmo.im_guizmo.OPERATION.rotate:
+            self.btn_tool_rotate.setChecked(True)
+        elif operation == imguizmo.im_guizmo.OPERATION.scale:
+            self.btn_tool_scale.setChecked(True)

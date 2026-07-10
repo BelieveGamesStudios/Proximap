@@ -15,6 +15,7 @@ class MeshEditorViewport(QOpenGLWidget):
     selection_changed = Signal(object) # Emits the newly selected Object (or None)
     transform_changed = Signal(object) # Emits the selected Object when transformed by the gizmo
     delete_pressed = Signal() # Emits when Delete/Backspace key is pressed
+    tool_changed = Signal(object) # Emits active gizmo OPERATION when changed by hotkey
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -198,6 +199,7 @@ class MeshEditorViewport(QOpenGLWidget):
                 )
                 if modified:
                     self.transform_changed.emit(self.scene.selected_object)
+                    self.update()  # Force next-frame repaint to render the updated model transform
                     
             self.imgui_bridge.render()
         except Exception as e:
@@ -267,6 +269,9 @@ class MeshEditorViewport(QOpenGLWidget):
                 zoom_speed = self.camera.distance * 0.005 if self.camera.is_perspective else self.camera.ortho_scale * 0.005
                 self.camera.zoom(-dy * zoom_speed)
                 self.update()
+        else:
+            # If ImGui captured the mouse move, request a redraw so the gizmo updates in real-time
+            self.update()
                 
         self.last_mouse_pos = pos.toPoint()
         super().mouseMoveEvent(event)
@@ -345,16 +350,19 @@ class MeshEditorViewport(QOpenGLWidget):
                 # G: Translate
                 from imgui_bundle import imguizmo
                 self.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.translate
+                self.tool_changed.emit(self.imgui_bridge.current_operation)
                 self.update()
             elif key == Qt.Key.Key_R:
                 # R: Rotate
                 from imgui_bundle import imguizmo
                 self.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.rotate
+                self.tool_changed.emit(self.imgui_bridge.current_operation)
                 self.update()
             elif key == Qt.Key.Key_S:
                 # S: Scale
                 from imgui_bundle import imguizmo
                 self.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.scale
+                self.tool_changed.emit(self.imgui_bridge.current_operation)
                 self.update()
             elif key in [Qt.Key.Key_Delete, Qt.Key.Key_Backspace]:
                 # Delete/Backspace: Remove Selected Object

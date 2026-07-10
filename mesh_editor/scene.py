@@ -171,7 +171,10 @@ class Mesh:
                 gl.glGenerateMipmap(gl.GL_TEXTURE_2D)
                 gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
             except Exception as e:
-                print(f"[Mesh Setup GL Texture Error]: {e}")
+                try:
+                    print(f"[Mesh Setup GL Texture Error]: {type(e).__name__}")
+                except Exception:
+                    print("[Mesh Setup GL Texture Error]: (error could not be formatted)")
                 self.texture_id = None
 
     def draw(self):
@@ -467,55 +470,59 @@ class Scene:
         return False, 0.0
 
 
-def load_mesh_file(file_path: str) -> Mesh:
-    """Loads a mesh file (.obj, .glb, .gltf, .ply) using trimesh and returns a Mesh instance."""
+def load_mesh_file(file_path: str) -> list[tuple[str, Mesh]]:
+    """Loads a mesh file (.obj, .glb, .gltf, .ply) using trimesh and returns a list of (node_name, Mesh) tuples."""
     import trimesh
     mesh_data = trimesh.load(file_path)
-    
-    # If the loaded data is a Scene (which contains multiple meshes, e.g. from glb/gltf)
+
     if isinstance(mesh_data, trimesh.Scene):
         if not mesh_data.geometry:
             raise ValueError("The loaded 3D scene contains no geometries.")
-        # Concatenate all geometries into a single mesh for editing
-        geoms = list(mesh_data.geometry.values())
-        mesh_data = trimesh.util.concatenate(geoms)
-        
-    vertices = mesh_data.vertices.astype(np.float32)
-    indices = mesh_data.faces.astype(np.uint32)
-    
-    # Extract normals, compute if missing
-    if hasattr(mesh_data, 'vertex_normals') and mesh_data.vertex_normals is not None and len(mesh_data.vertex_normals) > 0:
-        normals = mesh_data.vertex_normals.astype(np.float32)
+        named_geoms = list(mesh_data.geometry.items())  # (name, geometry) pairs
     else:
-        mesh_data.vertex_normals = trimesh.geometry.weighted_vertex_normals(
-            len(mesh_data.vertices), mesh_data.faces, mesh_data.face_normals, mesh_data.face_angles
+        named_geoms = [(None, mesh_data)]  # single mesh, no node name
+
+    results = []
+    for node_name, geom in named_geoms:
+        vertices = geom.vertices.astype(np.float32)
+        indices = geom.faces.astype(np.uint32)
+
+        # Extract normals, compute if missing
+        if hasattr(geom, 'vertex_normals') and geom.vertex_normals is not None and len(geom.vertex_normals) > 0:
+            normals = geom.vertex_normals.astype(np.float32)
+        else:
+            geom.vertex_normals = trimesh.geometry.weighted_vertex_normals(
+                len(geom.vertices), geom.faces, geom.face_normals, geom.face_angles
+            )
+            normals = geom.vertex_normals.astype(np.float32)
+
+        # Extract texture coords and material texture image if present
+        texcoords = None
+        texture_data = None
+        if hasattr(geom, 'visual') and geom.visual is not None:
+            if hasattr(geom.visual, 'uv') and geom.visual.uv is not None and len(geom.visual.uv) > 0:
+                texcoords = geom.visual.uv.astype(np.float32)
+                
+                # Extract material image
+                if hasattr(geom.visual, 'material') and geom.visual.material is not None:
+                    if hasattr(geom.visual.material, 'image') and geom.visual.material.image is not None:
+                        texture_data = geom.visual.material.image
+
+        local_min = geom.bounds[0].astype(np.float32)
+        local_max = geom.bounds[1].astype(np.float32)
+
+        mesh = Mesh(
+            vertices.flatten(), 
+            indices.flatten(), 
+            normals.flatten(), 
+            local_min, 
+            local_max, 
+            texcoords.flatten() if texcoords is not None else None, 
+            texture_data
         )
-        normals = mesh_data.vertex_normals.astype(np.float32)
-        
-    # Extract texture coords and material texture image if present
-    texcoords = None
-    texture_data = None
-    if hasattr(mesh_data, 'visual') and mesh_data.visual is not None:
-        if hasattr(mesh_data.visual, 'uv') and mesh_data.visual.uv is not None and len(mesh_data.visual.uv) > 0:
-            texcoords = mesh_data.visual.uv.astype(np.float32)
-            
-            # Extract material image
-            if hasattr(mesh_data.visual, 'material') and mesh_data.visual.material is not None:
-                if hasattr(mesh_data.visual.material, 'image') and mesh_data.visual.material.image is not None:
-                    texture_data = mesh_data.visual.material.image
-                    
-    local_min = mesh_data.bounds[0].astype(np.float32)
-    local_max = mesh_data.bounds[1].astype(np.float32)
-    
-    return Mesh(
-        vertices.flatten(), 
-        indices.flatten(), 
-        normals.flatten(), 
-        local_min, 
-        local_max, 
-        texcoords.flatten() if texcoords is not None else None, 
-        texture_data
-    )
+        results.append((node_name, mesh))
+
+    return results
 
 
 def export_scene_to_file(scene, file_path: str):
@@ -526,7 +533,7 @@ def export_scene_to_file(scene, file_path: str):
     if not scene.objects:
         raise ValueError("No objects in the scene to export.")
         
-    meshes_to_merge = []
+    export_scene = trimesh.Scene()
     
     for obj in scene.objects:
         vertices = obj.mesh.vertices.reshape(-1, 3)
@@ -542,7 +549,7 @@ def export_scene_to_file(scene, file_path: str):
         world_vertices = np.array(world_vertices, dtype=np.float32)
         
         # Create trimesh for this object
-        t_mesh = trimesh.Trimesh(vertices=world_vertices, faces=faces)
+        t_mesh = trimesh.Trimesh(vertices=world_vertices, faces=faces, process=False)
         
         # Transform normals if present
         if obj.mesh.normals is not None and len(obj.mesh.normals) > 0:
@@ -569,12 +576,9 @@ def export_scene_to_file(scene, file_path: str):
                 material=trimesh.visual.material.SimpleMaterial(image=obj.mesh.texture_data)
             )
             
-        meshes_to_merge.append(t_mesh)
+        export_scene.add_geometry(t_mesh, node_name=obj.name)
         
-    # Concatenate all meshes
-    combined_mesh = trimesh.util.concatenate(meshes_to_merge)
-    
-    # Export to chosen format
-    combined_mesh.export(file_path)
+    # Export to chosen format (Scene supports glb, gltf, obj)
+    export_scene.export(file_path)
 
 
