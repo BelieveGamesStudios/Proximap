@@ -249,10 +249,7 @@ class ViewerWrapperWidget(QFrame):
         control_layout = QHBoxLayout(self.control_bar)
         control_layout.setContentsMargins(10, 5, 10, 5)
         
-        self.title_label = QLabel("3D Spatial Visualization", self.control_bar)
-        self.title_label.setStyleSheet("font-weight: bold; color: #ffffff; font-size: 13px; margin-left: 5px;")
-        
-        # Dropdown File Menu next to title
+        # Dropdown File Menu
         self.file_menu_btn = QPushButton("File ▾", self.control_bar)
         self.file_menu_btn.setStyleSheet("""
             QPushButton {
@@ -263,7 +260,7 @@ class ViewerWrapperWidget(QFrame):
                 color: #ffffff;
                 border: 1px solid #444444;
                 border-radius: 4px;
-                margin-left: 10px;
+                margin-left: 0px;
             }
             QPushButton:hover {
                 background-color: #444444;
@@ -294,6 +291,18 @@ class ViewerWrapperWidget(QFrame):
         self.action_save = self.file_menu.addAction("Save Project (.pxm)")
         self.action_load = self.file_menu.addAction("Load Project (.pxm)")
         self.action_recover = self.file_menu.addAction("Recover Last Session")
+        self.file_menu.addSeparator()
+        self.action_export_dense = self.file_menu.addAction("Export Dense")
+        self.action_export_sparse = self.file_menu.addAction("Export Sparse")
+        self.action_export_obj = self.file_menu.addAction("Export OBJ")
+        self.file_menu.addSeparator()
+        self.action_upload_proximap = self.file_menu.addAction("Upload to Proximap")
+        
+        self.action_export_dense.setEnabled(False)
+        self.action_export_sparse.setEnabled(False)
+        self.action_export_obj.setEnabled(False)
+        self.action_upload_proximap.setEnabled(False)
+        
         self.file_menu_btn.setMenu(self.file_menu)
         
         # Dropdown to choose camera tracking style
@@ -351,7 +360,6 @@ class ViewerWrapperWidget(QFrame):
         self.reload_btn = QPushButton("Reload", self.control_bar)
         self.reload_btn.setStyleSheet("font-size: 11px; padding: 4px 8px; font-weight: normal;")
         
-        control_layout.addWidget(self.title_label)
         control_layout.addWidget(self.file_menu_btn)
         control_layout.addStretch()
         control_layout.addWidget(self.cam_select)
@@ -386,10 +394,6 @@ class ViewerWrapperWidget(QFrame):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         w = self.width()
-        if w < 720:
-            self.title_label.setVisible(False)
-        else:
-            self.title_label.setVisible(True)
             
         if w < 600:
             self.show_controls_cb.setText("Controls")
@@ -1188,54 +1192,7 @@ class MainWindow(QMainWindow):
         step2_layout.addWidget(self.status_label)
         scroll_content_layout.addWidget(step2_box)
         
-        # STEP 3: Export Mesh
-        self.step3_box = QFrame(scroll_content)
-        self.step3_box.setObjectName("StepBox")
-        step3_layout = QVBoxLayout(self.step3_box)
-        
-        s3_title = QLabel("Step 3: Export Mesh", self.step3_box)
-        s3_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #00E676;")
-        
-        self.radio_glb = QRadioButton("Export as .glb (Textured)", self.step3_box)
-        self.radio_obj = QRadioButton("Export as .obj (Separated)", self.step3_box)
-        self.radio_ply = QRadioButton("Export as .ply (Point Cloud)", self.step3_box)
-        self.radio_obj.setChecked(True)
-        
-        self.radio_group = QButtonGroup(self.step3_box)
-        self.radio_group.addButton(self.radio_glb)
-        self.radio_group.addButton(self.radio_obj)
-        self.radio_group.addButton(self.radio_ply)
-        
-        self.export_btn = QPushButton("Export...", self.step3_box)
-        self.export_btn.setEnabled(False)
-        self.export_btn.clicked.connect(self._export_mesh)
-        
-        self.upload_portal_btn = QPushButton("Upload to Proximap", self.step3_box)
-        self.upload_portal_btn.setEnabled(False)
-        self.upload_portal_btn.clicked.connect(self._upload_to_proximap)
-        self.upload_portal_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #1A1A1A;
-                color: #00E676;
-                border: 1px solid #00E676;
-                margin-top: 5px;
-            }
-            QPushButton:hover {
-                background-color: #00E676;
-                color: #121212;
-            }
-        """)
-        
-        step3_layout.addWidget(s3_title)
-        step3_layout.addWidget(self.radio_glb)
-        step3_layout.addWidget(self.radio_obj)
-        step3_layout.addWidget(self.radio_ply)
-        step3_layout.addWidget(self.export_btn)
-        step3_layout.addWidget(self.upload_portal_btn)
-        scroll_content_layout.addWidget(self.step3_box)
-        
-        # Disable Step 3 until processing finishes
-        self.step3_box.setEnabled(False)
+        # Step 3 Export Mesh option has been moved to the file header menu.
         
         # 3D Visualizer Toggle Button
         self.view_scene_btn = QPushButton("Show 3D Viewer", scroll_content)
@@ -1283,6 +1240,10 @@ class MainWindow(QMainWindow):
         self.viewer_widget.action_save.triggered.connect(self._save_project)
         self.viewer_widget.action_load.triggered.connect(self._load_project)
         self.viewer_widget.action_recover.triggered.connect(self._retrieve_last_session)
+        self.viewer_widget.action_export_dense.triggered.connect(lambda: self._export_mesh(".glb"))
+        self.viewer_widget.action_export_sparse.triggered.connect(lambda: self._export_mesh(".ply"))
+        self.viewer_widget.action_export_obj.triggered.connect(lambda: self._export_mesh(".obj"))
+        self.viewer_widget.action_upload_proximap.triggered.connect(self._upload_to_proximap)
         
         # Initialize VisPy Canvas
         self.canvas = scene.SceneCanvas(keys='interactive', show=False, bgcolor=self.viewport_bg_color)
@@ -1374,6 +1335,7 @@ class MainWindow(QMainWindow):
         self.main_tabs.addTab(reconstruction_tab, "3D Reconstruction")
         
         self.mesh_editor_tab = MeshEditorWidget(self.main_tabs)
+        self.mesh_editor_tab.action_upload_proximap.triggered.connect(self._upload_mesh_editor_scene)
         self.main_tabs.addTab(self.mesh_editor_tab, "Mesh Editor")
         
         self._set_process_btn_state("idle")
@@ -1856,7 +1818,7 @@ class MainWindow(QMainWindow):
         self.browse_btn.setEnabled(False)
         self.bg_remove_btn.setEnabled(False)
         self.process_btn.setEnabled(False)
-        self.step3_box.setEnabled(False)
+        self._set_export_actions_enabled(False)
         self.photos_tab.setEnabled(False)
         
         self.progress_bar.setValue(0)
@@ -1925,8 +1887,7 @@ class MainWindow(QMainWindow):
         
         self._set_process_btn_state("progress")
         self.browse_btn.setEnabled(False)
-        self.step3_box.setEnabled(False)
-        self.upload_portal_btn.setEnabled(False)
+        self._set_export_actions_enabled(False)
         self.bg_remove_btn.setEnabled(False)
         self.quality_combo.setEnabled(False)
         self.gpu_combo.setEnabled(False)
@@ -1991,7 +1952,6 @@ class MainWindow(QMainWindow):
         if success:
             self._set_process_btn_state("ready")
             self.console_text.append(f"[FINISHED] {msg}")
-            self.step3_box.setEnabled(True)
             self._update_upload_button_state()
             
             mvs_dir = os.path.join(get_reconstruction_out_dir(), "mvs")
@@ -2024,14 +1984,7 @@ class MainWindow(QMainWindow):
             self.console_text.append(f"[FAILED] Reconstruction failed: {msg}")
         self._update_file_menu_states()
 
-    def _export_mesh(self):
-        # Determine format selection
-        fmt = ".obj"
-        if self.radio_ply.isChecked():
-            fmt = ".ply"
-        elif self.radio_glb.isChecked():
-            fmt = ".glb"
-            
+    def _export_mesh(self, fmt):
         file_path, _ = QFileDialog.getSaveFileName(
             self, "Save Final Reconstruction Mesh", os.path.join(self.last_accessed_dir, f"reconstructed_mesh{fmt}"), f"Mesh Files (*{fmt})"
         )
@@ -2116,13 +2069,18 @@ class MainWindow(QMainWindow):
         output_dir = get_reconstruction_out_dir()
         return os.path.join(output_dir, "mvs")
 
+    def _set_export_actions_enabled(self, enabled: bool):
+        self.viewer_widget.action_export_dense.setEnabled(enabled)
+        self.viewer_widget.action_export_sparse.setEnabled(enabled)
+        self.viewer_widget.action_export_obj.setEnabled(enabled)
+        self.viewer_widget.action_upload_proximap.setEnabled(enabled)
+
     def _update_upload_button_state(self):
         mvs_out = self._get_active_mvs_dir()
         src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
         src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
         has_model = os.path.exists(src_glb) or os.path.exists(src_obj)
-        self.upload_portal_btn.setEnabled(has_model)
-        self.export_btn.setEnabled(has_model)
+        self._set_export_actions_enabled(has_model)
 
     def _check_existing_scene(self):
         """Checks if a previous reconstruction scene exists and updates recover action state."""
@@ -2137,7 +2095,6 @@ class MainWindow(QMainWindow):
     def _retrieve_last_session(self):
         """Retrieves and displays the last session, and enables export/upload buttons."""
         self.view_scene_btn.setEnabled(True)
-        self.step3_box.setEnabled(True)
         self.console_text.append("[INFO] Retrieved last session. 3D Viewer is ready to display.")
         self._update_upload_button_state()
         
@@ -2244,7 +2201,6 @@ class MainWindow(QMainWindow):
         # Update viewer state
         self.viewer_widget.set_mvs_directory(mvs_dir)
         self.view_scene_btn.setEnabled(True)
-        self.step3_box.setEnabled(True)
         self._update_upload_button_state()
         
         # Determine the best view mode and load it immediately
@@ -3085,6 +3041,80 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self.loopback_server = None
+
+    def _upload_mesh_editor_scene(self):
+        if not self.mesh_editor_tab.viewport.scene.objects:
+            QMessageBox.warning(
+                self, "Upload Warning", "There are no objects in the scene to upload."
+            )
+            return
+            
+        # Create a temp path inside the reconstruction_out directory
+        output_dir = get_reconstruction_out_dir()
+        temp_dir = os.path.join(output_dir, "temp")
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_glb_path = os.path.join(temp_dir, "temp_editor_baked.glb")
+        
+        # BAKE the transform by exporting to GLB
+        from mesh_editor.scene import export_scene_to_file
+        try:
+            export_scene_to_file(self.mesh_editor_tab.viewport.scene, temp_glb_path)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Baking/Export Error", f"Failed to bake and prepare model for upload:\n{str(e)}"
+            )
+            return
+            
+        # Start local loopback server to host this temp baked GLB
+        self.console_text.append(f"[BRIDGE] Initializing local server to host baked model: {temp_glb_path}")
+        
+        if hasattr(self, 'loopback_server') and self.loopback_server:
+            try:
+                self.loopback_server.stop()
+            except Exception:
+                pass
+                
+        import random
+        port = random.randint(53120, 53200)
+        self.loopback_server = LoopbackServerThread(temp_glb_path, port=port)
+        self.loopback_server.start()
+        
+        import time
+        time.sleep(0.5)
+        
+        actual_port = self.loopback_server.port
+        local_url = f"http://127.0.0.1:{actual_port}/model.glb"
+        
+        model_name = "Mesh_Editor_Space"
+        
+        import urllib.parse
+        encoded_url = urllib.parse.quote(local_url, safe='')
+        encoded_name = urllib.parse.quote(model_name, safe='')
+        bridge_url = f"https://proximap.space/upload-bridge?local_url={encoded_url}&name={encoded_name}"
+        
+        self.console_text.append(f"[BRIDGE] Directing system browser to: {bridge_url}")
+        import webbrowser
+        webbrowser.open(bridge_url)
+        
+        # Show progress dialog modally
+        dialog = UploadProgressDialog(self)
+        dialog.exec()
+        
+        # Stop loopback server when user clicks "Done"
+        self.console_text.append("[BRIDGE] Upload dialog closed. Terminating local server...")
+        if hasattr(self, 'loopback_server') and self.loopback_server:
+            try:
+                self.loopback_server.stop()
+            except Exception:
+                pass
+            self.loopback_server = None
+            
+        # Clean up the temp file
+        try:
+            if os.path.exists(temp_glb_path):
+                os.remove(temp_glb_path)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

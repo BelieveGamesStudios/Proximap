@@ -36,6 +36,7 @@ class MeshEditorViewport(QOpenGLWidget):
         self.grid_fade = 60.0
         self.grid_thickness = 1.0
         self.grid_subdivisions = 10.0
+        self.invert_y = False
         
         # Orbital Navigation mouse states
         self.last_mouse_pos = QPoint()
@@ -250,6 +251,8 @@ class MeshEditorViewport(QOpenGLWidget):
         pos = event.position()
         dx = pos.x() - self.last_mouse_pos.x()
         dy = pos.y() - self.last_mouse_pos.y()
+        if self.invert_y:
+            dy = -dy
         
         # 1. Forward to ImGui first
         captured = self.imgui_bridge.process_mouse_move(pos.x(), pos.y())

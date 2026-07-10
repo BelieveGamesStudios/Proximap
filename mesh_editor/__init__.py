@@ -150,7 +150,7 @@ class MeshEditorWidget(QWidget):
         outliner_vlayout.addWidget(outliner_title)
         
         self.outliner_list = QListWidget(outliner_box)
-        self.outliner_list.setFixedHeight(120)
+        self.outliner_list.setMinimumHeight(120)
         self.outliner_list.setStyleSheet("""
             QListWidget {
                 background-color: #121212;
@@ -191,7 +191,7 @@ class MeshEditorWidget(QWidget):
         self.btn_delete_mesh.setEnabled(False)
         outliner_vlayout.addWidget(self.btn_delete_mesh)
         
-        scroll_layout.addWidget(outliner_box)
+        scroll_layout.addWidget(outliner_box, stretch=1)
         
         # SECTION 2: Transform Properties
         self.properties_box = QFrame(scroll_content)
@@ -347,9 +347,7 @@ class MeshEditorWidget(QWidget):
         grid_layout.addWidget(self.sp_scale_z, 11, 1)
         
         properties_vlayout.addLayout(grid_layout)
-        scroll_layout.addWidget(self.properties_box)
-        
-        scroll_layout.addStretch()
+        scroll_layout.addWidget(self.properties_box, stretch=0)
         
         scroll_area.setWidget(scroll_content)
         sidebar_layout.addWidget(scroll_area)
@@ -361,6 +359,9 @@ class MeshEditorWidget(QWidget):
         
         self.cb_snap = QCheckBox("Enable Snapping")
         self.cb_snap.setStyleSheet("color: #ffffff; font-size: 11px;")
+        
+        self.cb_invert_y = QCheckBox("Invert Y Mouse")
+        self.cb_invert_y.setStyleSheet("color: #ffffff; font-size: 11px;")
         
         # Snapping options
         self.sp_snap_t = create_spinbox(0.01, 10.0, 0.1)
@@ -406,6 +407,9 @@ class MeshEditorWidget(QWidget):
         action_export = file_menu.addAction("Export Scene (.obj, .glb)")
         action_export.triggered.connect(self._on_export_scene_clicked)
         
+        file_menu.addSeparator()
+        self.action_upload_proximap = file_menu.addAction("Upload to Proximap")
+        
         self.menu_bar.addMenu(file_menu)
         
         # 2. Edit Menu
@@ -429,6 +433,7 @@ class MeshEditorWidget(QWidget):
         
         settings_layout.addWidget(self.btn_projection)
         settings_layout.addWidget(self.cb_snap)
+        settings_layout.addWidget(self.cb_invert_y)
         
         # Grid for Snap Inputs
         snap_grid = QGridLayout()
@@ -543,6 +548,7 @@ class MeshEditorWidget(QWidget):
         
         # Disable properties inputs initially until an object is selected
         self._set_properties_enabled(False)
+        self.properties_box.setVisible(False)
 
     def _wire_events(self):
         # 1. Viewport Selection -> Sync Sidebar
@@ -566,6 +572,7 @@ class MeshEditorWidget(QWidget):
         
         # 6. Snapping Toggles and values
         self.cb_snap.stateChanged.connect(self._on_snap_toggled)
+        self.cb_invert_y.stateChanged.connect(self._on_invert_y_toggled)
         self.sp_snap_t.valueChanged.connect(self._on_snap_values_changed)
         self.sp_snap_r.valueChanged.connect(self._on_snap_values_changed)
         
@@ -619,6 +626,7 @@ class MeshEditorWidget(QWidget):
             self.outliner_list.clearSelection()
             self.outliner_list.blockSignals(False)
             self._set_properties_enabled(False)
+            self.properties_box.setVisible(False)
             self._block_properties_signals(True)
             for sb in [self.sp_pos_x, self.sp_pos_y, self.sp_pos_z, self.sp_rot_x, self.sp_rot_y, self.sp_rot_z]:
                 sb.setValue(0.0)
@@ -639,6 +647,7 @@ class MeshEditorWidget(QWidget):
             
             # Populate fields
             self._set_properties_enabled(True)
+            self.properties_box.setVisible(True)
             self._sync_properties_from_object(selected_obj)
 
     def _on_viewport_transform_changed(self, obj: Object):
@@ -711,6 +720,10 @@ class MeshEditorWidget(QWidget):
 
     def _on_snap_toggled(self, state):
         self.viewport.imgui_bridge.use_snapping = (state == Qt.CheckState.Checked.value)
+        self.viewport.update()
+        
+    def _on_invert_y_toggled(self, state):
+        self.viewport.invert_y = (state == Qt.CheckState.Checked.value)
         self.viewport.update()
 
     def _on_snap_values_changed(self):
