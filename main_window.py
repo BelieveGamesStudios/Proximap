@@ -46,6 +46,7 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QFont, QWindow, QP
 
 import hardware_profiler
 from pipeline_manager import PipelineWorker, BackgroundRemovalWorker
+from mesh_editor import MeshEditorWidget
 
 import http.server
 import socketserver
@@ -248,8 +249,8 @@ class ViewerWrapperWidget(QFrame):
         control_layout = QHBoxLayout(self.control_bar)
         control_layout.setContentsMargins(10, 5, 10, 5)
         
-        title_label = QLabel("3D Spatial Visualization", self.control_bar)
-        title_label.setStyleSheet("font-weight: bold; color: #ffffff; font-size: 13px; margin-left: 5px;")
+        self.title_label = QLabel("3D Spatial Visualization", self.control_bar)
+        self.title_label.setStyleSheet("font-weight: bold; color: #ffffff; font-size: 13px; margin-left: 5px;")
         
         # Dropdown File Menu next to title
         self.file_menu_btn = QPushButton("File ▾", self.control_bar)
@@ -350,7 +351,7 @@ class ViewerWrapperWidget(QFrame):
         self.reload_btn = QPushButton("Reload", self.control_bar)
         self.reload_btn.setStyleSheet("font-size: 11px; padding: 4px 8px; font-weight: normal;")
         
-        control_layout.addWidget(title_label)
+        control_layout.addWidget(self.title_label)
         control_layout.addWidget(self.file_menu_btn)
         control_layout.addStretch()
         control_layout.addWidget(self.cam_select)
@@ -381,6 +382,25 @@ class ViewerWrapperWidget(QFrame):
         self.cam_select.currentIndexChanged.connect(self.camera_changed.emit)
         
         self.current_mvs_dir = None
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        w = self.width()
+        if w < 720:
+            self.title_label.setVisible(False)
+        else:
+            self.title_label.setVisible(True)
+            
+        if w < 600:
+            self.show_controls_cb.setText("Controls")
+            self.cam_select.setMinimumWidth(100)
+            self.mode_select.setMinimumWidth(140)
+            self.bg_btn.setText("Color")
+        else:
+            self.show_controls_cb.setText("Show Controls")
+            self.cam_select.setMinimumWidth(150)
+            self.mode_select.setMinimumWidth(200)
+            self.bg_btn.setText("BG Color")
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
@@ -1035,10 +1055,14 @@ class MainWindow(QMainWindow):
         self._check_existing_scene()
 
     def _init_ui(self):
-        central_widget = QWidget(self)
-        self.setCentralWidget(central_widget)
+        # Main Tabbed Interface
+        self.main_tabs = QTabWidget(self)
+        self.main_tabs.setObjectName("MainTabs")
+        self.setCentralWidget(self.main_tabs)
         
-        main_layout = QHBoxLayout(central_widget)
+        # 3D Reconstruction Tab
+        reconstruction_tab = QWidget(self.main_tabs)
+        main_layout = QHBoxLayout(reconstruction_tab)
         main_layout.setContentsMargins(15, 15, 15, 15)
         main_layout.setSpacing(15)
         
@@ -1138,7 +1162,7 @@ class MainWindow(QMainWindow):
             "Force CPU Fallback"
         ])
         
-        self.plain_surfaces_checkbox = QCheckBox("Surface is plain/smooth(medium preset only)", step2_box)
+        self.plain_surfaces_checkbox = QCheckBox("Surface is plain/smooth", step2_box)
         self.plain_surfaces_checkbox.setChecked(False)
         
         self.process_btn = QPushButton("▶  Start Processing", step2_box)
@@ -1158,6 +1182,7 @@ class MainWindow(QMainWindow):
         step2_layout.addWidget(self.quality_combo)
         step2_layout.addWidget(self.gpu_label)
         step2_layout.addWidget(self.gpu_combo)
+        step2_layout.addWidget(self.plain_surfaces_checkbox)
         step2_layout.addWidget(self.process_btn)
         step2_layout.addWidget(self.progress_bar)
         step2_layout.addWidget(self.status_label)
@@ -1344,6 +1369,13 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.bottom_tabs, stretch=2)
         
         main_layout.addWidget(right_panel, stretch=1)
+        
+        # Register tabs to MainTabs
+        self.main_tabs.addTab(reconstruction_tab, "3D Reconstruction")
+        
+        self.mesh_editor_tab = MeshEditorWidget(self.main_tabs)
+        self.main_tabs.addTab(self.mesh_editor_tab, "Mesh Editor")
+        
         self._set_process_btn_state("idle")
 
     def _update_system_badge(self):
@@ -1597,7 +1629,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid #2B2B2B;
                 background-color: #151515;
             }
-            QTabBar::tab {
+            QTabWidget#BottomTabs QTabBar::tab {
                 background-color: #242424;
                 color: #aaaaaa;
                 border: 1px solid #2B2B2B;
@@ -1607,15 +1639,87 @@ class MainWindow(QMainWindow):
                 border-bottom-left-radius: 4px;
                 border-bottom-right-radius: 4px;
             }
-            QTabBar::tab:selected {
+            QTabWidget#BottomTabs QTabBar::tab:selected {
                 background-color: #e0e0e0;
                 color: #121212;
                 border-top: none;
             }
-            QTabBar::tab:hover:!selected {
+            QTabWidget#BottomTabs QTabBar::tab:hover:!selected {
                 background-color: #333333;
                 color: #ffffff;
             }
+            
+            /* Main Window Tabs Styling */
+            QTabWidget#MainTabs::pane {
+                border: none;
+                background-color: #121212;
+            }
+            QTabWidget#MainTabs QTabBar::tab {
+                background-color: #1A1A1A;
+                color: #aaaaaa;
+                border: 1px solid #2B2B2B;
+                border-bottom: none;
+                padding: 8px 20px;
+                font-weight: bold;
+                font-size: 12px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 4px;
+            }
+            QTabWidget#MainTabs QTabBar::tab:selected {
+                background-color: #00E676;
+                color: #121212;
+                border-bottom: none;
+            }
+            QTabWidget#MainTabs QTabBar::tab:hover:!selected {
+                background-color: #242424;
+                color: #ffffff;
+            }
+            
+            /* Viewport Toolbar Styling */
+            QMenuBar#ViewportMenuBar {
+                background-color: #1E1E1E;
+                color: #e0e0e0;
+                border-bottom: 1px solid #2D2D2D;
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: normal;
+            }
+            QMenuBar#ViewportMenuBar::item {
+                background-color: transparent;
+                padding: 4px 12px;
+                border-radius: 4px;
+                margin-right: 4px;
+            }
+            QMenuBar#ViewportMenuBar::item:selected {
+                background-color: #333333;
+                color: #00E676;
+            }
+            QMenuBar#ViewportMenuBar::item:pressed {
+                background-color: #00E676;
+                color: #121212;
+            }
+            QMenu {
+                background-color: #1A1A1A;
+                color: #e0e0e0;
+                border: 1px solid #2D2D2D;
+                border-radius: 4px;
+                padding: 4px 0px;
+            }
+            QMenu::item {
+                padding: 6px 24px;
+                background-color: transparent;
+            }
+            QMenu::item:selected {
+                background-color: #00E676;
+                color: #121212;
+            }
+            QMenu::separator {
+                height: 1px;
+                background-color: #2D2D2D;
+                margin: 4px 0px;
+            }
+            
             QCheckBox {
                 color: #cccccc;
             }
@@ -1826,6 +1930,7 @@ class MainWindow(QMainWindow):
         self.bg_remove_btn.setEnabled(False)
         self.quality_combo.setEnabled(False)
         self.gpu_combo.setEnabled(False)
+        self.plain_surfaces_checkbox.setEnabled(False)
         
         # Temp output dir inside the workspace or local appdata if not writable
         output_dir = get_reconstruction_out_dir()
@@ -1836,12 +1941,14 @@ class MainWindow(QMainWindow):
         gpu_modes = ["auto", "force_gpu", "force_cpu"]
         quality_preset = quality_presets[self.quality_combo.currentIndex()]
         gpu_mode = gpu_modes[self.gpu_combo.currentIndex()]
+        has_plain = self.plain_surfaces_checkbox.isChecked()
 
         self.worker = PipelineWorker(
             os.path.dirname(self.image_list[0]), 
             output_dir, 
             quality_preset=quality_preset, 
             gpu_mode=gpu_mode, 
+            has_plain_surfaces=has_plain,
             parent=self
         )
         self.worker.progress_changed.connect(self._on_progress_changed)
@@ -1878,6 +1985,7 @@ class MainWindow(QMainWindow):
         self.view_scene_btn.setEnabled(True)
         self.quality_combo.setEnabled(True)
         self.gpu_combo.setEnabled(True)
+        self.plain_surfaces_checkbox.setEnabled(True)
         self.bg_remove_btn.setEnabled(len(self.image_list) > 0)
         
         if success:
