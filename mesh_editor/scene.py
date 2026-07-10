@@ -220,28 +220,20 @@ class Object:
         self.scale = np.array([1.0, 1.0, 1.0], dtype=np.float32)
 
     def get_model_matrix(self) -> np.ndarray:
-        # Build translation matrix
-        t_mat = pyrr.matrix44.create_from_translation(self.position)
+        import trimesh
+        rx = np.radians(-self.rotation[0])
+        ry = np.radians(-self.rotation[1])
+        rz = np.radians(-self.rotation[2])
         
-        # Build rotation matrix from Euler degrees (X -> Y -> Z order)
-        rx = np.radians(self.rotation[0])
-        ry = np.radians(self.rotation[1])
-        rz = np.radians(self.rotation[2])
-        r_mat_x = pyrr.matrix44.create_from_x_rotation(rx)
-        r_mat_y = pyrr.matrix44.create_from_y_rotation(ry)
-        r_mat_z = pyrr.matrix44.create_from_z_rotation(rz)
-        # Combine rotations
-        r_mat = pyrr.matrix44.multiply(r_mat_x, r_mat_y)
-        r_mat = pyrr.matrix44.multiply(r_mat, r_mat_z)
+        t_mat = trimesh.transformations.translation_matrix(self.position)
+        r_mat = trimesh.transformations.euler_matrix(rx, ry, rz, 'sxyz')
+        s_mat = np.diag([self.scale[0], self.scale[1], self.scale[2], 1.0])
         
-        # Build scale matrix
-        s_mat = pyrr.matrix44.create_from_scale(self.scale)
+        # Column-major transformation: T * R * S
+        col_major = t_mat @ r_mat @ s_mat
         
-        # Combine transforms: M = S * R * T (Wait, pyrr matrix multiply order is typically model = Scale * Rotate * Translate)
-        # Let's multiply Scale -> Rotate -> Translate
-        model_mat = pyrr.matrix44.multiply(s_mat, r_mat)
-        model_mat = pyrr.matrix44.multiply(model_mat, t_mat)
-        return model_mat
+        # Return row-major (transpose) for rendering/shader compatibility
+        return col_major.T.astype(np.float32)
 
     def get_world_aabb(self) -> tuple:
         """Computes the world-space bounding box by transforming the local AABB."""

@@ -77,6 +77,14 @@ class ImGuiBridge:
             io.clear_input_mouse()
             io.clear_events_queue()
 
+    def want_capture(self) -> bool:
+        """Returns True if ImGui or ImGuizmo wants to capture the mouse input."""
+        if not self.imgui_ctx:
+            return False
+        imgui.set_current_context(self.imgui_ctx)
+        io = imgui.get_io()
+        return io.want_capture_mouse or imguizmo.im_guizmo.is_using() or imguizmo.im_guizmo.is_over()
+
     # Event forwards
     def process_mouse_move(self, x: float, y: float) -> bool:
         if not self.imgui_ctx:
@@ -84,7 +92,7 @@ class ImGuiBridge:
         imgui.set_current_context(self.imgui_ctx)
         io = imgui.get_io()
         io.add_mouse_pos_event(x, y)
-        return io.want_capture_mouse
+        return self.want_capture()
 
     def process_mouse_button(self, button: Qt.MouseButton, is_pressed: bool, x: float, y: float) -> bool:
         if not self.imgui_ctx:
@@ -97,7 +105,7 @@ class ImGuiBridge:
         if btn_idx is not None:
             io.add_mouse_button_event(btn_idx, is_pressed)
             
-        return io.want_capture_mouse
+        return self.want_capture()
 
     def process_wheel(self, delta_x: float, delta_y: float) -> bool:
         if not self.imgui_ctx:
@@ -105,7 +113,7 @@ class ImGuiBridge:
         imgui.set_current_context(self.imgui_ctx)
         io = imgui.get_io()
         io.add_mouse_wheel_event(delta_x, delta_y)
-        return io.want_capture_mouse
+        return self.want_capture()
 
     def process_key(self, key_val: Qt.Key, is_pressed: bool, text: str = "") -> bool:
         if not self.imgui_ctx:
@@ -146,9 +154,10 @@ class ImGuiBridge:
         imgui_view = imguizmo.im_guizmo.Matrix16(list(view_mat.flatten()))
         imgui_proj = imguizmo.im_guizmo.Matrix16(list(proj_mat.flatten()))
         
-        # 3. Get Object model matrix (flattened)
+        # 3. Get Object model matrix and transpose to column-major for ImGuizmo
         model_mat = obj.get_model_matrix()
-        imgui_model = imguizmo.im_guizmo.Matrix16(list(model_mat.flatten()))
+        col_major = model_mat.T
+        imgui_model = imguizmo.im_guizmo.Matrix16(list(col_major.flatten()))
         
         # 4. Handle snapping
         snap_val = None
@@ -172,11 +181,14 @@ class ImGuiBridge:
         )
         
         if modified:
-            # 6. Decompose back to components
-            components = imguizmo.im_guizmo.decompose_matrix_to_components(imgui_model)
-            obj.position = np.array(list(components.translation.values), dtype=np.float32)
-            obj.rotation = np.array(list(components.rotation.values), dtype=np.float32)
-            obj.scale = np.array(list(components.scale.values), dtype=np.float32)
+            # 6. Decompose back to components using trimesh (avoids coordinate system mismatch & Euler singularities)
+            import trimesh
+            modified_col_major = np.array(list(imgui_model.values), dtype=np.float32).reshape(4, 4)
+            scale, shear, angles, trans, persp = trimesh.transformations.decompose_matrix(modified_col_major)
+            
+            obj.position = np.array(trans, dtype=np.float32)
+            obj.rotation = np.degrees(-angles).astype(np.float32)
+            obj.scale = np.array(scale, dtype=np.float32)
             
         return modified
 

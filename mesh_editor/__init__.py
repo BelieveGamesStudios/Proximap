@@ -535,6 +535,34 @@ class MeshEditorWidget(QWidget):
         self.tool_group.addButton(self.btn_tool_scale)
         toolbar_layout.addWidget(self.btn_tool_scale)
         
+        # Separator line
+        line = QFrame(self.trans_toolbar)
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setFrameShadow(QFrame.Shadow.Sunken)
+        line.setStyleSheet("background-color: #333333; margin: 4px;")
+        toolbar_layout.addWidget(line)
+        
+        # Space Toggle Button (Defaults to Local)
+        self.btn_tool_space = QPushButton("Local", self.trans_toolbar)
+        self.btn_tool_space.setToolTip("Transform Space: Local (Click to toggle)")
+        self.btn_tool_space.setStyleSheet("""
+            QPushButton {
+                font-size: 10px;
+                font-weight: bold;
+                padding: 6px 2px;
+                background-color: #2D2D2D;
+                color: #00E676;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                margin: 4px;
+            }
+            QPushButton:hover {
+                background-color: #3D3D3D;
+                border-color: #00E676;
+            }
+        """)
+        toolbar_layout.addWidget(self.btn_tool_space)
+        
         toolbar_layout.addStretch()
         
         viewport_hbox.addWidget(self.trans_toolbar)
@@ -557,7 +585,7 @@ class MeshEditorWidget(QWidget):
         self.viewport.transform_changed.connect(self._on_viewport_transform_changed)
         
         # 3. Sidebar Selection -> Sync Viewport Selection
-        self.outliner_list.currentRowChanged.connect(self._on_outliner_row_changed)
+        self.outliner_list.itemSelectionChanged.connect(self._on_outliner_selection_changed)
         
         # 4. Spinbox value changes -> Sync Viewport Object Transform
         for sb in [self.sp_pos_x, self.sp_pos_y, self.sp_pos_z]:
@@ -593,6 +621,7 @@ class MeshEditorWidget(QWidget):
         self.btn_tool_translate.clicked.connect(self._change_tool_to_translate)
         self.btn_tool_rotate.clicked.connect(self._change_tool_to_rotate)
         self.btn_tool_scale.clicked.connect(self._change_tool_to_scale)
+        self.btn_tool_space.clicked.connect(self._toggle_transform_space)
         self.viewport.tool_changed.connect(self._on_viewport_tool_changed)
 
     def _populate_outliner(self):
@@ -654,14 +683,30 @@ class MeshEditorWidget(QWidget):
         # Update inputs dynamically from gizmo dragging without loops
         self._sync_properties_from_object(obj)
 
-    def _on_outliner_row_changed(self, row: int):
-        if row < 0 or row >= len(self.viewport.scene.objects):
+    def _on_outliner_selection_changed(self):
+        selected_items = self.outliner_list.selectedItems()
+        if not selected_items:
             selected_obj = None
         else:
-            selected_obj = self.viewport.scene.objects[row]
+            item_name = selected_items[0].text()
+            selected_obj = None
+            for obj in self.viewport.scene.objects:
+                if obj.name == item_name:
+                    selected_obj = obj
+                    break
             
         self.viewport.scene.selected_object = selected_obj
-        self._on_viewport_selection_changed(selected_obj)
+        
+        # Sync delete button state and properties fields
+        self.btn_delete_mesh.setEnabled(selected_obj is not None)
+        if selected_obj is None:
+            self._set_properties_enabled(False)
+            self.properties_box.setVisible(False)
+        else:
+            self._set_properties_enabled(True)
+            self.properties_box.setVisible(True)
+            self._sync_properties_from_object(selected_obj)
+            
         self.viewport.update()
 
     def _sync_properties_from_object(self, obj: Object):
@@ -1042,3 +1087,48 @@ class MeshEditorWidget(QWidget):
             self.btn_tool_rotate.setChecked(True)
         elif operation == imguizmo.im_guizmo.OPERATION.scale:
             self.btn_tool_scale.setChecked(True)
+
+    def _toggle_transform_space(self):
+        from imgui_bundle import imguizmo
+        bridge = self.viewport.imgui_bridge
+        if bridge.current_mode == imguizmo.im_guizmo.MODE.local:
+            bridge.current_mode = imguizmo.im_guizmo.MODE.world
+            self.btn_tool_space.setText("Global")
+            self.btn_tool_space.setToolTip("Transform Space: Global (Click to toggle)")
+            self.btn_tool_space.setStyleSheet("""
+                QPushButton {
+                    font-size: 10px;
+                    font-weight: bold;
+                    padding: 6px 2px;
+                    background-color: #2D2D2D;
+                    color: #ffffff;
+                    border: 1px solid #444444;
+                    border-radius: 4px;
+                    margin: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #3D3D3D;
+                    border-color: #ffffff;
+                }
+            """)
+        else:
+            bridge.current_mode = imguizmo.im_guizmo.MODE.local
+            self.btn_tool_space.setText("Local")
+            self.btn_tool_space.setToolTip("Transform Space: Local (Click to toggle)")
+            self.btn_tool_space.setStyleSheet("""
+                QPushButton {
+                    font-size: 10px;
+                    font-weight: bold;
+                    padding: 6px 2px;
+                    background-color: #2D2D2D;
+                    color: #00E676;
+                    border: 1px solid #444444;
+                    border-radius: 4px;
+                    margin: 4px;
+                }
+                QPushButton:hover {
+                    background-color: #3D3D3D;
+                    border-color: #00E676;
+                }
+            """)
+        self.viewport.update()
