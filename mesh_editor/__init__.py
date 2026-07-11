@@ -764,7 +764,7 @@ class MeshEditorWidget(QWidget):
         self.viewport.update()
 
     def _on_snap_toggled(self, state):
-        self.viewport.imgui_bridge.use_snapping = (state == Qt.CheckState.Checked.value)
+        self.viewport.gizmo.use_snapping = (state == Qt.CheckState.Checked.value)
         self.viewport.update()
         
     def _on_invert_y_toggled(self, state):
@@ -772,11 +772,11 @@ class MeshEditorWidget(QWidget):
         self.viewport.update()
 
     def _on_snap_values_changed(self):
-        bridge = self.viewport.imgui_bridge
-        bridge.snap_translation = self.sp_snap_t.value()
-        bridge.snap_rotation = self.sp_snap_r.value()
+        gizmo = self.viewport.gizmo
+        gizmo.snap_translation = self.sp_snap_t.value()
+        gizmo.snap_rotation = self.sp_snap_r.value()
         # Keep scale snapping proportional to 10% of value
-        bridge.snap_scale = 0.1
+        gizmo.snap_scale = 0.1
         self.viewport.update()
 
     def _on_subdivs_changed(self):
@@ -1062,37 +1062,32 @@ class MeshEditorWidget(QWidget):
         self.export_worker = None
 
     def _change_tool_to_translate(self):
-        from imgui_bundle import imguizmo
-        self.viewport.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.translate
+        self.viewport.gizmo.operation = "translate"
         self.btn_tool_translate.setChecked(True)
         self.viewport.update()
 
     def _change_tool_to_rotate(self):
-        from imgui_bundle import imguizmo
-        self.viewport.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.rotate
+        self.viewport.gizmo.operation = "rotate"
         self.btn_tool_rotate.setChecked(True)
         self.viewport.update()
 
     def _change_tool_to_scale(self):
-        from imgui_bundle import imguizmo
-        self.viewport.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.scale
+        self.viewport.gizmo.operation = "scale"
         self.btn_tool_scale.setChecked(True)
         self.viewport.update()
 
     def _on_viewport_tool_changed(self, operation):
-        from imgui_bundle import imguizmo
-        if operation == imguizmo.im_guizmo.OPERATION.translate:
+        if operation == "translate":
             self.btn_tool_translate.setChecked(True)
-        elif operation == imguizmo.im_guizmo.OPERATION.rotate:
+        elif operation == "rotate":
             self.btn_tool_rotate.setChecked(True)
-        elif operation == imguizmo.im_guizmo.OPERATION.scale:
+        elif operation == "scale":
             self.btn_tool_scale.setChecked(True)
 
     def _toggle_transform_space(self):
-        from imgui_bundle import imguizmo
-        bridge = self.viewport.imgui_bridge
-        if bridge.current_mode == imguizmo.im_guizmo.MODE.local:
-            bridge.current_mode = imguizmo.im_guizmo.MODE.world
+        gizmo = self.viewport.gizmo
+        if gizmo.space == "local":
+            gizmo.space = "global"
             self.btn_tool_space.setText("Global")
             self.btn_tool_space.setToolTip("Transform Space: Global (Click to toggle)")
             self.btn_tool_space.setStyleSheet("""
@@ -1112,7 +1107,7 @@ class MeshEditorWidget(QWidget):
                 }
             """)
         else:
-            bridge.current_mode = imguizmo.im_guizmo.MODE.local
+            gizmo.space = "local"
             self.btn_tool_space.setText("Local")
             self.btn_tool_space.setToolTip("Transform Space: Local (Click to toggle)")
             self.btn_tool_space.setStyleSheet("""

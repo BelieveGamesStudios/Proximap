@@ -8,7 +8,7 @@ from PySide6.QtGui import QMouseEvent, QKeyEvent, QWheelEvent, QAction
 
 import OpenGL.GL as gl
 from mesh_editor.scene import Camera, Scene, Object, create_cube_mesh, create_plane_mesh, create_sphere_mesh
-from mesh_editor.gizmo import ImGuiBridge
+from mesh_editor.gizmo import Gizmo
 
 class MeshEditorViewport(QOpenGLWidget):
     """3D OpenGL Viewport for Mesh Editing. Integrates camera controls, grid, and ImGuizmo."""
@@ -25,7 +25,8 @@ class MeshEditorViewport(QOpenGLWidget):
         # State containers
         self.camera = Camera()
         self.scene = Scene()
-        self.imgui_bridge = ImGuiBridge()
+        self.gizmo = Gizmo()
+        self._gizmo_dragging = False
         
         # Viewport customizable properties (defaults)
         self.bg_color = np.array([0.18, 0.18, 0.18], dtype=np.float32)       # Blender-style dark-grey background
@@ -76,8 +77,8 @@ class MeshEditorViewport(QOpenGLWidget):
         # Setup infinite grid full-screen quad VAO
         self._setup_grid_quad()
         
-        # Initialize ImGui context inside this GL context
-        self.imgui_bridge.initialize("#version 150")
+        # Initialize custom gizmo inside this GL context
+        self.gizmo.initialize(shaders_dir)
         
         # Scene starts empty on startup. Primitives/meshes can be imported using the Import button.
         pass
@@ -187,36 +188,16 @@ class MeshEditorViewport(QOpenGLWidget):
         
         gl.glDisable(gl.GL_BLEND)
         
-        # 4. Render ImGuizmo Overlay
-        try:
-            self.imgui_bridge.new_frame(w_logical, h_logical, dpr)
-            
-            if self.scene.selected_object is not None:
-                modified = self.imgui_bridge.draw_gizmo(
-                    self.scene.selected_object,
-                    self.camera,
-                    w_logical,
-                    h_logical
-                )
-                if modified:
-                    self.transform_changed.emit(self.scene.selected_object)
-                    self.update()  # Force next-frame repaint to render the updated model transform
-                    
-            self.imgui_bridge.render()
-        except Exception as e:
-            try:
-                from imgui_bundle import imgui
-                imgui.end_frame()
-            except Exception:
-                pass
-            print(f"[Viewport Error] ImGui render failed: {e}")
+        # 4. Render Custom Gizmo Overlay
+        if self.scene.selected_object is not None:
+            self.gizmo.draw(self.scene.selected_object, self.camera, w_logical, h_logical)
 
     def resizeGL(self, w, h):
         gl.glViewport(0, 0, w, h)
 
     def cleanupGL(self):
-        # Shut down ImGui bridge
-        self.imgui_bridge.shutdown()
+        # Shut down custom gizmo
+        self.gizmo.shutdown()
         
         # Clean up shaders and VAOs
         try:
@@ -235,10 +216,7 @@ class MeshEditorViewport(QOpenGLWidget):
         for obj in self.scene.objects:
             obj.mesh.cleanup()
 
-    def hideEvent(self, event):
-        # Reset input events during tab switch to prevent stuck states
-        self.imgui_bridge.reset_input_state()
-        super().hideEvent(event)
+        # Reset input states
 
     def closeEvent(self, event):
         self.makeCurrent()
@@ -254,11 +232,18 @@ class MeshEditorViewport(QOpenGLWidget):
         if self.invert_y:
             dy = -dy
         
-        # 1. Forward to ImGui first
-        captured = self.imgui_bridge.process_mouse_move(pos.x(), pos.y())
-        
-        # 2. If not captured by ImGui window/gizmo, handle viewport camera movement
-        if not captured:
+        if self._gizmo_dragging:
+            self.gizmo.update_drag(pos.x(), pos.y(), self.scene.selected_object, self.camera, self.width(), self.height())
+            self.transform_changed.emit(self.scene.selected_object)
+            self.update()
+        else:
+            # Hover check for cursor change or highlight
+            if self.scene.selected_object is not None:
+                old_hover = self.gizmo.hovered_handle
+                self.gizmo.hovered_handle = self.gizmo.check_hover(pos.x(), pos.y(), self.scene.selected_object, self.camera, self.width(), self.height())
+                if self.gizmo.hovered_handle != old_hover:
+                    self.update()
+                    
             if self.is_orbiting:
                 # Orbiting navigation (Middle click drag or Alt + LMB drag)
                 self.camera.orbit(-dx * 0.005, -dy * 0.005)
@@ -272,9 +257,6 @@ class MeshEditorViewport(QOpenGLWidget):
                 zoom_speed = self.camera.distance * 0.005 if self.camera.is_perspective else self.camera.ortho_scale * 0.005
                 self.camera.zoom(-dy * zoom_speed)
                 self.update()
-        else:
-            # If ImGui captured the mouse move, request a redraw so the gizmo updates in real-time
-            self.update()
                 
         self.last_mouse_pos = pos.toPoint()
         super().mouseMoveEvent(event)
@@ -283,42 +265,46 @@ class MeshEditorViewport(QOpenGLWidget):
         pos = event.position()
         self.last_mouse_pos = pos.toPoint()
         
-        # 1. Forward to ImGui first
-        captured = self.imgui_bridge.process_mouse_button(event.button(), True, pos.x(), pos.y())
+        # 1. First check if mouse clicked the gizmo
+        if self.scene.selected_object is not None and event.button() == Qt.MouseButton.LeftButton:
+            dragged = self.gizmo.begin_drag(pos.x(), pos.y(), self.scene.selected_object, self.camera, self.width(), self.height())
+            if dragged:
+                self._gizmo_dragging = True
+                self.update()
+                super().mousePressEvent(event)
+                return
         
         # 2. Handle viewport cameras or selection if not captured
-        if not captured:
-            # Check for Alt modifier for trackpad navigation fallbacks
-            if event.modifiers() & Qt.KeyboardModifier.AltModifier and event.button() == Qt.MouseButton.LeftButton:
-                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                    self.is_zooming = True
-                elif event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                    self.is_panning = True
-                else:
-                    self.is_orbiting = True
-            elif event.button() == Qt.MouseButton.MiddleButton:
-                # Shift+MMB = Pan, MMB = Orbit
-                if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
-                    self.is_panning = True
-                else:
-                    self.is_orbiting = True
-            elif event.button() == Qt.MouseButton.LeftButton:
-                # Raycasting selection against objects
-                old_selection = self.scene.selected_object
-                self.scene.perform_picking(pos.x(), pos.y(), self.width(), self.height(), self.camera)
-                if self.scene.selected_object != old_selection:
-                    self.selection_changed.emit(self.scene.selected_object)
-                self.update()
+        # Check for Alt modifier for trackpad navigation fallbacks
+        if event.modifiers() & Qt.KeyboardModifier.AltModifier and event.button() == Qt.MouseButton.LeftButton:
+            if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                self.is_zooming = True
+            elif event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.is_panning = True
+            else:
+                self.is_orbiting = True
+        elif event.button() == Qt.MouseButton.MiddleButton:
+            # Shift+MMB = Pan, MMB = Orbit
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.is_panning = True
+            else:
+                self.is_orbiting = True
+        elif event.button() == Qt.MouseButton.LeftButton:
+            # Raycasting selection against objects
+            old_selection = self.scene.selected_object
+            self.scene.perform_picking(pos.x(), pos.y(), self.width(), self.height(), self.camera)
+            if self.scene.selected_object != old_selection:
+                self.selection_changed.emit(self.scene.selected_object)
+            self.update()
                 
         super().mousePressEvent(event)
  
     def mouseReleaseEvent(self, event: QMouseEvent):
-        pos = event.position()
-        
-        # 1. Forward to ImGui
-        captured = self.imgui_bridge.process_mouse_button(event.button(), False, pos.x(), pos.y())
-        
-        # 2. Clear camera movement states
+        if self._gizmo_dragging:
+            self.gizmo.end_drag()
+            self._gizmo_dragging = False
+            self.update()
+            
         if event.button() == Qt.MouseButton.MiddleButton or (event.button() == Qt.MouseButton.LeftButton and (self.is_orbiting or self.is_panning or self.is_zooming)):
             self.is_orbiting = False
             self.is_panning = False
@@ -328,55 +314,39 @@ class MeshEditorViewport(QOpenGLWidget):
         self.update()
 
     def wheelEvent(self, event: QWheelEvent):
-        # 1. Forward to ImGui
-        delta_x = event.angleDelta().x() / 120.0
         delta_y = event.angleDelta().y() / 120.0
-        captured = self.imgui_bridge.process_wheel(delta_x, delta_y)
-        
-        # 2. Orbit camera zoom
-        if not captured:
-            # Scale zoom speed based on distance
-            zoom_speed = self.camera.distance * 0.1 if self.camera.is_perspective else self.camera.ortho_scale * 0.1
-            self.camera.zoom(delta_y * zoom_speed)
-            self.update()
-            
+        # Scale zoom speed based on distance
+        zoom_speed = self.camera.distance * 0.1 if self.camera.is_perspective else self.camera.ortho_scale * 0.1
+        self.camera.zoom(delta_y * zoom_speed)
+        self.update()
         super().wheelEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent):
-        # 1. Forward to ImGui
-        captured = self.imgui_bridge.process_key(event.key(), True, event.text())
-        
-        # 2. Apply editor shortcuts if ImGui isn't focusing inputs
-        if not captured:
-            key = event.key()
-            if key == Qt.Key.Key_G:
-                # G: Translate
-                from imgui_bundle import imguizmo
-                self.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.translate
-                self.tool_changed.emit(self.imgui_bridge.current_operation)
-                self.update()
-            elif key == Qt.Key.Key_R:
-                # R: Rotate
-                from imgui_bundle import imguizmo
-                self.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.rotate
-                self.tool_changed.emit(self.imgui_bridge.current_operation)
-                self.update()
-            elif key == Qt.Key.Key_S:
-                # S: Scale
-                from imgui_bundle import imguizmo
-                self.imgui_bridge.current_operation = imguizmo.im_guizmo.OPERATION.scale
-                self.tool_changed.emit(self.imgui_bridge.current_operation)
-                self.update()
-            elif key in [Qt.Key.Key_Delete, Qt.Key.Key_Backspace]:
-                # Delete/Backspace: Remove Selected Object
-                self.delete_pressed.emit()
-                event.accept()
-                return
+        key = event.key()
+        if key == Qt.Key.Key_G:
+            # G: Translate
+            self.gizmo.operation = "translate"
+            self.tool_changed.emit(self.gizmo.operation)
+            self.update()
+        elif key == Qt.Key.Key_R:
+            # R: Rotate
+            self.gizmo.operation = "rotate"
+            self.tool_changed.emit(self.gizmo.operation)
+            self.update()
+        elif key == Qt.Key.Key_S:
+            # S: Scale
+            self.gizmo.operation = "scale"
+            self.tool_changed.emit(self.gizmo.operation)
+            self.update()
+        elif key in [Qt.Key.Key_Delete, Qt.Key.Key_Backspace]:
+            # Delete/Backspace: Remove Selected Object
+            self.delete_pressed.emit()
+            event.accept()
+            return
                 
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event: QKeyEvent):
-        self.imgui_bridge.process_key(event.key(), False)
         super().keyReleaseEvent(event)
 
     # Shaders compile/link helper
