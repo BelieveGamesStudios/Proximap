@@ -16,6 +16,7 @@ class MeshEditorViewport(QOpenGLWidget):
     transform_changed = Signal(object) # Emits the selected Object when transformed by the gizmo
     delete_pressed = Signal() # Emits when Delete/Backspace key is pressed
     tool_changed = Signal(object) # Emits active gizmo OPERATION when changed by hotkey
+    camera_changed = Signal(object) # Emits Camera when it transforms/snaps
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -53,6 +54,29 @@ class MeshEditorViewport(QOpenGLWidget):
         self.grid_vao = None
         self.grid_vbo = None
         self.grid_ebo = None
+
+        # Navigation Gizmo Overlay Widget
+        from mesh_editor.nav_gizmo import NavGizmoWidget
+        self.nav_gizmo = NavGizmoWidget(self)
+        self.nav_gizmo.snap_requested.connect(self._on_nav_gizmo_snap_requested)
+        # Sync initial orientation
+        self.nav_gizmo.update_orientation(self.camera.yaw, self.camera.pitch)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'nav_gizmo') and self.nav_gizmo:
+            margin = 10
+            self.nav_gizmo.move(self.width() - self.nav_gizmo.width() - margin, margin)
+
+    def _on_nav_gizmo_snap_requested(self, view_name):
+        self.camera.snap_to_view(view_name)
+        self.notify_camera_changed()
+        self.update()
+
+    def notify_camera_changed(self):
+        if hasattr(self, 'nav_gizmo') and self.nav_gizmo:
+            self.nav_gizmo.update_orientation(self.camera.yaw, self.camera.pitch)
+        self.camera_changed.emit(self.camera)
 
     def initializeGL(self):
         # Initialize OpenGL context
@@ -247,15 +271,18 @@ class MeshEditorViewport(QOpenGLWidget):
             if self.is_orbiting:
                 # Orbiting navigation (Middle click drag or Alt + LMB drag)
                 self.camera.orbit(-dx * 0.005, -dy * 0.005)
+                self.notify_camera_changed()
                 self.update()
             elif self.is_panning:
                 # Panning navigation (Shift + Middle drag or Alt + Shift + LMB drag)
                 self.camera.pan(dx, dy)
+                self.notify_camera_changed()
                 self.update()
             elif self.is_zooming:
                 # Zooming navigation (Alt + Ctrl + LMB drag)
                 zoom_speed = self.camera.distance * 0.005 if self.camera.is_perspective else self.camera.ortho_scale * 0.005
                 self.camera.zoom(-dy * zoom_speed)
+                self.notify_camera_changed()
                 self.update()
                 
         self.last_mouse_pos = pos.toPoint()
@@ -318,6 +345,7 @@ class MeshEditorViewport(QOpenGLWidget):
         # Scale zoom speed based on distance
         zoom_speed = self.camera.distance * 0.1 if self.camera.is_perspective else self.camera.ortho_scale * 0.1
         self.camera.zoom(delta_y * zoom_speed)
+        self.notify_camera_changed()
         self.update()
         super().wheelEvent(event)
 
@@ -343,6 +371,40 @@ class MeshEditorViewport(QOpenGLWidget):
             self.delete_pressed.emit()
             event.accept()
             return
+        
+        # Camera snap shortcuts (keys 1,3,5,7 and numpad counterparts)
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        if key == Qt.Key.Key_1:
+            self.camera.snap_to_view("back" if ctrl else "front")
+            self.notify_camera_changed()
+            self.update()
+            event.accept()
+            return
+        elif key == Qt.Key.Key_3:
+            self.camera.snap_to_view("left" if ctrl else "right")
+            self.notify_camera_changed()
+            self.update()
+            event.accept()
+            return
+        elif key == Qt.Key.Key_7:
+            self.camera.snap_to_view("bottom" if ctrl else "top")
+            self.notify_camera_changed()
+            self.update()
+            event.accept()
+            return
+        elif key == Qt.Key.Key_5:
+            self.camera.is_perspective = not self.camera.is_perspective
+            self.notify_camera_changed()
+            self.update()
+            event.accept()
+            return
+        elif key == Qt.Key.Key_F:
+            if self.scene.selected_object is not None:
+                self.camera.frame_object(self.scene.selected_object)
+                self.notify_camera_changed()
+                self.update()
+                event.accept()
+                return
                 
         super().keyPressEvent(event)
 

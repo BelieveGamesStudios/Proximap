@@ -563,6 +563,40 @@ class MeshEditorWidget(QWidget):
         """)
         toolbar_layout.addWidget(self.btn_tool_space)
         
+        # Separator line
+        line2 = QFrame(self.trans_toolbar)
+        line2.setFrameShape(QFrame.Shape.HLine)
+        line2.setFrameShadow(QFrame.Shadow.Sunken)
+        line2.setStyleSheet("background-color: #333333; margin: 4px;")
+        toolbar_layout.addWidget(line2)
+
+        # Projection button
+        self.btn_projection_toolbar = QPushButton("Persp", self.trans_toolbar)
+        self.btn_projection_toolbar.setCheckable(True)
+        self.btn_projection_toolbar.setChecked(True)
+        self.btn_projection_toolbar.setToolTip("Toggle Perspective/Orthographic (Numpad 5)")
+        self.btn_projection_toolbar.setStyleSheet("""
+            QPushButton {
+                font-size: 9px;
+                font-weight: bold;
+                padding: 6px 2px;
+                background-color: #2D2D2D;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                margin: 4px;
+            }
+            QPushButton:hover {
+                background-color: #3D3D3D;
+            }
+            QPushButton:checked {
+                background-color: #00E676;
+                color: #121212;
+                border-color: #00E676;
+            }
+        """)
+        toolbar_layout.addWidget(self.btn_projection_toolbar)
+
         toolbar_layout.addStretch()
         
         viewport_hbox.addWidget(self.trans_toolbar)
@@ -597,6 +631,8 @@ class MeshEditorWidget(QWidget):
             
         # 5. Projection Toggles
         self.btn_projection.clicked.connect(self._on_projection_clicked)
+        self.btn_projection_toolbar.clicked.connect(self._on_projection_clicked)
+        self.viewport.camera_changed.connect(self._on_camera_changed)
         
         # 6. Snapping Toggles and values
         self.cb_snap.stateChanged.connect(self._on_snap_toggled)
@@ -757,11 +793,19 @@ class MeshEditorWidget(QWidget):
     def _on_projection_clicked(self):
         cam = self.viewport.camera
         cam.is_perspective = not cam.is_perspective
-        if cam.is_perspective:
+        self.viewport.notify_camera_changed()
+        self.viewport.update()
+
+    def _on_camera_changed(self, camera):
+        # Update sidebar projection setting toggle button
+        if camera.is_perspective:
             self.btn_projection.setText("Camera: Perspective")
+            self.btn_projection_toolbar.setText("Persp")
+            self.btn_projection_toolbar.setChecked(True)
         else:
             self.btn_projection.setText("Camera: Orthographic")
-        self.viewport.update()
+            self.btn_projection_toolbar.setText("Ortho")
+            self.btn_projection_toolbar.setChecked(False)
 
     def _on_snap_toggled(self, state):
         self.viewport.gizmo.use_snapping = (state == Qt.CheckState.Checked.value)

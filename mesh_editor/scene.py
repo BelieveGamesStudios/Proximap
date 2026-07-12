@@ -16,6 +16,37 @@ class Camera:
         self.fov = 45.0  # Field of View in Y direction (degrees)
         self.ortho_scale = 6.0  # Height of the orthographic view area
 
+    def snap_to_view(self, view: str, set_ortho=True):
+        """Snaps the camera to canonical views (front, back, right, left, top, bottom)."""
+        _SNAP_VIEWS = {
+            "front":  (np.pi,       0.0),
+            "back":   (0.0,         0.0),
+            "right":  (np.pi/2.0,   0.0),
+            "left":   (-np.pi/2.0,  0.0),
+            "top":    (np.pi,       np.radians(89.0)),
+            "bottom": (np.pi,      -np.radians(89.0)),
+        }
+        if view == "user":
+            self.is_perspective = True
+            return
+        if view in _SNAP_VIEWS:
+            yaw, pitch = _SNAP_VIEWS[view]
+            self.yaw = yaw
+            self.pitch = pitch
+            if set_ortho:
+                self.is_perspective = False
+
+    def frame_object(self, obj):
+        """Frames the camera on the selected object's bounding box (Unity 'F' shortcut)."""
+        world_min, world_max = obj.get_world_aabb()
+        center = (world_min + world_max) / 2.0
+        extent = np.linalg.norm(world_max - world_min) * 0.5
+        self.target = center
+        self.distance = max(extent * 2.5, 1.0)
+        if not self.is_perspective:
+            self.ortho_scale = max(extent * 2.5, 1.0)
+
+
     def get_position(self):
         # Calculate eye position in Z-up system:
         # X = tx + r * cos(pitch) * sin(yaw)
