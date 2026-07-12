@@ -398,7 +398,20 @@ class Scene:
     """Manages scene objects, selection state, and ray-AABB intersections."""
     def __init__(self):
         self.objects = []
-        self.selected_object = None
+        self.selected_objects = []
+        self.active_object = None
+
+    @property
+    def selected_object(self):
+        return self.active_object
+
+    @selected_object.setter
+    def selected_object(self, value):
+        self.active_object = value
+        if value is None:
+            self.selected_objects = []
+        elif value not in self.selected_objects:
+            self.selected_objects = [value]
 
     def add_object(self, obj: Object):
         self.objects.append(obj)
@@ -406,20 +419,22 @@ class Scene:
     def remove_object(self, obj: Object):
         if obj in self.objects:
             self.objects.remove(obj)
-            if self.selected_object == obj:
-                self.selected_object = None
+            if obj in self.selected_objects:
+                self.selected_objects.remove(obj)
+            if self.active_object == obj:
+                self.active_object = self.selected_objects[-1] if self.selected_objects else None
 
     def clear(self):
         self.objects.clear()
-        self.selected_object = None
+        self.selected_objects.clear()
+        self.active_object = None
 
-    def perform_picking(self, mouse_x: float, mouse_y: float, viewport_width: float, viewport_height: float, camera: Camera):
+    def perform_picking(self, mouse_x: float, mouse_y: float, viewport_width: float, viewport_height: float, camera: Camera, shift_held: bool = False):
         """
         Calculates world-space ray and runs Ray-AABB Slab intersection test
         against all active objects. Selects the closest hit object.
         """
         # 1. Convert mouse coordinates to Normalized Device Coordinates (NDC)
-        # NDC range: x in [-1, 1], y in [-1, 1] (y is up in NDC, so we invert screen y)
         ndc_x = (2.0 * mouse_x) / viewport_width - 1.0
         ndc_y = 1.0 - (2.0 * mouse_y) / viewport_height
         
@@ -458,8 +473,92 @@ class Scene:
                 min_t = t
                 closest_hit_obj = obj
                 
-        self.selected_object = closest_hit_obj
+        if closest_hit_obj is not None:
+            if shift_held:
+                if closest_hit_obj in self.selected_objects:
+                    self.selected_objects.remove(closest_hit_obj)
+                    if self.active_object == closest_hit_obj:
+                        self.active_object = self.selected_objects[-1] if self.selected_objects else None
+                else:
+                    self.selected_objects.append(closest_hit_obj)
+                    self.active_object = closest_hit_obj
+            else:
+                self.selected_objects = [closest_hit_obj]
+                self.active_object = closest_hit_obj
+        else:
+            if not shift_held:
+                self.selected_objects = []
+                self.active_object = None
+                
         return closest_hit_obj
+
+    def perform_box_picking(self, x1: float, y1: float, x2: float, y2: float, viewport_width: float, viewport_height: float, camera: Camera, shift_held: bool = False):
+        """
+        Selects all objects that are inside or intersect the screen-space selection rectangle.
+        If shift_held, toggle selections or add to selection.
+        """
+        box_x1 = min(x1, x2)
+        box_x2 = max(x1, x2)
+        box_y1 = min(y1, y2)
+        box_y2 = max(y1, y2)
+
+        aspect = viewport_width / max(viewport_height, 1.0)
+        view_mat = camera.get_view_matrix()
+        proj_mat = camera.get_projection_matrix(aspect)
+        vp_mat = pyrr.matrix44.multiply(view_mat, proj_mat)
+
+        newly_selected = []
+        for obj in self.objects:
+            local_min = obj.mesh.local_aabb_min
+            local_max = obj.mesh.local_aabb_max
+            corners = [
+                np.array([local_min[0], local_min[1], local_min[2], 1.0]),
+                np.array([local_min[0], local_min[1], local_max[2], 1.0]),
+                np.array([local_min[0], local_max[1], local_min[2], 1.0]),
+                np.array([local_min[0], local_max[1], local_max[2], 1.0]),
+                np.array([local_max[0], local_min[1], local_min[2], 1.0]),
+                np.array([local_max[0], local_min[1], local_max[2], 1.0]),
+                np.array([local_max[0], local_max[1], local_min[2], 1.0]),
+                np.array([local_max[0], local_max[1], local_max[2], 1.0]),
+            ]
+            model_mat = obj.get_model_matrix()
+            world_corners = [pyrr.matrix44.apply_to_vector(model_mat, c) for c in corners]
+            
+            sx_list = []
+            sy_list = []
+            for wc in world_corners:
+                clip_pos = pyrr.matrix44.apply_to_vector(vp_mat, wc)
+                if clip_pos[3] > 0.0:
+                    ndc = clip_pos[:3] / clip_pos[3]
+                    sx = (ndc[0] + 1.0) * 0.5 * viewport_width
+                    sy = (1.0 - ndc[1]) * 0.5 * viewport_height
+                    sx_list.append(sx)
+                    sy_list.append(sy)
+            
+            if sx_list and sy_list:
+                min_sx = min(sx_list)
+                max_sx = max(sx_list)
+                min_sy = min(sy_list)
+                max_sy = max(sy_list)
+                
+                overlap = not (max_sx < box_x1 or min_sx > box_x2 or max_sy < box_y1 or min_sy > box_y2)
+                if overlap:
+                    newly_selected.append(obj)
+        
+        if shift_held:
+            for obj in newly_selected:
+                if obj not in self.selected_objects:
+                    self.selected_objects.append(obj)
+                    self.active_object = obj
+                else:
+                    self.selected_objects.remove(obj)
+                    if self.active_object == obj:
+                        self.active_object = self.selected_objects[-1] if self.selected_objects else None
+        else:
+            self.selected_objects = newly_selected
+            self.active_object = newly_selected[-1] if newly_selected else None
+
+        return self.selected_objects
 
     @staticmethod
     def ray_aabb_intersect(origin, direction, box_min, box_max) -> tuple:
@@ -501,7 +600,17 @@ def load_mesh_file(file_path: str) -> list[tuple[str, Mesh]]:
     if isinstance(mesh_data, trimesh.Scene):
         if not mesh_data.geometry:
             raise ValueError("The loaded 3D scene contains no geometries.")
-        named_geoms = list(mesh_data.geometry.items())  # (name, geometry) pairs
+        # Collect (node_name, world-space_geometry) pairs by walking the scene graph
+        named_geoms = []
+        for node_name in mesh_data.graph.nodes_geometry:
+            transform, geometry_name = mesh_data.graph.get(node_name)
+            geom = mesh_data.geometry.get(geometry_name)
+            if geom is None:
+                continue
+            # Apply the node's world transform to bake geometry into world space
+            world_geom = geom.copy()
+            world_geom.apply_transform(transform)
+            named_geoms.append((node_name, world_geom))
     else:
         named_geoms = [(None, mesh_data)]  # single mesh, no node name
 
@@ -600,6 +709,12 @@ def export_scene_to_file(scene, file_path: str):
             )
             
         export_scene.add_geometry(t_mesh, node_name=obj.name)
+        
+    # Apply -90 degree X rotation correction matrix to the entire exported scene
+    # to convert between Z-up internal and Y-up standard coordinates for Blender/Bridge
+    import trimesh.transformations as tf
+    correction = tf.rotation_matrix(-np.pi / 2, [1, 0, 0])
+    export_scene.apply_transform(correction)
         
     # Export to chosen format (Scene supports glb, gltf, obj)
     export_scene.export(file_path)

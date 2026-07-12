@@ -3,12 +3,30 @@ import time
 import numpy as np
 import pyrr
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtCore import Qt, Signal, QPoint
+from PySide6.QtCore import Qt, Signal, QPoint, QRectF
 from PySide6.QtGui import QMouseEvent, QKeyEvent, QWheelEvent, QAction
 
 import OpenGL.GL as gl
-from mesh_editor.scene import Camera, Scene, Object, create_cube_mesh, create_plane_mesh, create_sphere_mesh
+from mesh_editor.scene import Camera, Scene, Object
 from mesh_editor.gizmo import Gizmo
+
+class GizmoPivot:
+    """A virtual object representing the pivot / median center of selected objects."""
+    def __init__(self, position, rotation, scale):
+        self.position = np.array(position, dtype=np.float32)
+        self.rotation = np.array(rotation, dtype=np.float32)
+        self.scale = np.array(scale, dtype=np.float32)
+        
+    def get_model_matrix(self) -> np.ndarray:
+        import trimesh
+        rx = np.radians(-self.rotation[0])
+        ry = np.radians(-self.rotation[1])
+        rz = np.radians(-self.rotation[2])
+        t_mat = trimesh.transformations.translation_matrix(self.position)
+        r_mat = trimesh.transformations.euler_matrix(rx, ry, rz, 'sxyz')
+        s_mat = np.diag([self.scale[0], self.scale[1], self.scale[2], 1.0])
+        col_major = t_mat @ r_mat @ s_mat
+        return col_major.T.astype(np.float32)
 
 class MeshEditorViewport(QOpenGLWidget):
     """3D OpenGL Viewport for Mesh Editing. Integrates camera controls, grid, and ImGuizmo."""
@@ -28,6 +46,11 @@ class MeshEditorViewport(QOpenGLWidget):
         self.scene = Scene()
         self.gizmo = Gizmo()
         self._gizmo_dragging = False
+        
+        # Box selection states
+        self._is_box_selecting = False
+        self._box_select_start = QPoint()
+        self._box_select_end = QPoint()
         
         # Viewport customizable properties (defaults)
         self.bg_color = np.array([0.18, 0.18, 0.18], dtype=np.float32)       # Blender-style dark-grey background
@@ -111,10 +134,33 @@ class MeshEditorViewport(QOpenGLWidget):
         gl.glEnable(gl.GL_DEPTH_TEST)
         gl.glDepthFunc(gl.GL_LEQUAL)
 
+    def _get_gizmo_pivot(self):
+        selected_objs = self.scene.selected_objects
+        if not selected_objs:
+            return None
+        active_obj = self.scene.active_object or selected_objs[-1]
+        
+        # Compute median center of world bounding boxes
+        world_min = np.array([float('inf'), float('inf'), float('inf')], dtype=np.float32)
+        world_max = np.array([-float('inf'), -float('inf'), -float('inf')], dtype=np.float32)
+        for obj in selected_objs:
+            omin, omax = obj.get_world_aabb()
+            world_min = np.minimum(world_min, omin)
+            world_max = np.maximum(world_max, omax)
+        median_center = (world_min + world_max) * 0.5
+        
+        return GizmoPivot(median_center, active_obj.rotation, active_obj.scale)
+
     def paintGL(self):
         # 1. Clear background
         gl.glClearColor(self.bg_color[0], self.bg_color[1], self.bg_color[2], 1.0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+        
+        # Ensure clean opaque state before rendering objects
+        gl.glEnable(gl.GL_DEPTH_TEST)
+        gl.glDepthFunc(gl.GL_LEQUAL)
+        gl.glDisable(gl.GL_BLEND)
+        gl.glDepthMask(gl.GL_TRUE)
         
         # Retrieve physical vs logical sizes
         dpr = self.devicePixelRatioF()
@@ -162,7 +208,9 @@ class MeshEditorViewport(QOpenGLWidget):
             obj.mesh.draw()
             
             # Draw wireframe selection highlight if selected
-            if self.scene.selected_object == obj:
+            is_selected = obj in self.scene.selected_objects
+            is_active = self.scene.active_object == obj
+            if is_selected:
                 gl.glEnable(gl.GL_POLYGON_OFFSET_LINE)
                 gl.glPolygonOffset(-1.5, -1.5) # Shift depth forward slightly to prevent z-fighting
                 
@@ -171,8 +219,11 @@ class MeshEditorViewport(QOpenGLWidget):
                 gl.glLineWidth(2.0)
                 
                 gl.glUniform1i(gl.glGetUniformLocation(self.object_program, "useOverrideColor"), 1)
-                orange_highlight = np.array([1.0, 0.5, 0.0, 1.0], dtype=np.float32)
-                gl.glUniform4fv(gl.glGetUniformLocation(self.object_program, "overrideColor"), 1, orange_highlight)
+                if is_active:
+                    highlight_color = np.array([0.0, 1.0, 0.61, 1.0], dtype=np.float32) # Bright green
+                else:
+                    highlight_color = np.array([0.1, 0.42, 0.27, 1.0], dtype=np.float32) # Muted teal-green
+                gl.glUniform4fv(gl.glGetUniformLocation(self.object_program, "overrideColor"), 1, highlight_color)
                 
                 obj.mesh.draw()
                 
@@ -211,10 +262,32 @@ class MeshEditorViewport(QOpenGLWidget):
         gl.glBindVertexArray(0)
         
         gl.glDisable(gl.GL_BLEND)
+        gl.glDepthMask(gl.GL_TRUE)
         
         # 4. Render Custom Gizmo Overlay
         if self.scene.selected_object is not None:
-            self.gizmo.draw(self.scene.selected_object, self.camera, w_logical, h_logical)
+            pivot = self._get_gizmo_pivot()
+            if pivot is not None:
+                self.gizmo.draw(pivot, self.camera, w_logical, h_logical)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._is_box_selecting:
+            from PySide6.QtGui import QPainter, QColor, QPen
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            
+            pen = QPen(QColor(0, 255, 156, 204), 1)
+            painter.setPen(pen)
+            
+            brush = QColor(0, 255, 156, 15)
+            painter.setBrush(brush)
+            
+            x1, y1 = self._box_select_start.x(), self._box_select_start.y()
+            x2, y2 = self._box_select_end.x(), self._box_select_end.y()
+            rect = QRectF(x1, y1, x2 - x1, y2 - y1)
+            painter.drawRect(rect)
+            painter.end()
 
     def resizeGL(self, w, h):
         gl.glViewport(0, 0, w, h)
@@ -257,16 +330,50 @@ class MeshEditorViewport(QOpenGLWidget):
             dy = -dy
         
         if self._gizmo_dragging:
-            self.gizmo.update_drag(pos.x(), pos.y(), self.scene.selected_object, self.camera, self.width(), self.height())
-            self.transform_changed.emit(self.scene.selected_object)
+            self.gizmo.update_drag(pos.x(), pos.y(), self._drag_pivot, self.camera, self.width(), self.height())
+            
+            # Propagate pivot modifications to all selected objects
+            import trimesh
+            if self.gizmo.operation == "translate":
+                delta_pos = self._drag_pivot.position - self._drag_start_pivot_pos
+                for obj in self.scene.selected_objects:
+                    obj.position = self._drag_start_positions[obj] + delta_pos
+            elif self.gizmo.operation == "scale":
+                ratio = self._drag_pivot.scale / np.maximum(self._drag_start_pivot_scale, 1e-6)
+                for obj in self.scene.selected_objects:
+                    obj.scale = self._drag_start_scales[obj] * ratio
+            elif self.gizmo.operation == "rotate":
+                rx = np.radians(-self._drag_pivot.rotation[0])
+                ry = np.radians(-self._drag_pivot.rotation[1])
+                rz = np.radians(-self._drag_pivot.rotation[2])
+                r_new_pivot = trimesh.transformations.euler_matrix(rx, ry, rz, 'sxyz')
+                
+                # r_delta @ start_pivot_r_mat = r_new_pivot => r_delta = r_new_pivot @ inv(start_pivot_r_mat)
+                r_delta = r_new_pivot @ np.linalg.inv(self._drag_start_pivot_r_mat)
+                R_delta_3x3 = r_delta[:3, :3]
+                
+                for obj in self.scene.selected_objects:
+                    # Rotate position around median pivot start pos
+                    obj.position = self._drag_start_pivot_pos + R_delta_3x3 @ (self._drag_start_positions[obj] - self._drag_start_pivot_pos)
+                    # Rotate orientation matrix
+                    obj_r_new = r_delta @ self._drag_start_r_mats[obj]
+                    ex, ey, ez = trimesh.transformations.euler_from_matrix(obj_r_new, 'sxyz')
+                    obj.rotation = -np.degrees([ex, ey, ez]).astype(np.float32)
+                    
+            self.transform_changed.emit(self.scene.active_object)
+            self.update()
+        elif self._is_box_selecting:
+            self._box_select_end = pos.toPoint()
             self.update()
         else:
             # Hover check for cursor change or highlight
             if self.scene.selected_object is not None:
-                old_hover = self.gizmo.hovered_handle
-                self.gizmo.hovered_handle = self.gizmo.check_hover(pos.x(), pos.y(), self.scene.selected_object, self.camera, self.width(), self.height())
-                if self.gizmo.hovered_handle != old_hover:
-                    self.update()
+                pivot = self._get_gizmo_pivot()
+                if pivot is not None:
+                    old_hover = self.gizmo.hovered_handle
+                    self.gizmo.hovered_handle = self.gizmo.check_hover(pos.x(), pos.y(), pivot, self.camera, self.width(), self.height())
+                    if self.gizmo.hovered_handle != old_hover:
+                        self.update()
                     
             if self.is_orbiting:
                 # Orbiting navigation (Middle click drag or Alt + LMB drag)
@@ -294,12 +401,34 @@ class MeshEditorViewport(QOpenGLWidget):
         
         # 1. First check if mouse clicked the gizmo
         if self.scene.selected_object is not None and event.button() == Qt.MouseButton.LeftButton:
-            dragged = self.gizmo.begin_drag(pos.x(), pos.y(), self.scene.selected_object, self.camera, self.width(), self.height())
-            if dragged:
-                self._gizmo_dragging = True
-                self.update()
-                super().mousePressEvent(event)
-                return
+            pivot = self._get_gizmo_pivot()
+            if pivot is not None:
+                dragged = self.gizmo.begin_drag(pos.x(), pos.y(), pivot, self.camera, self.width(), self.height())
+                if dragged:
+                    self._gizmo_dragging = True
+                    # Record start states for propagation
+                    self._drag_pivot = pivot
+                    self._drag_start_pivot_pos = np.copy(pivot.position)
+                    self._drag_start_pivot_scale = np.copy(pivot.scale)
+                    
+                    import trimesh
+                    rx = np.radians(-pivot.rotation[0])
+                    ry = np.radians(-pivot.rotation[1])
+                    rz = np.radians(-pivot.rotation[2])
+                    self._drag_start_pivot_r_mat = trimesh.transformations.euler_matrix(rx, ry, rz, 'sxyz')
+                    
+                    self._drag_start_positions = {obj: np.copy(obj.position) for obj in self.scene.selected_objects}
+                    self._drag_start_scales = {obj: np.copy(obj.scale) for obj in self.scene.selected_objects}
+                    self._drag_start_r_mats = {}
+                    for obj in self.scene.selected_objects:
+                        orx = np.radians(-obj.rotation[0])
+                        ory = np.radians(-obj.rotation[1])
+                        orz = np.radians(-obj.rotation[2])
+                        self._drag_start_r_mats[obj] = trimesh.transformations.euler_matrix(orx, ory, orz, 'sxyz')
+                        
+                    self.update()
+                    super().mousePressEvent(event)
+                    return
         
         # 2. Handle viewport cameras or selection if not captured
         # Check for Alt modifier for trackpad navigation fallbacks
@@ -318,10 +447,18 @@ class MeshEditorViewport(QOpenGLWidget):
                 self.is_orbiting = True
         elif event.button() == Qt.MouseButton.LeftButton:
             # Raycasting selection against objects
-            old_selection = self.scene.selected_object
-            self.scene.perform_picking(pos.x(), pos.y(), self.width(), self.height(), self.camera)
-            if self.scene.selected_object != old_selection:
-                self.selection_changed.emit(self.scene.selected_object)
+            shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            old_selection = list(self.scene.selected_objects)
+            hit_obj = self.scene.perform_picking(pos.x(), pos.y(), self.width(), self.height(), self.camera, shift_held=shift)
+            
+            if hit_obj is None and not shift:
+                # Clicked empty space: start box selection
+                self._is_box_selecting = True
+                self._box_select_start = pos.toPoint()
+                self._box_select_end = pos.toPoint()
+            
+            if list(self.scene.selected_objects) != old_selection:
+                self.selection_changed.emit(self.scene.active_object)
             self.update()
                 
         super().mousePressEvent(event)
@@ -332,6 +469,19 @@ class MeshEditorViewport(QOpenGLWidget):
             self._gizmo_dragging = False
             self.update()
             
+        if self._is_box_selecting:
+            self._is_box_selecting = False
+            shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            old_selection = list(self.scene.selected_objects)
+            self.scene.perform_box_picking(
+                self._box_select_start.x(), self._box_select_start.y(),
+                self._box_select_end.x(), self._box_select_end.y(),
+                self.width(), self.height(), self.camera, shift_held=shift
+            )
+            if list(self.scene.selected_objects) != old_selection:
+                self.selection_changed.emit(self.scene.active_object)
+            self.update()
+
         if event.button() == Qt.MouseButton.MiddleButton or (event.button() == Qt.MouseButton.LeftButton and (self.is_orbiting or self.is_panning or self.is_zooming)):
             self.is_orbiting = False
             self.is_panning = False
@@ -351,6 +501,25 @@ class MeshEditorViewport(QOpenGLWidget):
 
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
+        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        
+        if ctrl and key == Qt.Key.Key_A:
+            # Select all
+            self.scene.selected_objects = list(self.scene.objects)
+            self.scene.active_object = self.scene.objects[-1] if self.scene.objects else None
+            self.selection_changed.emit(self.scene.active_object)
+            self.update()
+            event.accept()
+            return
+        elif key == Qt.Key.Key_Escape:
+            # Deselect all
+            self.scene.selected_objects = []
+            self.scene.active_object = None
+            self.selection_changed.emit(None)
+            self.update()
+            event.accept()
+            return
+            
         if key == Qt.Key.Key_G:
             # G: Translate
             self.gizmo.operation = "translate"
@@ -373,7 +542,6 @@ class MeshEditorViewport(QOpenGLWidget):
             return
         
         # Camera snap shortcuts (keys 1,3,5,7 and numpad counterparts)
-        ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         if key == Qt.Key.Key_1:
             self.camera.snap_to_view("back" if ctrl else "front")
             self.notify_camera_changed()

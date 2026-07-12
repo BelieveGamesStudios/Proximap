@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
     QMenuBar, QMenu, QWidgetAction
 )
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QColor
 from mesh_editor.viewport import MeshEditorViewport
 from mesh_editor.scene import Object, load_mesh_file
 
@@ -150,6 +151,7 @@ class MeshEditorWidget(QWidget):
         outliner_vlayout.addWidget(outliner_title)
         
         self.outliner_list = QListWidget(outliner_box)
+        self.outliner_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.outliner_list.setMinimumHeight(120)
         self.outliner_list.setStyleSheet("""
             QListWidget {
@@ -684,9 +686,44 @@ class MeshEditorWidget(QWidget):
             sb.blockSignals(block)
 
     # --- SLOT HANDLERS ---
+    def _update_outliner_highlights(self):
+        self.outliner_list.blockSignals(True)
+        active_obj = self.viewport.scene.active_object
+        selected_objs = self.viewport.scene.selected_objects
+        
+        for i in range(self.outliner_list.count()):
+            item = self.outliner_list.item(i)
+            item_name = item.text()
+            
+            obj = None
+            for o in self.viewport.scene.objects:
+                if o.name == item_name:
+                    obj = o
+                    break
+                    
+            if obj in selected_objs:
+                item.setSelected(True)
+                if obj == active_obj:
+                    # Active object (last clicked): Bright Green text, darker green/black background
+                    item.setForeground(QColor("#00FF9C"))
+                    item.setBackground(QColor("#1e2d27"))
+                else:
+                    # Secondary selected: Muted green text, subtle background
+                    item.setForeground(QColor("#1A7A4A"))
+                    item.setBackground(QColor("#121b16"))
+            else:
+                item.setSelected(False)
+                item.setForeground(QColor("#e0e0e0"))
+                item.setBackground(QColor("#121212"))
+                
+        self.outliner_list.blockSignals(False)
+
+    # --- SLOT HANDLERS ---
     def _on_viewport_selection_changed(self, selected_obj: Object):
-        self.btn_delete_mesh.setEnabled(selected_obj is not None)
-        if selected_obj is None:
+        selected_objs = self.viewport.scene.selected_objects
+        self.btn_delete_mesh.setEnabled(len(selected_objs) > 0)
+        
+        if not selected_objs:
             self.outliner_list.blockSignals(True)
             self.outliner_list.clearSelection()
             self.outliner_list.blockSignals(False)
@@ -699,50 +736,59 @@ class MeshEditorWidget(QWidget):
                 sb.setValue(1.0)
             self._block_properties_signals(False)
         else:
-            # Sync outliner selection
-            self.outliner_list.blockSignals(True)
-            self.outliner_list.clearSelection()
-            for i in range(self.outliner_list.count()):
-                item_name = self.outliner_list.item(i).text()
-                if item_name == selected_obj.name:
-                    self.outliner_list.setCurrentRow(i)
-                    self.outliner_list.item(i).setSelected(True)
-                    break
-            self.outliner_list.blockSignals(False)
+            self._update_outliner_highlights()
             
-            # Populate fields
-            self._set_properties_enabled(True)
-            self.properties_box.setVisible(True)
-            self._sync_properties_from_object(selected_obj)
+            # Populate fields based on active selection (selected_obj)
+            if selected_obj is not None:
+                self._set_properties_enabled(True)
+                self.properties_box.setVisible(True)
+                self._sync_properties_from_object(selected_obj)
+            else:
+                self._set_properties_enabled(False)
 
     def _on_viewport_transform_changed(self, obj: Object):
         # Update inputs dynamically from gizmo dragging without loops
-        self._sync_properties_from_object(obj)
+        if obj:
+            self._sync_properties_from_object(obj)
 
     def _on_outliner_selection_changed(self):
         selected_items = self.outliner_list.selectedItems()
         if not selected_items:
-            selected_obj = None
+            self.viewport.scene.selected_objects = []
+            self.viewport.scene.active_object = None
+            active_obj = None
         else:
-            item_name = selected_items[0].text()
-            selected_obj = None
-            for obj in self.viewport.scene.objects:
-                if obj.name == item_name:
-                    selected_obj = obj
-                    break
+            new_selected = []
+            for item in selected_items:
+                for obj in self.viewport.scene.objects:
+                    if obj.name == item.text():
+                        new_selected.append(obj)
+                        break
+            self.viewport.scene.selected_objects = new_selected
             
-        self.viewport.scene.selected_object = selected_obj
+            current_item = self.outliner_list.currentItem()
+            active_obj = None
+            if current_item and current_item.isSelected():
+                for obj in self.viewport.scene.objects:
+                    if obj.name == current_item.text():
+                        active_obj = obj
+                        break
+            if active_obj is None and new_selected:
+                active_obj = new_selected[-1]
+            self.viewport.scene.active_object = active_obj
+            
+        selected_objs = self.viewport.scene.selected_objects
+        self.btn_delete_mesh.setEnabled(len(selected_objs) > 0)
         
-        # Sync delete button state and properties fields
-        self.btn_delete_mesh.setEnabled(selected_obj is not None)
-        if selected_obj is None:
+        if active_obj is None:
             self._set_properties_enabled(False)
             self.properties_box.setVisible(False)
         else:
             self._set_properties_enabled(True)
             self.properties_box.setVisible(True)
-            self._sync_properties_from_object(selected_obj)
+            self._sync_properties_from_object(active_obj)
             
+        self._update_outliner_highlights()
         self.viewport.update()
 
     def _sync_properties_from_object(self, obj: Object):
@@ -1032,18 +1078,19 @@ class MeshEditorWidget(QWidget):
         self.import_worker = None
 
     def _delete_selected_object(self):
-        selected_obj = self.viewport.scene.selected_object
-        if selected_obj is not None:
-            # 1. Clean up OpenGL resources for this mesh
+        selected_objs = list(self.viewport.scene.selected_objects)
+        if selected_objs:
+            # 1. Clean up OpenGL resources for all selected meshes
             self.viewport.makeCurrent()
-            selected_obj.mesh.cleanup()
+            for obj in selected_objs:
+                obj.mesh.cleanup()
             self.viewport.doneCurrent()
             
-            # 2. Remove from scene list
-            self.viewport.scene.remove_object(selected_obj)
+            # 2. Remove all selected objects from scene
+            for obj in selected_objs:
+                self.viewport.scene.remove_object(obj)
             
-            # 3. Clear selected state
-            self.viewport.scene.selected_object = None
+            # 3. Clear selected state and sync UI
             self._on_viewport_selection_changed(None)
             
             # 4. Refresh outliner and redraw
