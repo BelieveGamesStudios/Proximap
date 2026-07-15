@@ -1271,7 +1271,7 @@ class MainWindow(QMainWindow):
         
         # Central Widget (Just the Viewer now, since it handles drops)
         self.viewer_widget = ViewerWrapperWidget(self)
-        self.viewer_widget.images_dropped.connect(self._handle_dropped_images)
+        self.viewer_widget.images_dropped.connect(self._on_files_dropped)
         self.viewer_widget.reload_requested.connect(self._reload_viewer)
         self.viewer_widget.camera_changed.connect(self._on_camera_changed)
         self.viewer_widget.action_save.triggered.connect(self._save_project)
