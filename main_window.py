@@ -45,8 +45,8 @@ from PySide6.QtCore import Qt, QSize, Signal, QTimer, QThread
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QFont, QWindow, QPixmap, QImage
 
 import hardware_profiler
-from pipeline_manager import PipelineWorker, BackgroundRemovalWorker
-from mesh_editor import MeshEditorWidget
+
+# Deferred imports for faster startup: MeshEditorWidget, PipelineWorker, BackgroundRemovalWorker
 
 import http.server
 import socketserver
@@ -1056,7 +1056,7 @@ class MainWindow(QMainWindow):
         
         self._init_ui()
         self._apply_styling()
-        self._check_existing_scene()
+        QTimer.singleShot(0, self._check_existing_scene)
 
     def _init_ui(self):
         # Main Tabbed Interface
@@ -1334,11 +1334,27 @@ class MainWindow(QMainWindow):
         # Register tabs to MainTabs
         self.main_tabs.addTab(reconstruction_tab, "3D Reconstruction")
         
-        self.mesh_editor_tab = MeshEditorWidget(self.main_tabs)
-        self.mesh_editor_tab.action_upload_proximap.triggered.connect(self._upload_mesh_editor_scene)
-        self.main_tabs.addTab(self.mesh_editor_tab, "Mesh Editor")
+        # Lazy load the Mesh Editor tab to avoid importing trimesh at startup
+        self.mesh_editor_tab = None
+        self.mesh_editor_placeholder = QWidget(self.main_tabs)
+        self.main_tabs.addTab(self.mesh_editor_placeholder, "Mesh Editor")
+        self.main_tabs.currentChanged.connect(self._on_tab_changed)
         
         self._set_process_btn_state("idle")
+
+    def _on_tab_changed(self, index):
+        if index == 1 and self.mesh_editor_tab is None:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                from mesh_editor import MeshEditorWidget
+                self.mesh_editor_tab = MeshEditorWidget(self)
+                self.mesh_editor_tab.action_upload_proximap.triggered.connect(self._upload_mesh_editor_scene)
+                
+                layout = QVBoxLayout(self.mesh_editor_placeholder)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.addWidget(self.mesh_editor_tab)
+            finally:
+                QApplication.restoreOverrideCursor()
 
     def _update_system_badge(self):
         """Calculates system resource quality badge and updates style dynamically."""
@@ -1853,6 +1869,7 @@ class MainWindow(QMainWindow):
             self._on_bg_removal_finished(False, self.image_list, "Failed to copy images to workspace.")
             return
 
+        from pipeline_manager import BackgroundRemovalWorker
         self.worker = BackgroundRemovalWorker(copied_list, self)
         self.worker.progress_changed.connect(self.progress_bar.setValue)
         self.worker.status_changed.connect(self.status_label.setText)
@@ -1904,6 +1921,7 @@ class MainWindow(QMainWindow):
         gpu_mode = gpu_modes[self.gpu_combo.currentIndex()]
         has_plain = self.plain_surfaces_checkbox.isChecked()
 
+        from pipeline_manager import PipelineWorker
         self.worker = PipelineWorker(
             os.path.dirname(self.image_list[0]), 
             output_dir, 
@@ -3043,7 +3061,7 @@ class MainWindow(QMainWindow):
             self.loopback_server = None
 
     def _upload_mesh_editor_scene(self):
-        if not self.mesh_editor_tab.viewport.scene.objects:
+        if not self.mesh_editor_tab or not self.mesh_editor_tab.viewport.scene.objects:
             QMessageBox.warning(
                 self, "Upload Warning", "There are no objects in the scene to upload."
             )
@@ -3117,6 +3135,30 @@ class MainWindow(QMainWindow):
             pass
 
 
+class HardwareInitWorker(QThread):
+    def run(self):
+        hardware_profiler.initialize()
+
+class StartupManager:
+    def __init__(self, splash, icon_path):
+        self.splash = splash
+        self.icon_path = icon_path
+        self.worker = HardwareInitWorker()
+        self.worker.finished.connect(self.on_init_finished)
+        self.window = None
+
+    def start(self):
+        self.worker.start()
+
+    def on_init_finished(self):
+        self.window = MainWindow()
+        if os.path.exists(self.icon_path):
+            self.window.setWindowIcon(QIcon(self.icon_path))
+        self.window.show()
+        if self.splash:
+            self.splash.finish(self.window)
+
+
 if __name__ == "__main__":
     # Fix taskbar icon grouping on Windows
     if sys.platform == 'win32':
@@ -3139,8 +3181,23 @@ if __name__ == "__main__":
         app_icon = QIcon(icon_path)
         app.setWindowIcon(app_icon)
         
-    window = MainWindow()
-    if os.path.exists(icon_path):
-        window.setWindowIcon(QIcon(icon_path))
-    window.show()
+    # Create and show splash screen using the high-res PNG icon
+    from PySide6.QtWidgets import QSplashScreen
+    splash = None
+    splash_path = os.path.join(base_dir, "public", "app_icon.png")
+    if not os.path.exists(splash_path):
+        splash_path = icon_path
+        
+    if os.path.exists(splash_path):
+        pixmap = QPixmap(splash_path)
+        # Scale to a standard splash size (e.g. 256x256) keeping aspect ratio
+        scaled_pixmap = pixmap.scaled(256, 256, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        splash = QSplashScreen(scaled_pixmap)
+        splash.show()
+        splash.showMessage("Initializing hardware profile...", Qt.AlignBottom | Qt.AlignCenter, Qt.white)
+        
+    # Start startup manager to handle background initialization
+    manager = StartupManager(splash, icon_path)
+    manager.start()
+    
     sys.exit(app.exec())

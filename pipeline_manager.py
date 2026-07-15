@@ -502,12 +502,35 @@ class PipelineWorker(QThread):
         # STEP 2/9 — Feature Extraction
         # =========================================================================
         self.status_changed.emit("Step 2/9: Extracting SIFT Features...")
+        
+        # Determine camera model options based on image dimensions
+        single_camera_val = "1"
+        try:
+            from PIL import Image
+            unique_sizes = set()
+            image_extensions = ('.jpg', '.jpeg', '.png', '.tif', '.tiff')
+            for filename in os.listdir(working_image_dir):
+                if filename.lower().endswith(image_extensions):
+                    img_path = os.path.join(working_image_dir, filename)
+                    with Image.open(img_path) as img:
+                        unique_sizes.add(img.size)
+            if len(unique_sizes) > 1:
+                single_camera_val = "0"
+                self.log_message.emit(
+                    f"[INFO] Mixed image dimensions detected (unique sizes: {list(unique_sizes)}). "
+                    "Using per-image camera model for reconstruction."
+                )
+            else:
+                self.log_message.emit("[INFO] All images share identical dimensions. Using single camera model.")
+        except Exception as e:
+            self.log_message.emit(f"[WARNING] Could not check image dimensions: {e}. Defaulting to single camera model.")
+
         cmd_extract_gpu = [
             colmap_exe, "feature_extractor",
             "--database_path", database_path,
             "--image_path", working_image_dir,
             "--ImageReader.camera_model", "PINHOLE",
-            "--ImageReader.single_camera", "1",
+            "--ImageReader.single_camera", single_camera_val,
             "--FeatureExtraction.use_gpu", "1",
             "--FeatureExtraction.max_image_size", str(colmap_max_image_size),
             "--SiftExtraction.max_num_features", str(colmap_max_num_features),
@@ -519,7 +542,7 @@ class PipelineWorker(QThread):
             "--database_path", database_path,
             "--image_path", working_image_dir,
             "--ImageReader.camera_model", "PINHOLE",
-            "--ImageReader.single_camera", "1",
+            "--ImageReader.single_camera", single_camera_val,
             "--FeatureExtraction.use_gpu", "0",
             "--FeatureExtraction.max_image_size", str(colmap_max_image_size),
             "--SiftExtraction.max_num_features", str(colmap_max_num_features),
@@ -546,6 +569,21 @@ class PipelineWorker(QThread):
         if db_stats["feature_counts"]:
             self._feature_counts = db_stats["feature_counts"]
         self._emit_feature_summary()
+
+        # Sanity check: Ensure at least 2 images are registered and have features
+        num_registered = db_stats["num_images"]
+        if num_registered < 2:
+            self.log_message.emit(
+                f"[ERROR] Only {num_registered} image(s) successfully registered in the database. "
+                "Reconstruction requires at least 2 registered images. Aborting."
+            )
+            return False
+        elif num_registered < self._total_images:
+            self.log_message.emit(
+                f"[WARNING] Only {num_registered} out of {self._total_images} images successfully registered. "
+                "Some images may be skipped or corrupt."
+            )
+
         self.progress_changed.emit(25)
 
         # =========================================================================
@@ -959,34 +997,36 @@ class PipelineWorker(QThread):
 
             try:
                 with Image.open(src_path) as img:
-                    w, h = img.size
-                    # Preserve EXIF so focal length extraction keeps working
+                    from PIL import ImageOps
+                    # Transpose based on EXIF orientation
+                    img_transposed = ImageOps.exif_transpose(img)
+                    w, h = img_transposed.size
+                    
                     try:
-                        exif_bytes = img.info.get('exif', b'')
+                        exif_data = img_transposed.getexif()
                     except Exception:
-                        exif_bytes = b''
+                        exif_data = None
 
                     if max(w, h) > max_image_dim:
                         # Compute scale factor maintaining aspect ratio
                         scale = max_image_dim / max(w, h)
                         new_w = round(w * scale)
                         new_h = round(h * scale)
-                        resized = img.resize((new_w, new_h), Image.LANCZOS)
-                        # Save with original EXIF preserved
-                        save_kwargs = {}
-                        if exif_bytes:
-                            save_kwargs['exif'] = exif_bytes
-                        # JPEG quality 92 — visually lossless, keeps file size reasonable
-                        if filename.lower().endswith(('.jpg', '.jpeg')):
-                            save_kwargs['quality'] = 92
-                            save_kwargs['subsampling'] = 0
-                        resized.save(dst_path, **save_kwargs)
+                        processed = img_transposed.resize((new_w, new_h), Image.LANCZOS)
                         resized_count += 1
                     else:
-                        # Image already fits — copy it as-is to keep the dir consistent
-                        import shutil as _shutil
-                        _shutil.copy2(src_path, dst_path)
+                        processed = img_transposed
                         copied_count += 1
+
+                    # Save with transposed EXIF preserved (orientation tag is automatically cleared)
+                    save_kwargs = {}
+                    if exif_data:
+                        save_kwargs['exif'] = exif_data
+                    # JPEG quality 92 — visually lossless, keeps file size reasonable
+                    if filename.lower().endswith(('.jpg', '.jpeg')):
+                        save_kwargs['quality'] = 92
+                        save_kwargs['subsampling'] = 0
+                    processed.save(dst_path, **save_kwargs)
 
             except Exception as e:
                 self.log_message.emit(f"[WARNING] Failed to process image {filename}: {e}. Copying original.")
@@ -998,7 +1038,7 @@ class PipelineWorker(QThread):
                     self.log_message.emit(f"[ERROR] Could not copy {filename}: {e2}")
 
         self.log_message.emit(
-            f"[PREP] Done: {resized_count} image(s) downscaled to ≤{max_image_dim}px, "
+            f"[PREP] Done: {resized_count} image(s) downscaled to <={max_image_dim}px, "
             f"{copied_count} image(s) were already within limit."
         )
         return working_dir

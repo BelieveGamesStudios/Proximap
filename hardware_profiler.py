@@ -12,6 +12,7 @@ import atexit
 import subprocess
 import psutil
 import numpy as np
+import concurrent.futures
 
 # Invariant check: Under no circumstances should the system query total static RAM
 # via platform or os libraries. Only psutil is permitted for dynamic memory checks.
@@ -202,17 +203,28 @@ def check_gpus_powershell() -> list:
 
 def detect_gpus() -> tuple:
     """
-    Scans the system for NVIDIA and AMD GPUs.
+    Scans the system for NVIDIA and AMD GPUs in parallel.
     Returns:
         tuple: (list of dedicated GPUs, list of integrated GPUs)
     """
-    gputil_names = check_nvidia_gputil()
-    smi_names = check_nvidia_smi()
-    rocm_names = check_rocm_smi()
-    wmic_names = check_gpus_wmic()
-    powershell_names = check_gpus_powershell()
+    funcs = [
+        check_nvidia_gputil,
+        check_nvidia_smi,
+        check_rocm_smi,
+        check_gpus_wmic,
+        check_gpus_powershell
+    ]
     
-    all_names = set(gputil_names + smi_names + rocm_names + wmic_names + powershell_names)
+    all_names = set()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(funcs)) as executor:
+        futures = {executor.submit(func): func for func in funcs}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                names = future.result()
+                if names:
+                    all_names.update(names)
+            except Exception:
+                pass
     
     dgpus = []
     igpus = []
@@ -365,18 +377,31 @@ def run_matrix_multiplication_benchmark() -> dict:
         }
 
 
-# Global/module initialization
-dedicated_gpus, integrated_gpus = detect_gpus()
+# Global/module initialization placeholders
+dedicated_gpus = []
+integrated_gpus = []
+use_low_hardware_fallback = True
+gpu_perf_stats = None
 
-if len(dedicated_gpus) > 0:
-    use_low_hardware_fallback = False
-    gpu_perf_stats = run_matrix_multiplication_benchmark()
-else:
-    use_low_hardware_fallback = True
-    gpu_perf_stats = None
+def initialize():
+    """
+    Performs the intensive hardware profiling scans and benchmarks.
+    This should be called off the main thread at application startup.
+    """
+    global dedicated_gpus, integrated_gpus, use_low_hardware_fallback, gpu_perf_stats
+    dedicated_gpus_found, integrated_gpus_found = detect_gpus()
+    dedicated_gpus = dedicated_gpus_found
+    integrated_gpus = integrated_gpus_found
+    if len(dedicated_gpus) > 0:
+        use_low_hardware_fallback = False
+        gpu_perf_stats = run_matrix_multiplication_benchmark()
+    else:
+        use_low_hardware_fallback = True
+        gpu_perf_stats = None
 
 
 if __name__ == "__main__":
+    initialize()
     print("=== Hardware Profiler Status ===")
     print(f"Available Memory: {get_available_memory() / (1024**3):.2f} GB")
     print(f"Dedicated GPUs Found: {dedicated_gpus}")
