@@ -53,6 +53,9 @@ import socketserver
 import threading
 import webbrowser
 
+IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.tif', '.tiff')
+VIDEO_EXTS = ('.mp4', '.mov', '.avi', '.mkv')
+
 CAMERA_CONTROLS = {
     0: "<b>Arcball Camera Controls:</b><br>"
        "• Left Drag: Orbit camera<br>"
@@ -177,11 +180,11 @@ class DragDropArea(QFrame):
         self.icon_label.setStyleSheet("font-size: 64px; margin-bottom: 15px;")
         self.icon_label.setAlignment(Qt.AlignCenter)
         
-        self.instruction_label = QLabel("Drag images or folder here to start", self)
+        self.instruction_label = QLabel("Drag images/videos or folder here to start", self)
         self.instruction_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #b3b3b3;")
         self.instruction_label.setAlignment(Qt.AlignCenter)
         
-        self.sub_label = QLabel("Supports JPG, PNG, TIFF", self)
+        self.sub_label = QLabel("Supports JPG, PNG, TIFF, MP4, MOV, AVI, MKV", self)
         self.sub_label.setStyleSheet("font-size: 12px; color: #737373;")
         self.sub_label.setAlignment(Qt.AlignCenter)
         
@@ -202,18 +205,35 @@ class DragDropArea(QFrame):
     def dropEvent(self, event: QDropEvent):
         self.setStyleSheet("")
         files = []
+        ignored = []
         for url in event.mimeData().urls():
             local_path = url.toLocalFile()
             if os.path.isdir(local_path):
-                # Scan folder for images
+                # Scan folder for images/videos
                 for root, _, filenames in os.walk(local_path):
                     for filename in filenames:
-                        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff')):
-                            files.append(os.path.join(root, filename))
+                        fp = os.path.join(root, filename)
+                        ext = os.path.splitext(filename)[1].lower()
+                        if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
+                            files.append(os.path.normpath(fp))
+                        else:
+                            ignored.append(filename)
             elif os.path.isfile(local_path):
-                if local_path.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff')):
-                    files.append(local_path)
+                ext = os.path.splitext(local_path)[1].lower()
+                if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
+                    files.append(os.path.normpath(local_path))
+                else:
+                    ignored.append(os.path.basename(local_path))
                     
+        if ignored:
+            from PySide6.QtWidgets import QMessageBox
+            msg = "The following files were ignored because they are not supported images or videos:\n\n"
+            if len(ignored) > 10:
+                msg += "\n".join(ignored[:10]) + f"\n... and {len(ignored) - 10} more files."
+            else:
+                msg += "\n".join(ignored)
+            QMessageBox.warning(self, "Unsupported Files Ignored", msg)
+
         if files:
             self.images_dropped.emit(files)
             event.acceptProposedAction()
@@ -377,7 +397,7 @@ class ViewerWrapperWidget(QFrame):
         self.container_area_layout.setSpacing(0)
         
         # A simple fallback label when no viewer is running
-        self.fallback_label = QLabel("Drag Images Here or Process to View 3D Scene", self.container_area)
+        self.fallback_label = QLabel("Drag Images/Videos Here or Process to View 3D Scene", self.container_area)
         self.fallback_label.setAlignment(Qt.AlignCenter)
         self.fallback_label.setStyleSheet("color: #737373; font-size: 14px;")
         self.container_area_layout.addWidget(self.fallback_label)
@@ -419,18 +439,35 @@ class ViewerWrapperWidget(QFrame):
     def dropEvent(self, event: QDropEvent):
         self.setStyleSheet("background-color: #1A1A1A; border: 1px solid #2B2B2B; border-radius: 8px;")
         files = []
+        ignored = []
         for url in event.mimeData().urls():
             local_path = url.toLocalFile()
             if os.path.isdir(local_path):
-                # Scan folder for images
+                # Scan folder for images/videos
                 for root, _, filenames in os.walk(local_path):
                     for filename in filenames:
-                        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff')):
-                            files.append(os.path.join(root, filename))
+                        fp = os.path.join(root, filename)
+                        ext = os.path.splitext(filename)[1].lower()
+                        if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
+                             files.append(os.path.normpath(fp))
+                        else:
+                             ignored.append(filename)
             elif os.path.isfile(local_path):
-                if local_path.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff')):
-                    files.append(local_path)
+                ext = os.path.splitext(local_path)[1].lower()
+                if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
+                    files.append(os.path.normpath(local_path))
+                else:
+                    ignored.append(os.path.basename(local_path))
                     
+        if ignored:
+            from PySide6.QtWidgets import QMessageBox
+            msg = "The following files were ignored because they are not supported images or videos:\n\n"
+            if len(ignored) > 10:
+                msg += "\n".join(ignored[:10]) + f"\n... and {len(ignored) - 10} more files."
+            else:
+                msg += "\n".join(ignored)
+            QMessageBox.warning(self, "Unsupported Files Ignored", msg)
+
         if files:
             self.images_dropped.emit(files)
             event.acceptProposedAction()
@@ -1124,7 +1161,7 @@ class MainWindow(QMainWindow):
         self.badge.setAlignment(Qt.AlignCenter)
         self._update_system_badge()
         
-        self.browse_btn = QPushButton("Select Images Directory", step1_box)
+        self.browse_btn = QPushButton("Select Images/Videos Directory", step1_box)
         self.browse_btn.clicked.connect(self._open_dir_dialog)
         
         self.bg_remove_btn = QPushButton("Remove Image Background", step1_box)
@@ -1771,34 +1808,199 @@ class MainWindow(QMainWindow):
 
     def _add_photos_dialog(self):
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Select Images to Add", self.last_accessed_dir, "Image Files (*.png *.jpg *.jpeg *.tif *.tiff)"
+            self, "Select Images/Videos to Add", self.last_accessed_dir, 
+            "Supported Files (*.png *.jpg *.jpeg *.tif *.tiff *.mp4 *.mov *.avi *.mkv);;Image Files (*.png *.jpg *.jpeg *.tif *.tiff);;Video Files (*.mp4 *.mov *.avi *.mkv)"
         )
         if files:
             self.last_accessed_dir = os.path.dirname(files[0])
-            current_set = set(self.image_list)
-            added_count = 0
+            images = []
+            videos = []
+            ignored = []
             for f in files:
                 normalized = os.path.normpath(f)
-                if normalized not in current_set:
-                    self.image_list.append(normalized)
-                    added_count += 1
-            if added_count > 0:
-                self._handle_dropped_images(self.image_list)
-                self.console_text.append(f"[INFO] Added {added_count} new images.")
+                ext = os.path.splitext(normalized)[1].lower()
+                if ext in IMAGE_EXTS:
+                    images.append(normalized)
+                elif ext in VIDEO_EXTS:
+                    videos.append(normalized)
+                else:
+                    ignored.append(os.path.basename(normalized))
+            if ignored:
+                self._warn_ignored_files(ignored)
+            if images or videos:
+                self._route_import(images, videos, append_to_existing=True)
 
     def _open_dir_dialog(self):
-        dir_path = QFileDialog.getExistingDirectory(self, "Select Images Folder", self.last_accessed_dir)
+        dir_path = QFileDialog.getExistingDirectory(self, "Select Images/Videos Folder", self.last_accessed_dir)
         if dir_path:
             self.last_accessed_dir = dir_path
-            files = []
+            images = []
+            videos = []
             for root, _, filenames in os.walk(dir_path):
                 for filename in filenames:
-                    if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff')):
-                        files.append(os.path.join(root, filename))
-            if files:
-                self._handle_dropped_images(files)
+                    fp = os.path.join(root, filename)
+                    ext = os.path.splitext(filename)[1].lower()
+                    if ext in IMAGE_EXTS:
+                        images.append(os.path.normpath(fp))
+                    elif ext in VIDEO_EXTS:
+                        videos.append(os.path.normpath(fp))
+            if images or videos:
+                self._route_import(images, videos, append_to_existing=False)
             else:
-                self.console_text.append("[WARNING] No valid images found in selected folder.")
+                self.console_text.append("[WARNING] No valid images or videos found in selected folder.")
+
+    def _on_files_dropped(self, files: list):
+        images = []
+        videos = []
+        for f in files:
+            normalized = os.path.normpath(f)
+            ext = os.path.splitext(normalized)[1].lower()
+            if ext in IMAGE_EXTS:
+                images.append(normalized)
+            elif ext in VIDEO_EXTS:
+                videos.append(normalized)
+        if images or videos:
+            self._route_import(images, videos, append_to_existing=False)
+
+    def _warn_ignored_files(self, ignored: list):
+        msg = "The following files were ignored because they are not supported images or videos:\n\n"
+        if len(ignored) > 10:
+            msg += "\n".join(ignored[:10]) + f"\n... and {len(ignored) - 10} more files."
+        else:
+            msg += "\n".join(ignored)
+        QMessageBox.warning(self, "Unsupported Files Ignored", msg)
+
+    def _route_import(self, images: list, videos: list, append_to_existing: bool = False):
+        if images:
+            if append_to_existing:
+                current_set = set(self.image_list)
+                for img in images:
+                    if img not in current_set:
+                        self.image_list.append(img)
+            else:
+                self.image_list = images
+            self._handle_dropped_images(self.image_list)
+            
+        if videos:
+            dialog = VideoPresetModal(self)
+            if dialog.exec() == QDialog.Accepted:
+                name, desc, interval, blur = dialog.get_selected_preset()
+                self.console_text.append(f"[VIDEO] Starting extraction using '{name}' preset (interval: {interval}s, blur threshold: {blur})...")
+                self._start_video_extraction(videos, interval, blur)
+            else:
+                self.console_text.append("[VIDEO] Video import cancelled.")
+
+    def _start_video_extraction(self, videos: list, interval: float, blur: float | None):
+        self.extraction_queue = list(videos)
+        self.extracted_frames = []
+        self.extraction_interval = interval
+        self.extraction_blur = blur
+        self.total_videos_to_extract = len(videos)
+        
+        self.browse_btn.setEnabled(False)
+        self.bg_remove_btn.setEnabled(False)
+        self.process_btn.setEnabled(False)
+        
+        self.process_btn.setText("Cancel Extraction")
+        self.process_btn.setEnabled(True)
+        try:
+            self.process_btn.clicked.disconnect()
+        except Exception:
+            pass
+        self.process_btn.clicked.connect(self._cancel_video_extraction)
+        
+        self._process_next_video()
+
+    def _process_next_video(self):
+        if not self.extraction_queue:
+            self._on_all_extractions_finished()
+            return
+            
+        video_path = self.extraction_queue.pop(0)
+        video_name = os.path.basename(video_path)
+        video_stem = os.path.splitext(video_name)[0]
+        
+        current_idx = self.total_videos_to_extract - len(self.extraction_queue)
+        self.status_label.setText(f"Extracting {video_name} ({current_idx}/{self.total_videos_to_extract})...")
+        self.progress_bar.setValue(0)
+        
+        out_dir = os.path.join(get_reconstruction_out_dir(), "extracted_frames", video_stem)
+        os.makedirs(out_dir, exist_ok=True)
+        
+        self.extraction_worker = VideoExtractionWorker(
+            video_path=video_path,
+            output_dir=out_dir,
+            interval_seconds=self.extraction_interval,
+            blur_threshold=self.extraction_blur,
+            parent=self
+        )
+        self.extraction_worker.progress.connect(self._on_extraction_progress)
+        self.extraction_worker.finished.connect(self._on_video_extraction_finished)
+        self.extraction_worker.error.connect(self._on_video_extraction_error)
+        self.extraction_worker.start()
+
+    def _on_extraction_progress(self, current, total):
+        if total > 0:
+            pct = int((current / total) * 100)
+            self.progress_bar.setValue(pct)
+            
+    def _on_video_extraction_finished(self, result):
+        import glob
+        frames = glob.glob(os.path.join(result.output_dir, "*.jpg"))
+        frames = [os.path.normpath(f) for f in frames]
+        self.extracted_frames.extend(frames)
+        self.console_text.append(f"[VIDEO] Extracted {result.frames_saved} frames from video (scanned: {result.total_frames_scanned}, rejected blur: {result.frames_rejected_blur}).")
+        
+        self._process_next_video()
+        
+    def _on_video_extraction_error(self, err_msg):
+        self.console_text.append(f"[ERROR] Video extraction error: {err_msg}")
+        QMessageBox.critical(self, "Video Extraction Error", f"An error occurred while extracting frames:\n\n{err_msg}")
+        self._cleanup_extraction_ui()
+
+    def _cancel_video_extraction(self):
+        self.console_text.append("[VIDEO] Cancelling video extraction...")
+        if hasattr(self, 'extraction_worker') and self.extraction_worker:
+            self.extraction_worker.cancel()
+        self._cleanup_extraction_ui(cancelled=True)
+
+    def _cleanup_extraction_ui(self, cancelled=False):
+        self.browse_btn.setEnabled(True)
+        self.bg_remove_btn.setEnabled(len(self.image_list) > 0)
+        
+        try:
+            self.process_btn.clicked.disconnect()
+        except Exception:
+            pass
+        self.process_btn.clicked.connect(self._start_processing)
+        self._set_process_btn_state("ready" if len(self.image_list) > 0 else "idle")
+        
+        self.progress_bar.setValue(0)
+        if cancelled:
+            self.status_label.setText("Extraction cancelled.")
+        else:
+            self.status_label.setText("Extraction failed.")
+
+    def _on_all_extractions_finished(self):
+        self.browse_btn.setEnabled(True)
+        self.bg_remove_btn.setEnabled(True)
+        
+        try:
+            self.process_btn.clicked.disconnect()
+        except Exception:
+            pass
+        self.process_btn.clicked.connect(self._start_processing)
+        
+        current_set = set(self.image_list)
+        added_count = 0
+        for f in self.extracted_frames:
+            if f not in current_set:
+                self.image_list.append(f)
+                added_count += 1
+                
+        self._handle_dropped_images(self.image_list)
+        self.status_label.setText("Extraction complete!")
+        self.console_text.append(f"[VIDEO] Complete. Added {added_count} frames from video sources.")
 
     def _remove_backgrounds_clicked(self):
         if not self.image_list:
@@ -3125,7 +3327,7 @@ class MainWindow(QMainWindow):
                 self.loopback_server.stop()
             except Exception:
                 pass
-            self.loopback_server = None
+        self.loopback_server = None
             
         # Clean up the temp file
         try:
@@ -3135,7 +3337,185 @@ class MainWindow(QMainWindow):
             pass
 
 
+class VideoPresetModal(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Video Detected — Choose Frame Extraction Quality")
+        self.setFixedSize(500, 420)
+        self.setModal(True)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #121212;
+                color: #e0e0e0;
+                border: 1px solid #2B2B2B;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+            QFrame#PresetCard {
+                border-radius: 8px;
+                padding: 12px;
+            }
+            QRadioButton {
+                font-weight: bold;
+                font-size: 13px;
+                background: transparent;
+            }
+            QRadioButton::indicator {
+                width: 16px;
+                height: 16px;
+                border: 2px solid #555555;
+                border-radius: 9px;
+                background-color: #222222;
+            }
+            QRadioButton::indicator:checked {
+                border: 2px solid #00E676;
+                background-color: #00E676;
+            }
+            QPushButton#StartBtn {
+                background-color: #00E676;
+                color: #121212;
+                border: none;
+                border-radius: 4px;
+                padding: 10px 20px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton#StartBtn:hover {
+                background-color: #00FF87;
+            }
+            QPushButton#CancelBtn {
+                background-color: #333333;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 10px 20px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton#CancelBtn:hover {
+                background-color: #444444;
+            }
+        """)
+
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(15)
+        
+        info_label = QLabel("Proximap detected one or more video files. Select a frame extraction preset below:", self)
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("font-size: 13px; color: #b3b3b3; margin-bottom: 5px;")
+        main_layout.addWidget(info_label)
+
+        self.btn_group = QButtonGroup(self)
+        self.presets = [
+            ("Quick", "Fastest — fewer frames, best for simple objects or quick previews", 1.0, None),
+            ("Balanced (recommended)", "Good coverage for most scans — filters out blurry frames automatically", 0.5, 25.0),
+            ("Detailed", "Maximum coverage — best for complex geometry, slower to process", 0.25, 20.0)
+        ]
+        
+        self.radio_buttons = []
+        self.cards = []
+        for i, (name, desc, val_interval, val_blur) in enumerate(self.presets):
+            card = QFrame(self)
+            card.setObjectName("PresetCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(10, 10, 10, 10)
+            card_layout.setSpacing(4)
+            
+            rb = QRadioButton(name, card)
+            self.btn_group.addButton(rb, i)
+            rb.toggled.connect(self.update_card_styles)
+            self.radio_buttons.append(rb)
+            self.cards.append(card)
+            
+            desc_label = QLabel(desc, card)
+            desc_label.setWordWrap(True)
+            desc_label.setStyleSheet("color: #aaaaaa; font-size: 11px; margin-left: 20px;")
+            
+            card_layout.addWidget(rb)
+            card_layout.addWidget(desc_label)
+            main_layout.addWidget(card)
+            
+        # Select Balanced by default
+        self.radio_buttons[1].setChecked(True)
+        self.update_card_styles()
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        self.cancel_btn = QPushButton("Cancel", self)
+        self.cancel_btn.setObjectName("CancelBtn")
+        self.cancel_btn.clicked.connect(self.reject)
+        
+        self.start_btn = QPushButton("Start Extraction", self)
+        self.start_btn.setObjectName("StartBtn")
+        self.start_btn.clicked.connect(self.accept)
+        
+        btn_layout.addWidget(self.cancel_btn)
+        btn_layout.addWidget(self.start_btn)
+        main_layout.addLayout(btn_layout)
+
+    def update_card_styles(self):
+        for i, rb in enumerate(self.radio_buttons):
+            card = self.cards[i]
+            if rb.isChecked():
+                card.setStyleSheet("QFrame#PresetCard { border: 2px solid #00E676; background-color: #1A2E24; }")
+                rb.setStyleSheet("QRadioButton { color: #00E676; }")
+            else:
+                card.setStyleSheet("QFrame#PresetCard { border: 1px solid #333333; background-color: #242424; }")
+                rb.setStyleSheet("QRadioButton { color: #ffffff; }")
+
+    def get_selected_preset(self):
+        idx = self.btn_group.checkedId()
+        if idx == -1:
+            idx = 1
+        return self.presets[idx]
+
+
+class VideoExtractionWorker(QThread):
+    progress = Signal(int, int)  # (current, total)
+    finished = Signal(object)    # ExtractionResult
+    error = Signal(str)          # error message
+
+    def __init__(self, video_path: str, output_dir: str, interval_seconds: float, blur_threshold: float | None, parent=None):
+        super().__init__(parent)
+        self.video_path = video_path
+        self.output_dir = output_dir
+        self.interval_seconds = interval_seconds
+        self.blur_threshold = blur_threshold
+        self._should_continue = True
+
+    def cancel(self):
+        self._should_continue = False
+
+    def should_continue_callback(self):
+        return self._should_continue
+
+    def run(self):
+        from video_extraction import extract_frames, VideoExtractionError
+        
+        def progress_callback(current, total):
+            self.progress.emit(current, total)
+            
+        try:
+            result = extract_frames(
+                video_path=self.video_path,
+                output_dir=self.output_dir,
+                interval_seconds=self.interval_seconds,
+                blur_threshold=self.blur_threshold,
+                progress_callback=progress_callback,
+                should_continue_cb=self.should_continue_callback
+            )
+            self.finished.emit(result)
+        except VideoExtractionError as e:
+            self.error.emit(str(e))
+        except Exception as e:
+            self.error.emit(f"Unexpected error: {str(e)}")
+
+
 class HardwareInitWorker(QThread):
+
     def run(self):
         hardware_profiler.initialize()
 

@@ -74,8 +74,9 @@ Remove-Item -Recurse -Force dist, build, *.log -ErrorAction SilentlyContinue
 ### Step 2: Compile the Python Application
 Use PyInstaller to compile the entrypoint `main_window.py`. We use `--onedir` for directory output (improving startup speed and avoiding antivirus issues) and `--noconsole` to hide the terminal window behind the GUI:
 ```powershell
-python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --collect-all vispy --copy-metadata pymatting main_window.py
+python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --copy-metadata pymatting main_window.py
 ```
+*Note: `--collect-all cv2` collects opencv-python-headless files required for video frame extraction.*
 
 ### Step 3: Set up Backend Binaries (Pruned Layout)
 1. Create the backend binary directories in the new output folder:

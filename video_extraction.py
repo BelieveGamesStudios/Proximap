@@ -46,6 +46,7 @@ def extract_frames(
     blur_threshold: float | None = None,
     jpeg_quality: int = 95,
     progress_callback=None,
+    should_continue_cb=None,
 ) -> ExtractionResult:
     """
     Extract frames from a video at a fixed time interval.
@@ -60,6 +61,8 @@ def extract_frames(
         jpeg_quality: 0-100, passed to cv2.imwrite.
         progress_callback: optional callable(current_frame, total_frames) for
             UI progress reporting (e.g. emit a Qt signal from here).
+        should_continue_cb: optional callable returning bool. If it returns False,
+            extraction is aborted immediately.
 
     Returns:
         ExtractionResult with counts and the output path.
@@ -105,6 +108,10 @@ def extract_frames(
     digits = len(str(total_frames))
 
     while True:
+        if should_continue_cb and not should_continue_cb():
+            log.info("Extraction cancelled by caller.")
+            break
+
         ret, frame = cap.read()
         if not ret:
             break
