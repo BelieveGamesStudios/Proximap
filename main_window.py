@@ -1374,6 +1374,49 @@ class MainWindow(QMainWindow):
         # Lazy load the Mesh Editor tab to avoid importing trimesh at startup
         self.mesh_editor_tab = None
         self.mesh_editor_placeholder = QWidget(self.main_tabs)
+        
+        # Add styled loading UI to the placeholder
+        placeholder_layout = QVBoxLayout(self.mesh_editor_placeholder)
+        placeholder_layout.setContentsMargins(20, 20, 20, 20)
+        
+        loading_container = QWidget(self.mesh_editor_placeholder)
+        loading_container.setFixedWidth(320)
+        loading_layout = QVBoxLayout(loading_container)
+        loading_layout.setSpacing(12)
+        loading_layout.setAlignment(Qt.AlignCenter)
+        
+        self.loading_msg_label = QLabel("Opening Mesh Editor...", loading_container)
+        self.loading_msg_label.setStyleSheet("color: #ffffff; font-size: 15px; font-weight: bold;")
+        self.loading_msg_label.setAlignment(Qt.AlignCenter)
+        
+        self.loading_progress = QProgressBar(loading_container)
+        self.loading_progress.setRange(0, 0)  # Indeterminate loading bar
+        self.loading_progress.setTextVisible(False)
+        self.loading_progress.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #3A3A3A;
+                background-color: #222222;
+                height: 6px;
+                border-radius: 3px;
+            }
+            QProgressBar::chunk {
+                background-color: #00E676;
+                border-radius: 3px;
+            }
+        """)
+        
+        self.loading_sub_label = QLabel("Initializing 3D viewport and mesh utilities...", loading_container)
+        self.loading_sub_label.setStyleSheet("color: #737373; font-size: 11px;")
+        self.loading_sub_label.setAlignment(Qt.AlignCenter)
+        
+        loading_layout.addWidget(self.loading_msg_label)
+        loading_layout.addWidget(self.loading_progress)
+        loading_layout.addWidget(self.loading_sub_label)
+        
+        placeholder_layout.addStretch()
+        placeholder_layout.addWidget(loading_container, 0, Qt.AlignCenter)
+        placeholder_layout.addStretch()
+        
         self.main_tabs.addTab(self.mesh_editor_placeholder, "Mesh Editor")
         self.main_tabs.currentChanged.connect(self._on_tab_changed)
         
@@ -1381,17 +1424,33 @@ class MainWindow(QMainWindow):
 
     def _on_tab_changed(self, index):
         if index == 1 and self.mesh_editor_tab is None:
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            try:
-                from mesh_editor import MeshEditorWidget
-                self.mesh_editor_tab = MeshEditorWidget(self)
-                self.mesh_editor_tab.action_upload_proximap.triggered.connect(self._upload_mesh_editor_scene)
-                
+            if not getattr(self, "_mesh_editor_loading", False):
+                self._mesh_editor_loading = True
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                QTimer.singleShot(100, self._load_mesh_editor)
+
+    def _load_mesh_editor(self):
+        try:
+            from mesh_editor import MeshEditorWidget
+            self.mesh_editor_tab = MeshEditorWidget(self)
+            self.mesh_editor_tab.action_upload_proximap.triggered.connect(self._upload_mesh_editor_scene)
+            
+            # Clear placeholder layout (loading UI) and swap in the actual mesh editor
+            layout = self.mesh_editor_placeholder.layout()
+            if layout:
+                while layout.count():
+                    child = layout.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.addWidget(self.mesh_editor_tab)
+            else:
                 layout = QVBoxLayout(self.mesh_editor_placeholder)
                 layout.setContentsMargins(0, 0, 0, 0)
                 layout.addWidget(self.mesh_editor_tab)
-            finally:
-                QApplication.restoreOverrideCursor()
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._mesh_editor_loading = False
 
     def _update_system_badge(self):
         """Calculates system resource quality badge and updates style dynamically."""
@@ -2097,6 +2156,48 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.status_label.setText("Status: Idle")
 
+    def _stage_images_for_reconstruction(self) -> str | None:
+        """
+        Copy every path in self.image_list into a single flat staging directory
+        so PipelineWorker can find all images (originals + extracted frames) in one place.
+
+        Returns the staging directory path, or None if no images could be staged.
+        """
+        import shutil
+        staging_dir = os.path.join(get_reconstruction_out_dir(), "input_images")
+        
+        # Always start fresh so stale files from a previous run don't contaminate this one
+        if os.path.exists(staging_dir):
+            try:
+                shutil.rmtree(staging_dir)
+            except Exception as e:
+                self.console_text.append(f"[WARNING] Could not clear staging dir: {e}")
+        os.makedirs(staging_dir, exist_ok=True)
+
+        staged = []
+        seen_names = {}   # Track duplicate basenames and rename to avoid collisions
+        for path in self.image_list:
+            basename = os.path.basename(path)
+            # Handle duplicate filenames (e.g. frame_001.jpg from two different videos)
+            if basename in seen_names:
+                stem, ext = os.path.splitext(basename)
+                seen_names[basename] += 1
+                basename = f"{stem}_{seen_names[basename]}{ext}"
+            else:
+                seen_names[basename] = 0
+            dest = os.path.join(staging_dir, basename)
+            try:
+                shutil.copy2(path, dest)
+                staged.append(dest)
+            except Exception as e:
+                self.console_text.append(f"[WARNING] Could not stage {os.path.basename(path)}: {e}")
+
+        if not staged:
+            return None
+
+        self.console_text.append(f"[PREP] Staged {len(staged)} images for reconstruction → {staging_dir}")
+        return staging_dir
+
     def _start_processing(self):
         if not self.image_list:
             return
@@ -2116,6 +2217,18 @@ class MainWindow(QMainWindow):
         output_dir = get_reconstruction_out_dir()
         os.makedirs(output_dir, exist_ok=True)
         
+        # stage all images into one flat directory
+        image_dir = self._stage_images_for_reconstruction()
+        if image_dir is None:
+            self.console_text.append("[ERROR] Could not stage images. Aborting reconstruction.")
+            self._set_process_btn_state("ready")
+            self.browse_btn.setEnabled(True)
+            self.bg_remove_btn.setEnabled(True)
+            self.quality_combo.setEnabled(True)
+            self.gpu_combo.setEnabled(True)
+            self.plain_surfaces_checkbox.setEnabled(True)
+            return
+
         # Extract quality and gpu mode
         quality_presets = ["preview", "medium", "high", "ultra"]
         gpu_modes = ["auto", "force_gpu", "force_cpu"]
@@ -2125,7 +2238,7 @@ class MainWindow(QMainWindow):
 
         from pipeline_manager import PipelineWorker
         self.worker = PipelineWorker(
-            os.path.dirname(self.image_list[0]), 
+            image_dir, 
             output_dir, 
             quality_preset=quality_preset, 
             gpu_mode=gpu_mode, 
@@ -3573,6 +3686,7 @@ if __name__ == "__main__":
         # Scale to a standard splash size (e.g. 256x256) keeping aspect ratio
         scaled_pixmap = pixmap.scaled(256, 256, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         splash = QSplashScreen(scaled_pixmap)
+        splash.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         splash.show()
         splash.showMessage("Initializing hardware profile...", Qt.AlignBottom | Qt.AlignCenter, Qt.white)
         
