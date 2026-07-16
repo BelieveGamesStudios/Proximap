@@ -592,6 +592,64 @@ class Scene:
         return False, 0.0
 
 
+def apply_texture_to_meshes(meshes, texture_path):
+    if not texture_path or not os.path.exists(texture_path):
+        return
+    
+    from PIL import Image
+    import os
+    
+    ext = os.path.splitext(texture_path)[1].lower()
+    img_path = texture_path
+    
+    if ext == '.mtl':
+        try:
+            mtl_dir = os.path.dirname(texture_path)
+            with open(texture_path, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if parts and parts[0] == 'map_Kd':
+                        rel_img = line.strip()[6:].strip()
+                        candidate_path = os.path.join(mtl_dir, rel_img)
+                        if os.path.exists(candidate_path):
+                            img_path = candidate_path
+                            break
+                        base_img = os.path.basename(rel_img)
+                        candidate_path_base = os.path.join(mtl_dir, base_img)
+                        if os.path.exists(candidate_path_base):
+                            img_path = candidate_path_base
+                            break
+        except Exception as e:
+            print(f"[Texture Import] Error parsing MTL file: {e}")
+            
+        if img_path == texture_path:
+            return
+            
+    try:
+        image = Image.open(img_path)
+        image.load()
+        
+        for node_name, mesh in meshes:
+            mesh.texture_data = image
+            if mesh.texcoords is None or len(mesh.texcoords) == 0:
+                verts = mesh.vertices.reshape(-1, 3)
+                min_val = np.min(verts, axis=0) if len(verts) > 0 else np.array([0,0,0])
+                max_val = np.max(verts, axis=0) if len(verts) > 0 else np.array([1,1,1])
+                diff = max_val - min_val
+                diff[diff == 0.0] = 1.0
+                
+                dims = np.argsort(diff)
+                u_dim = dims[2]
+                v_dim = dims[1]
+                
+                uvs = np.zeros((len(verts), 2), dtype=np.float32)
+                uvs[:, 0] = (verts[:, u_dim] - min_val[u_dim]) / diff[u_dim]
+                uvs[:, 1] = (verts[:, v_dim] - min_val[v_dim]) / diff[v_dim]
+                mesh.texcoords = uvs.flatten()
+    except Exception as e:
+        print(f"[Texture Import] Error loading image: {e}")
+
+
 def load_mesh_file(file_path: str) -> list[tuple[str, Mesh]]:
     """Loads a mesh file (.obj, .glb, .gltf, .ply) using trimesh and returns a list of (node_name, Mesh) tuples."""
     import trimesh
@@ -608,8 +666,14 @@ def load_mesh_file(file_path: str) -> list[tuple[str, Mesh]]:
             if geom is None:
                 continue
             # Apply the node's world transform to bake geometry into world space
+            original_visual = geom.visual
             world_geom = geom.copy()
             world_geom.apply_transform(transform)
+            if hasattr(original_visual, 'uv') and (not hasattr(world_geom.visual, 'uv') or world_geom.visual.uv is None):
+                try:
+                    world_geom.visual = original_visual
+                except Exception:
+                    pass
             named_geoms.append((node_name, world_geom))
     else:
         named_geoms = [(None, mesh_data)]  # single mesh, no node name
@@ -633,12 +697,29 @@ def load_mesh_file(file_path: str) -> list[tuple[str, Mesh]]:
         texture_data = None
         if hasattr(geom, 'visual') and geom.visual is not None:
             if hasattr(geom.visual, 'uv') and geom.visual.uv is not None and len(geom.visual.uv) > 0:
-                texcoords = geom.visual.uv.astype(np.float32)
+                raw_uv = geom.visual.uv
+                n_verts = len(geom.vertices)
+                n_face_verts = len(geom.faces) * 3
+                
+                if len(raw_uv) == n_verts:
+                    texcoords = raw_uv.astype(np.float32)
+                elif len(raw_uv) == n_face_verts:
+                    # Face-indexed UVs: remap to vertex-indexed UVs
+                    texcoords_remapped = np.zeros((n_verts, 2), dtype=np.float32)
+                    for face_idx, face in enumerate(geom.faces):
+                        for local_idx, vert_idx in enumerate(face):
+                            texcoords_remapped[vert_idx] = raw_uv[face_idx * 3 + local_idx]
+                    texcoords = texcoords_remapped
+                else:
+                    texcoords = raw_uv.astype(np.float32)
                 
                 # Extract material image
                 if hasattr(geom.visual, 'material') and geom.visual.material is not None:
-                    if hasattr(geom.visual.material, 'image') and geom.visual.material.image is not None:
-                        texture_data = geom.visual.material.image
+                    mat = geom.visual.material
+                    if hasattr(mat, 'image') and mat.image is not None:
+                        texture_data = mat.image
+                    elif hasattr(mat, 'baseColorTexture') and mat.baseColorTexture is not None:
+                        texture_data = mat.baseColorTexture
 
         local_min = geom.bounds[0].astype(np.float32)
         local_max = geom.bounds[1].astype(np.float32)

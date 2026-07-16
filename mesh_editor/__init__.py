@@ -9,20 +9,23 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor
 from mesh_editor.viewport import MeshEditorViewport
-from mesh_editor.scene import Object, load_mesh_file
+from mesh_editor.scene import Object, load_mesh_file, apply_texture_to_meshes
 
 class MeshImportWorker(QThread):
     # Signals: finished (success, meshes, error_message)
     finished = Signal(bool, list, str)
     
-    def __init__(self, file_path: str):
+    def __init__(self, file_path: str, texture_path: str = None):
         super().__init__()
         self.file_path = file_path
+        self.texture_path = texture_path
         
     def run(self):
         try:
             # Load mesh in the worker thread (heavy CPU task)
             meshes = load_mesh_file(self.file_path)
+            if self.texture_path:
+                apply_texture_to_meshes(meshes, self.texture_path)
             self.finished.emit(True, meshes, "")
         except Exception as e:
             import traceback
@@ -897,7 +900,7 @@ class MeshEditorWidget(QWidget):
             self.viewport.grid_color_1 = np.array([r, g, b, a], dtype=np.float32)
             self.viewport.update()
 
-    def _import_mesh_from_path(self, file_path: str):
+    def _import_mesh_from_path(self, file_path: str, texture_path: str = None):
         if not file_path or not os.path.exists(file_path):
             QMessageBox.critical(
                 self, "Import Error", f"Model file not found:\n{file_path}"
@@ -908,7 +911,7 @@ class MeshEditorWidget(QWidget):
         self.import_dialog = MeshImportProgressDialog(self)
         
         # Setup worker thread
-        self.import_worker = MeshImportWorker(file_path)
+        self.import_worker = MeshImportWorker(file_path, texture_path)
         self.import_worker.finished.connect(self._on_import_finished)
         
         # Start worker thread and dialog
@@ -919,8 +922,47 @@ class MeshEditorWidget(QWidget):
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Import 3D Model", "", "3D Mesh Files (*.obj *.glb *.gltf *.ply)"
         )
-        if file_path:
-            self._import_mesh_from_path(file_path)
+        if not file_path:
+            return
+            
+        # Check if the model has an auto-detectable texture
+        has_texture = False
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext in ('.glb', '.gltf'):
+            has_texture = True
+        elif ext == '.obj':
+            mtl_path = os.path.splitext(file_path)[0] + '.mtl'
+            if os.path.exists(mtl_path):
+                try:
+                    with open(mtl_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        for line in f:
+                            if line.strip().startswith('map_Kd'):
+                                has_texture = True
+                                break
+                except Exception:
+                    pass
+                    
+        if not has_texture:
+            reply = QMessageBox.question(
+                self,
+                "Select Texture File",
+                "This model does not appear to have an embedded or associated texture map.\n\n"
+                "Would you like to select a companion texture file (e.g., .png, .jpg, .mtl)?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                texture_path, _ = QFileDialog.getOpenFileName(
+                    self,
+                    "Select Texture File",
+                    os.path.dirname(file_path),
+                    "Texture Files (*.png *.jpg *.jpeg *.bmp *.tga *.mtl)"
+                )
+                if texture_path:
+                    self._import_mesh_from_path(file_path, texture_path)
+                    return
+                    
+        self._import_mesh_from_path(file_path)
 
     def _on_load_reconstructed_model_clicked(self):
         # Traverse up parent to find active mvs_dir
