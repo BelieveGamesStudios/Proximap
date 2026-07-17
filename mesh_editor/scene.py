@@ -266,6 +266,19 @@ class Object:
         # Return row-major (transpose) for rendering/shader compatibility
         return col_major.T.astype(np.float32)
 
+    def get_outline_model_matrix(self, scale_factor: float) -> np.ndarray:
+        import trimesh
+        rx = np.radians(-self.rotation[0])
+        ry = np.radians(-self.rotation[1])
+        rz = np.radians(-self.rotation[2])
+        
+        t_mat = trimesh.transformations.translation_matrix(self.position)
+        r_mat = trimesh.transformations.euler_matrix(rx, ry, rz, 'sxyz')
+        s_mat = np.diag([self.scale[0] * scale_factor, self.scale[1] * scale_factor, self.scale[2] * scale_factor, 1.0])
+        
+        col_major = t_mat @ r_mat @ s_mat
+        return col_major.T.astype(np.float32)
+
     def get_world_aabb(self) -> tuple:
         """Computes the world-space bounding box by transforming the local AABB."""
         model_mat = self.get_model_matrix()

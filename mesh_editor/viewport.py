@@ -4,7 +4,7 @@ import numpy as np
 import pyrr
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtCore import Qt, Signal, QPoint, QRectF
-from PySide6.QtGui import QMouseEvent, QKeyEvent, QWheelEvent, QAction
+from PySide6.QtGui import QMouseEvent, QKeyEvent, QWheelEvent, QAction, QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent
 
 import OpenGL.GL as gl
 from mesh_editor.scene import Camera, Scene, Object
@@ -40,6 +40,7 @@ class MeshEditorViewport(QOpenGLWidget):
         super().__init__(parent)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setMouseTracking(True)
+        self.setAcceptDrops(True)
         
         # State containers
         self.camera = Camera()
@@ -154,7 +155,7 @@ class MeshEditorViewport(QOpenGLWidget):
     def paintGL(self):
         # 1. Clear background
         gl.glClearColor(self.bg_color[0], self.bg_color[1], self.bg_color[2], 1.0)
-        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT | gl.GL_STENCIL_BUFFER_BIT)
         
         # Ensure clean opaque state before rendering objects
         gl.glEnable(gl.GL_DEPTH_TEST)
@@ -204,19 +205,29 @@ class MeshEditorViewport(QOpenGLWidget):
             gl.glUniform1i(gl.glGetUniformLocation(self.object_program, "useTexture"), 1 if has_tex else 0)
             gl.glUniform1i(gl.glGetUniformLocation(self.object_program, "textureSampler"), 0)
             
+            is_selected = obj in self.scene.selected_objects
+            is_active = self.scene.active_object == obj
+            
+            # If selected, enable stencil testing to write to the stencil buffer during the standard pass
+            if is_selected:
+                gl.glEnable(gl.GL_STENCIL_TEST)
+                gl.glStencilOp(gl.GL_KEEP, gl.GL_KEEP, gl.GL_REPLACE)
+                gl.glStencilFunc(gl.GL_ALWAYS, 1, 0xFF)
+                gl.glStencilMask(0xFF)
+                gl.glClear(gl.GL_STENCIL_BUFFER_BIT)
+                
             # Draw standard geometry
             obj.mesh.draw()
             
-            # Draw wireframe selection highlight if selected
-            is_selected = obj in self.scene.selected_objects
-            is_active = self.scene.active_object == obj
+            # Draw Blender-style selection outline using the stencil buffer
             if is_selected:
-                gl.glEnable(gl.GL_POLYGON_OFFSET_LINE)
-                gl.glPolygonOffset(-1.5, -1.5) # Shift depth forward slightly to prevent z-fighting
+                gl.glStencilFunc(gl.GL_NOTEQUAL, 1, 0xFF)
+                gl.glStencilMask(0x00) # Disable stencil writes
+                gl.glDepthMask(gl.GL_FALSE) # Disable depth writes for outline
                 
-                # Draw thick wireframe outlines (Blender selection style)
-                gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_LINE)
-                gl.glLineWidth(2.0)
+                # Slightly scale the model matrix for the outline pass (1.5% outline thickness)
+                outline_model = obj.get_outline_model_matrix(1.015)
+                gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.object_program, "model"), 1, gl.GL_FALSE, outline_model)
                 
                 gl.glUniform1i(gl.glGetUniformLocation(self.object_program, "useOverrideColor"), 1)
                 if is_active:
@@ -228,9 +239,8 @@ class MeshEditorViewport(QOpenGLWidget):
                 obj.mesh.draw()
                 
                 # Restore defaults
-                gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
-                gl.glDisable(gl.GL_POLYGON_OFFSET_LINE)
-                gl.glLineWidth(1.0)
+                gl.glDepthMask(gl.GL_TRUE)
+                gl.glDisable(gl.GL_STENCIL_TEST)
                 
         # 3. Render Infinite Grid (Semi-transparent overlay)
         gl.glUseProgram(self.grid_program)
@@ -320,6 +330,45 @@ class MeshEditorViewport(QOpenGLWidget):
         self.cleanupGL()
         self.doneCurrent()
         super().closeEvent(event)
+
+    # Drag and drop event handlers - forward to parent
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, "dragEnterEvent"):
+                parent.dragEnterEvent(event)
+                if event.isAccepted():
+                    return
+            parent = parent.parent()
+        event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent):
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, "dragMoveEvent"):
+                parent.dragMoveEvent(event)
+                if event.isAccepted():
+                    return
+            parent = parent.parent()
+        event.ignore()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent):
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, "dragLeaveEvent"):
+                parent.dragLeaveEvent(event)
+                return
+            parent = parent.parent()
+
+    def dropEvent(self, event: QDropEvent):
+        parent = self.parent()
+        while parent:
+            if hasattr(parent, "dropEvent"):
+                parent.dropEvent(event)
+                if event.isAccepted():
+                    return
+            parent = parent.parent()
+        event.ignore()
 
     # Event handlers
     def mouseMoveEvent(self, event: QMouseEvent):

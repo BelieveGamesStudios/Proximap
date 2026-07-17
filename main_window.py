@@ -3662,6 +3662,12 @@ if __name__ == "__main__":
         except Exception:
             pass
 
+    from PySide6.QtGui import QSurfaceFormat
+    fmt = QSurfaceFormat()
+    fmt.setDepthBufferSize(24)
+    fmt.setStencilBufferSize(8)
+    QSurfaceFormat.setDefaultFormat(fmt)
+
     app = QApplication(sys.argv)
     
     # Resolve app icon path

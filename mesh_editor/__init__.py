@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QMenuBar, QMenu, QWidgetAction
 )
 from PySide6.QtCore import Qt, QThread, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent
 from mesh_editor.viewport import MeshEditorViewport
 from mesh_editor.scene import Object, load_mesh_file, apply_texture_to_meshes
 
@@ -99,6 +99,7 @@ class MeshEditorWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("MeshEditorWidget")
+        self.setAcceptDrops(True)
         
         # Build UI layout
         self._init_ui()
@@ -386,13 +387,14 @@ class MeshEditorWidget(QWidget):
         self.btn_color_grid.setStyleSheet("QPushButton { font-size: 11px; padding: 6px 12px; }")
         
         # --- RIGHT PANEL: Viewport Container with Top Toolbar ---
-        viewport_container = QWidget(self)
-        viewport_layout = QVBoxLayout(viewport_container)
+        self.viewport_container = QWidget(self)
+        self.viewport_container.setObjectName("ViewportContainer")
+        viewport_layout = QVBoxLayout(self.viewport_container)
         viewport_layout.setContentsMargins(0, 0, 0, 0)
         viewport_layout.setSpacing(0)
         
         # Create Menu Bar / Toolbar
-        self.menu_bar = QMenuBar(viewport_container)
+        self.menu_bar = QMenuBar(self.viewport_container)
         self.menu_bar.setObjectName("ViewportMenuBar")
         
         # 1. File Menu
@@ -480,7 +482,7 @@ class MeshEditorWidget(QWidget):
         viewport_hbox.setSpacing(0)
         
         # Create Vertical Toolbar Frame
-        self.trans_toolbar = QFrame(viewport_container)
+        self.trans_toolbar = QFrame(self.viewport_container)
         self.trans_toolbar.setObjectName("ViewportToolbar")
         self.trans_toolbar.setFixedWidth(42)
         self.trans_toolbar.setStyleSheet("""
@@ -606,12 +608,12 @@ class MeshEditorWidget(QWidget):
         
         viewport_hbox.addWidget(self.trans_toolbar)
         
-        self.viewport = MeshEditorViewport(viewport_container)
+        self.viewport = MeshEditorViewport(self.viewport_container)
         viewport_hbox.addWidget(self.viewport, stretch=1)
         
         viewport_layout.addLayout(viewport_hbox, stretch=1)
         
-        layout.addWidget(viewport_container, stretch=4)
+        layout.addWidget(self.viewport_container, stretch=4)
         
         # Disable properties inputs initially until an object is selected
         self._set_properties_enabled(False)
@@ -1009,12 +1011,15 @@ class MeshEditorWidget(QWidget):
                 f"No reconstructed model could be found in the current session folder:\n{mvs_dir}\n\nPlease run the dense reconstruction/texturing step first."
             )
 
-    def _on_import_pxm_clicked(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self, "Import Proximap Project", "", "Proximap Project Files (*.pxm)"
-        )
+    def _on_import_pxm_clicked(self, file_path: str = None):
+        if not isinstance(file_path, str):
+            file_path = None
         if not file_path:
-            return
+            file_path, _ = QFileDialog.getOpenFileName(
+                self, "Import Proximap Project", "", "Proximap Project Files (*.pxm)"
+            )
+            if not file_path:
+                return
             
         import zipfile
         import tempfile
@@ -1260,3 +1265,118 @@ class MeshEditorWidget(QWidget):
                 }
             """)
         self.viewport.update()
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            # Check if there's at least one supported file
+            has_supported = False
+            for url in event.mimeData().urls():
+                path = url.toLocalFile()
+                ext = os.path.splitext(path)[1].lower()
+                if ext in ('.obj', '.glb', '.gltf', '.ply', '.pxm'):
+                    has_supported = True
+                    break
+            if has_supported:
+                self.viewport_container.setStyleSheet(
+                    "QWidget#ViewportContainer { border: 2px dashed #00E676; background-color: #1A2820; }"
+                )
+                event.acceptProposedAction()
+                return
+        event.ignore()
+
+    def dragMoveEvent(self, event: QDragMoveEvent):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event: QDragLeaveEvent):
+        self.viewport_container.setStyleSheet("")
+
+    def dropEvent(self, event: QDropEvent):
+        self.viewport_container.setStyleSheet("")
+        
+        mesh_files = []
+        pxm_files = []
+        texture_files = []
+        
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if not path or not os.path.exists(path):
+                continue
+            ext = os.path.splitext(path)[1].lower()
+            if ext in ('.obj', '.glb', '.gltf', '.ply'):
+                mesh_files.append(os.path.normpath(path))
+            elif ext == '.pxm':
+                pxm_files.append(os.path.normpath(path))
+            elif ext in ('.png', '.jpg', '.jpeg', '.bmp', '.tga', '.mtl'):
+                texture_files.append(os.path.normpath(path))
+                
+        # Handle project file drop
+        if pxm_files:
+            # We process the first pxm file dropped
+            self._on_import_pxm_clicked(pxm_files[0])
+            event.acceptProposedAction()
+            return
+            
+        # Handle mesh files drop
+        if mesh_files:
+            for mesh_file in mesh_files:
+                # Find matching companion texture if dropped together
+                companion_texture = None
+                mesh_name = os.path.splitext(os.path.basename(mesh_file))[0].lower()
+                
+                # Check for exact name match (ignoring extensions)
+                for tex in texture_files:
+                    tex_name = os.path.splitext(os.path.basename(tex))[0].lower()
+                    if tex_name == mesh_name:
+                        companion_texture = tex
+                        break
+                
+                # If no exact name match, but exactly one texture file was dropped, use it
+                if companion_texture is None and len(texture_files) == 1:
+                    companion_texture = texture_files[0]
+                    
+                if companion_texture:
+                    self._import_mesh_from_path(mesh_file, companion_texture)
+                else:
+                    # No companion texture found, use standard prompt (which does auto-detect check internally)
+                    has_texture = False
+                    ext = os.path.splitext(mesh_file)[1].lower()
+                    if ext in ('.glb', '.gltf'):
+                        has_texture = True
+                    elif ext == '.obj':
+                        mtl_path = os.path.splitext(mesh_file)[0] + '.mtl'
+                        if os.path.exists(mtl_path):
+                            try:
+                                with open(mtl_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                    for line in f:
+                                        if line.strip().startswith('map_Kd'):
+                                            has_texture = True
+                                            break
+                            except Exception:
+                                pass
+                                
+                    if not has_texture:
+                        reply = QMessageBox.question(
+                            self,
+                            "Select Texture File",
+                            f"Model '{os.path.basename(mesh_file)}' does not appear to have an embedded or associated texture map.\n\n"
+                            "Would you like to select a companion texture file (e.g., .png, .jpg, .mtl)?",
+                            QMessageBox.Yes | QMessageBox.No,
+                            QMessageBox.No
+                        )
+                        if reply == QMessageBox.Yes:
+                            texture_path, _ = QFileDialog.getOpenFileName(
+                                self,
+                                "Select Texture File",
+                                os.path.dirname(mesh_file),
+                                "Texture Files (*.png *.jpg *.jpeg *.bmp *.tga *.mtl)"
+                            )
+                            if texture_path:
+                                self._import_mesh_from_path(mesh_file, texture_path)
+                                continue
+                    self._import_mesh_from_path(mesh_file)
+            event.acceptProposedAction()
+        else:
+            event.ignore()
