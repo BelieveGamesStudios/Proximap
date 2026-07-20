@@ -3656,7 +3656,7 @@ if __name__ == "__main__":
     # Fix taskbar icon grouping on Windows
     if sys.platform == 'win32':
         import ctypes
-        myappid = 'believegamesstudios.proximap.photogrammetry.1.0'
+        myappid = 'proximaxr.proximap.photogrammetry.1.0'
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except Exception:
