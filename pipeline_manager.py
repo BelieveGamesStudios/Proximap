@@ -50,13 +50,14 @@ class PipelineWorker(QThread):
     log_message = Signal(str)
     finished = Signal(bool, str)
 
-    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, parent=None):
+    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, ref_cloud_path: str = None, parent=None):
         super().__init__(parent)
         self.image_dir = image_dir
         self.output_dir = output_dir
         self.quality_preset = quality_preset
         self.gpu_mode = gpu_mode
         self.has_plain_surfaces = has_plain_surfaces
+        self.ref_cloud_path = ref_cloud_path
         self.is_running = True
         self.toolchain_map = self._load_toolchain_map()
         self.last_output_lines = []
@@ -259,6 +260,7 @@ class PipelineWorker(QThread):
 
             if log_handle:
                 # Log-tailing loop for OpenMVS
+                last_log_time = time.time()
                 while True:
                     if not self.is_running:
                         proc.terminate()
@@ -299,11 +301,20 @@ class PipelineWorker(QThread):
                                         self.log_message.emit(clean_line)
                                     self.last_output_lines.append(clean_line)
                             break
+                        # Emit a heartbeat every 30s of silence so the UI doesn't look frozen
+                        silent_secs = time.time() - last_log_time
+                        if silent_secs >= 30.0:
+                            elapsed = int(time.time() - start_time)
+                            self.log_message.emit(
+                                f"[RUNNING] {exe_name} still processing... ({elapsed}s elapsed, pipeline is active)"
+                            )
+                            last_log_time = time.time()
                         time.sleep(0.05)
                         continue
 
                     clean_line = line.strip()
                     if clean_line:
+                        last_log_time = time.time()  # reset silence timer on real output
                         if line_parser:
                             parsed = line_parser(clean_line)
                             if parsed is not None:
@@ -559,7 +570,7 @@ class PipelineWorker(QThread):
             cmd_extract_cpu.extend(additional_flags)
         self._feature_counts = []
         if not self._run_with_gpu_fallback(
-            cmd_extract_gpu, cmd_extract_cpu, timeout=3600.0, env=colmap_env,
+            cmd_extract_gpu, cmd_extract_cpu, timeout=7200.0, env=colmap_env,
             line_parser=self._parse_feature_extraction_line
         ):
             return False
@@ -614,7 +625,7 @@ class PipelineWorker(QThread):
         ]
         self._match_counts = []
         if not self._run_with_gpu_fallback(
-            cmd_match_gpu, cmd_match_cpu, timeout=3600.0, env=colmap_env,
+            cmd_match_gpu, cmd_match_cpu, timeout=7200.0, env=colmap_env,
             line_parser=self._parse_matching_line
         ):
             return False
@@ -632,7 +643,7 @@ class PipelineWorker(QThread):
             self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_distance", "0.9")
             self._using_gpu_sift = False
             if not self._run_process_realtime(
-                relaxed_cpu_match, timeout=3600.0, env=colmap_env,
+                relaxed_cpu_match, timeout=7200.0, env=colmap_env,
                 line_parser=self._parse_matching_line
             ):
                 return False
@@ -677,7 +688,7 @@ class PipelineWorker(QThread):
         ]
         self._triangulated_points = 0
         self._registered_count = 0
-        if not self._run_process_realtime(cmd_mapper, timeout=3600.0, env=colmap_env, line_parser=self._parse_mapper_line):
+        if not self._run_process_realtime(cmd_mapper, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
             return False
 
         best_model_dir = self._to_colmap_path(self._select_best_sparse_model(sparse_dir)) if self._select_best_sparse_model(sparse_dir) else None
@@ -792,6 +803,11 @@ class PipelineWorker(QThread):
         self.progress_changed.emit(80)
 
         # =========================================================================
+        # STEP 6b — Optional Reference Point Cloud Alignment & Fusion
+        # =========================================================================
+        fused_mesh_name = self._run_reference_cloud_fusion(mvs_out)
+
+        # =========================================================================
         # STEP 7/9 — Surface Mesh Reconstruction
         # =========================================================================
         self.status_changed.emit("Step 7/9: Reconstructing Surface Mesh...")
@@ -802,22 +818,31 @@ class PipelineWorker(QThread):
         if target_scene == "scene.mvs":
             self.log_message.emit("[WARNING] scene_dense.mvs not found. Meshing from sparse scene.mvs.")
 
-        cmd = [
-            mvs_mesh_exe,
-            target_scene,
-            "--remove-spurious", "20",
-            "--remove-spikes",   "1",
-            "--close-holes",     "30",
-            "--smooth",          "2",
-        ]
-        self._mesh_vertices = 0
-        self._mesh_faces = 0
-        self._spurious_removed = 0
-        self._spikes_removed = 0
-        self._holes_closed = 0
-        if not self._run_process_realtime(cmd, timeout=1800.0, cwd=mvs_out, env=env, line_parser=self._parse_mesh_line):
-            return False
-        self._emit_mesh_summary()
+        if fused_mesh_name and os.path.exists(os.path.join(mvs_out, fused_mesh_name)):
+            self.log_message.emit(f"[INFO] Skipping ReconstructMesh (Delaunay) — using Reference Cloud fused Poisson mesh: {fused_mesh_name}")
+            mesh_input = fused_mesh_name
+        else:
+            cmd = [
+                mvs_mesh_exe,
+                target_scene,
+                "--remove-spurious", "20",
+                "--remove-spikes",   "1",
+                "--close-holes",     "30",
+                "--smooth",          "2",
+            ]
+            self._mesh_vertices = 0
+            self._mesh_faces = 0
+            self._spurious_removed = 0
+            self._spikes_removed = 0
+            self._holes_closed = 0
+            if not self._run_process_realtime(cmd, timeout=1800.0, cwd=mvs_out, env=env, line_parser=self._parse_mesh_line):
+                return False
+            self._emit_mesh_summary()
+            if target_scene == "scene_dense.mvs":
+                mesh_input = "scene_dense_mesh.ply"
+            else:
+                mesh_input = "scene_mesh.ply"
+
         self.progress_changed.emit(88)
 
         # =========================================================================
@@ -826,13 +851,8 @@ class PipelineWorker(QThread):
         self.status_changed.emit("Step 8/9: Refining Mesh Geometry...")
         mvs_refine_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["RefineMesh"])
 
-        if target_scene == "scene_dense.mvs":
-            mesh_input = "scene_dense_mesh.ply"
-        else:
-            mesh_input = "scene_mesh.ply"
-
         if not os.path.exists(os.path.join(mvs_out, mesh_input)):
-            for candidate in ["scene_dense_mesh.ply", "scene_mesh.ply"]:
+            for candidate in ["scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
                 if os.path.exists(os.path.join(mvs_out, candidate)):
                     mesh_input = candidate
                     break
@@ -869,7 +889,7 @@ class PipelineWorker(QThread):
         mvs_texture_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["TextureMesh"])
 
         texture_mesh_ply = None
-        for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+        for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
             if os.path.exists(os.path.join(mvs_out, candidate)):
                 texture_mesh_ply = candidate
                 break
@@ -1098,6 +1118,74 @@ class PipelineWorker(QThread):
                     best_count = size
                     best_dir = model_dir
         return best_dir
+
+    def _run_reference_cloud_fusion(self, mvs_out: str) -> str | None:
+        """
+        Step 6b: Optional reference cloud alignment, gap fusion, and Poisson meshing.
+        Returns the filename of the generated fused mesh PLY, or None if skipped/failed.
+        """
+        if not self.ref_cloud_path or not os.path.exists(self.ref_cloud_path):
+            return None
+
+        self.status_changed.emit("Step 6b: Aligning & Fusing Reference Cloud...")
+        self.log_message.emit(f"[REF_CLOUD] Starting reference cloud alignment and fusion pipeline...")
+
+        dense_ply = os.path.join(mvs_out, "scene_dense.ply")
+        if not os.path.exists(dense_ply):
+            dense_ply = os.path.join(mvs_out, "scene.ply")
+        if not os.path.exists(dense_ply):
+            self.log_message.emit("[WARNING] No dense or sparse PLY cloud found for reference cloud alignment. Skipping fusion.")
+            return None
+
+        try:
+            import point_cloud_io
+            import cloud_aligner
+            import cloud_fusion
+            import open3d as o3d
+
+            # 1. Load point clouds
+            ref_load = point_cloud_io.load_point_cloud(self.ref_cloud_path, self.log_message.emit)
+            if not ref_load.success or ref_load.cloud is None:
+                self.log_message.emit(f"[WARNING] Failed to load reference cloud: {'; '.join(ref_load.warnings)}. Skipping fusion.")
+                return None
+
+            dense_load = point_cloud_io.load_point_cloud(dense_ply, self.log_message.emit)
+            if not dense_load.success or dense_load.cloud is None:
+                self.log_message.emit(f"[WARNING] Failed to load scene point cloud ({dense_ply}). Skipping fusion.")
+                return None
+
+            # 2. Align reference cloud to scene point cloud
+            align_res = cloud_aligner.align_to_dense(ref_load.cloud, dense_load.cloud, self.log_message.emit)
+            if not align_res.success:
+                self.log_message.emit(f"[WARNING] Reference cloud alignment low confidence: {'; '.join(align_res.warnings)}. Continuing without fusion.")
+                return None
+
+            # 3. Transform reference cloud using similarity matrix
+            aligned_ref = ref_load.cloud.transform(align_res.transform)
+
+            # Save aligned reference cloud for diagnostics
+            aligned_ref_path = os.path.join(mvs_out, "scene_refcloud_aligned.ply")
+            point_cloud_io.save_point_cloud(aligned_ref, aligned_ref_path)
+
+            # 4. Merge gap-filling points into dense cloud
+            merged_cloud = cloud_fusion.merge_clouds(dense_load.cloud, aligned_ref, self.log_message.emit, gap_radius_mult=3.0)
+
+            merged_cloud_path = os.path.join(mvs_out, "scene_dense_refcloud.ply")
+            point_cloud_io.save_point_cloud(merged_cloud, merged_cloud_path)
+
+            # 5. Generate Poisson surface mesh
+            fused_mesh = cloud_fusion.generate_mesh(merged_cloud, self.log_message.emit, poisson_depth=9, density_threshold_pct=5.0)
+
+            fused_mesh_name = "scene_dense_mesh_refcloud.ply"
+            fused_mesh_path = os.path.join(mvs_out, fused_mesh_name)
+            o3d.io.write_triangle_mesh(fused_mesh_path, fused_mesh)
+
+            self.log_message.emit(f"[SUCCESS] Reference cloud fusion complete! Fused Poisson mesh saved as {fused_mesh_name}")
+            return fused_mesh_name
+
+        except Exception as e:
+            self.log_message.emit(f"[WARNING] Reference cloud fusion encountered an error: {e}. Falling back to standard pipeline.")
+            return None
 
     def _run_model_analyzer(self, model_dir: str) -> dict:
         """Runs COLMAP model_analyzer and returns parsed stats."""

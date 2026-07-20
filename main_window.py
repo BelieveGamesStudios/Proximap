@@ -1071,7 +1071,7 @@ class UploadProgressDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Proximap - Photogrammetry Dashboard")
+        self.setWindowTitle("Proximap 1.3.0")
         self.setMinimumSize(1100, 750)
         self.image_list = []
         self.worker = None
@@ -1168,6 +1168,45 @@ class MainWindow(QMainWindow):
         self.bg_remove_btn.setObjectName("BgRemoveBtn")
         self.bg_remove_btn.setEnabled(False)
         self.bg_remove_btn.clicked.connect(self._remove_backgrounds_clicked)
+
+        # Reference Cloud Import (Optional)
+        self.ref_cloud_btn = QPushButton("Import Reference Cloud", step1_box)
+        self.ref_cloud_btn.setObjectName("RefCloudBtn")
+        self.ref_cloud_btn.clicked.connect(self._import_reference_cloud_clicked)
+        
+        self.ref_cloud_container = QWidget(step1_box)
+        ref_cloud_layout = QHBoxLayout(self.ref_cloud_container)
+        ref_cloud_layout.setContentsMargins(0, 0, 0, 0)
+        ref_cloud_layout.setSpacing(5)
+        
+        self.ref_cloud_label = QLabel("", self.ref_cloud_container)
+        self.ref_cloud_label.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold;")
+        self.ref_cloud_label.setTextFormat(Qt.PlainText)
+
+        self.ref_cloud_clear_btn = QPushButton("✕", self.ref_cloud_container)
+        self.ref_cloud_clear_btn.setFixedSize(20, 20)
+        self.ref_cloud_clear_btn.setToolTip("Clear reference cloud selection")
+        self.ref_cloud_clear_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #ff5252;
+                border: 1px solid #ff5252;
+                border-radius: 10px;
+                font-weight: bold;
+                font-size: 10px;
+            }
+            QPushButton:hover {
+                background: #ff5252;
+                color: #ffffff;
+            }
+        """)
+        self.ref_cloud_clear_btn.clicked.connect(self._clear_reference_cloud_clicked)
+        
+        ref_cloud_layout.addWidget(self.ref_cloud_label, stretch=1)
+        ref_cloud_layout.addWidget(self.ref_cloud_clear_btn)
+        self.ref_cloud_container.setVisible(False)
+        
+        self.ref_cloud_path = None
         
         step1_layout.addWidget(s1_title)
         step1_layout.addWidget(self.img_count_label)
@@ -1175,6 +1214,8 @@ class MainWindow(QMainWindow):
         step1_layout.addWidget(self.badge)
         step1_layout.addWidget(self.browse_btn)
         step1_layout.addWidget(self.bg_remove_btn)
+        step1_layout.addWidget(self.ref_cloud_btn)
+        step1_layout.addWidget(self.ref_cloud_container)
         scroll_content_layout.addWidget(step1_box)
         
         # STEP 2: Process
@@ -2017,6 +2058,30 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Video Extraction Error", f"An error occurred while extracting frames:\n\n{err_msg}")
         self._cleanup_extraction_ui()
 
+    def _import_reference_cloud_clicked(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Reference Point Cloud",
+            self.last_accessed_dir,
+            "Point Cloud Files (*.ply *.las *.laz *.xyz *.pts *.txt)"
+        )
+        if not file_path:
+            return
+
+        self.last_accessed_dir = os.path.dirname(file_path)
+        self.ref_cloud_path = file_path
+        filename = os.path.basename(file_path)
+
+        self.ref_cloud_label.setText(f"✓ {filename}")
+        self.ref_cloud_container.setVisible(True)
+        self.console_text.append(f"[REF_CLOUD] Selected external reference cloud: {file_path}")
+
+    def _clear_reference_cloud_clicked(self):
+        self.ref_cloud_path = None
+        self.ref_cloud_label.setText("")
+        self.ref_cloud_container.setVisible(False)
+        self.console_text.append("[REF_CLOUD] Reference cloud selection cleared.")
+
     def _cancel_video_extraction(self):
         self.console_text.append("[VIDEO] Cancelling video extraction...")
         if hasattr(self, 'extraction_worker') and self.extraction_worker:
@@ -2209,6 +2274,8 @@ class MainWindow(QMainWindow):
         self.browse_btn.setEnabled(False)
         self._set_export_actions_enabled(False)
         self.bg_remove_btn.setEnabled(False)
+        self.ref_cloud_btn.setEnabled(False)
+        self.ref_cloud_clear_btn.setEnabled(False)
         self.quality_combo.setEnabled(False)
         self.gpu_combo.setEnabled(False)
         self.plain_surfaces_checkbox.setEnabled(False)
@@ -2224,6 +2291,8 @@ class MainWindow(QMainWindow):
             self._set_process_btn_state("ready")
             self.browse_btn.setEnabled(True)
             self.bg_remove_btn.setEnabled(True)
+            self.ref_cloud_btn.setEnabled(True)
+            self.ref_cloud_clear_btn.setEnabled(True)
             self.quality_combo.setEnabled(True)
             self.gpu_combo.setEnabled(True)
             self.plain_surfaces_checkbox.setEnabled(True)
@@ -2243,6 +2312,7 @@ class MainWindow(QMainWindow):
             quality_preset=quality_preset, 
             gpu_mode=gpu_mode, 
             has_plain_surfaces=has_plain,
+            ref_cloud_path=self.ref_cloud_path,
             parent=self
         )
         self.worker.progress_changed.connect(self._on_progress_changed)
@@ -2280,6 +2350,8 @@ class MainWindow(QMainWindow):
         self.quality_combo.setEnabled(True)
         self.gpu_combo.setEnabled(True)
         self.plain_surfaces_checkbox.setEnabled(True)
+        self.ref_cloud_btn.setEnabled(True)
+        self.ref_cloud_clear_btn.setEnabled(True)
         self.bg_remove_btn.setEnabled(len(self.image_list) > 0)
         
         if success:
@@ -2293,7 +2365,7 @@ class MainWindow(QMainWindow):
             
             # Pick best available viewer mode
             mesh_exists = False
-            for candidate in ["scene_dense_mesh_texture.ply", "scene_dense_mesh_texture.obj", "scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+            for candidate in ["scene_dense_mesh_texture.ply", "scene_dense_mesh_texture.obj", "scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
                 if os.path.exists(os.path.join(mvs_dir, candidate)):
                     mesh_exists = True
                     break
