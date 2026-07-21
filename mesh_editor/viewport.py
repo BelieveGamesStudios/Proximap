@@ -32,6 +32,9 @@ class MeshEditorViewport(QOpenGLWidget):
     """3D OpenGL Viewport for Mesh Editing. Integrates camera controls, grid, and ImGuizmo."""
     selection_changed = Signal(object) # Emits the newly selected Object (or None)
     transform_changed = Signal(object) # Emits the selected Object when transformed by the gizmo
+    transform_committed = Signal(object) # Emits (states_dict, operation_str) tuple when gizmo drag ends
+    undo_requested = Signal() # Emits when Ctrl+Z shortcut is pressed
+    redo_requested = Signal() # Emits when Ctrl+Y or Ctrl+Shift+Z is pressed
     delete_pressed = Signal() # Emits when Delete/Backspace key is pressed
     tool_changed = Signal(object) # Emits active gizmo OPERATION when changed by hotkey
     camera_changed = Signal(object) # Emits Camera when it transforms/snaps
@@ -467,6 +470,7 @@ class MeshEditorViewport(QOpenGLWidget):
                     self._drag_start_pivot_r_mat = trimesh.transformations.euler_matrix(rx, ry, rz, 'sxyz')
                     
                     self._drag_start_positions = {obj: np.copy(obj.position) for obj in self.scene.selected_objects}
+                    self._drag_start_rotations = {obj: np.copy(obj.rotation) for obj in self.scene.selected_objects}
                     self._drag_start_scales = {obj: np.copy(obj.scale) for obj in self.scene.selected_objects}
                     self._drag_start_r_mats = {}
                     for obj in self.scene.selected_objects:
@@ -516,6 +520,20 @@ class MeshEditorViewport(QOpenGLWidget):
         if self._gizmo_dragging:
             self.gizmo.end_drag()
             self._gizmo_dragging = False
+            if hasattr(self, '_drag_start_positions') and hasattr(self, '_drag_start_rotations') and hasattr(self, '_drag_start_scales'):
+                states = {}
+                for obj in self.scene.selected_objects:
+                    if obj in self._drag_start_positions and obj in self._drag_start_rotations and obj in self._drag_start_scales:
+                        pos_b = self._drag_start_positions[obj]
+                        rot_b = self._drag_start_rotations[obj]
+                        scale_b = self._drag_start_scales[obj]
+                        pos_a = np.copy(obj.position)
+                        rot_a = np.copy(obj.rotation)
+                        scale_a = np.copy(obj.scale)
+                        if not (np.array_equal(pos_b, pos_a) and np.array_equal(rot_b, rot_a) and np.array_equal(scale_b, scale_a)):
+                            states[obj] = (pos_b, rot_b, scale_b, pos_a, rot_a, scale_a)
+                if states:
+                    self.transform_committed.emit((states, self.gizmo.operation))
             self.update()
             
         if self._is_box_selecting:
@@ -552,7 +570,18 @@ class MeshEditorViewport(QOpenGLWidget):
         key = event.key()
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         
-        if ctrl and key == Qt.Key.Key_A:
+        if ctrl and key == Qt.Key.Key_Z:
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self.redo_requested.emit()
+            else:
+                self.undo_requested.emit()
+            event.accept()
+            return
+        elif ctrl and key == Qt.Key.Key_Y:
+            self.redo_requested.emit()
+            event.accept()
+            return
+        elif ctrl and key == Qt.Key.Key_A:
             # Select all
             self.scene.selected_objects = list(self.scene.objects)
             self.scene.active_object = self.scene.objects[-1] if self.scene.objects else None
