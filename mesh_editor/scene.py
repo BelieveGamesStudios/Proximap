@@ -606,11 +606,11 @@ class Scene:
 
 
 def apply_texture_to_meshes(meshes, texture_path):
+    import os
+    from PIL import Image
+
     if not texture_path or not os.path.exists(texture_path):
         return
-    
-    from PIL import Image
-    import os
     
     ext = os.path.splitext(texture_path)[1].lower()
     img_path = texture_path

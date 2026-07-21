@@ -954,13 +954,16 @@ class MeshEditorWidget(QWidget):
                 QMessageBox.No
             )
             if reply == QMessageBox.Yes:
-                texture_path, _ = QFileDialog.getOpenFileName(
+                selected_paths, _ = QFileDialog.getOpenFileNames(
                     self,
-                    "Select Texture File",
+                    "Select Texture / Material File(s)",
                     os.path.dirname(file_path),
-                    "Texture Files (*.png *.jpg *.jpeg *.bmp *.tga *.mtl)"
+                    "Texture & Material Files (*.png *.jpg *.jpeg *.bmp *.tga *.mtl)"
                 )
-                if texture_path:
+                if selected_paths:
+                    mtl_files = [p for p in selected_paths if p.lower().endswith('.mtl')]
+                    img_files = [p for p in selected_paths if not p.lower().endswith('.mtl')]
+                    texture_path = mtl_files[0] if mtl_files else img_files[0]
                     self._import_mesh_from_path(file_path, texture_path)
                     return
                     
@@ -1367,13 +1370,16 @@ class MeshEditorWidget(QWidget):
                             QMessageBox.No
                         )
                         if reply == QMessageBox.Yes:
-                            texture_path, _ = QFileDialog.getOpenFileName(
+                            selected_paths, _ = QFileDialog.getOpenFileNames(
                                 self,
-                                "Select Texture File",
+                                "Select Texture / Material File(s)",
                                 os.path.dirname(mesh_file),
-                                "Texture Files (*.png *.jpg *.jpeg *.bmp *.tga *.mtl)"
+                                "Texture & Material Files (*.png *.jpg *.jpeg *.bmp *.tga *.mtl)"
                             )
-                            if texture_path:
+                            if selected_paths:
+                                mtl_files = [p for p in selected_paths if p.lower().endswith('.mtl')]
+                                img_files = [p for p in selected_paths if not p.lower().endswith('.mtl')]
+                                texture_path = mtl_files[0] if mtl_files else img_files[0]
                                 self._import_mesh_from_path(mesh_file, texture_path)
                                 continue
                     self._import_mesh_from_path(mesh_file)
