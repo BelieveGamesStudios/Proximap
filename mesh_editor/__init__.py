@@ -421,8 +421,19 @@ class MeshEditorWidget(QWidget):
         
         file_menu.addSeparator()
         
-        action_export = file_menu.addAction("Export Scene (.obj, .glb)")
-        action_export.triggered.connect(self._on_export_scene_clicked)
+        # Unified sub-menu for exporting consolidated scene (format-specific sub-actions)
+        export_scene_menu = QMenu("Export Scene", file_menu)
+        export_scene_menu.setStyleSheet(file_menu.styleSheet())
+        
+        self.action_export_glb = export_scene_menu.addAction("GLB (.glb)")
+        self.action_export_obj = export_scene_menu.addAction("OBJ (.obj)")
+        self.action_export_usdz = export_scene_menu.addAction("USDZ (.usdz)")
+        
+        self.action_export_glb.triggered.connect(lambda: self._on_export_scene_clicked(".glb"))
+        self.action_export_obj.triggered.connect(lambda: self._on_export_scene_clicked(".obj"))
+        self.action_export_usdz.triggered.connect(lambda: self._on_export_scene_clicked(".usdz"))
+        
+        file_menu.addMenu(export_scene_menu)
         
         file_menu.addSeparator()
         self.action_upload_proximap = file_menu.addAction("Upload to Proximap")
@@ -1230,18 +1241,33 @@ class MeshEditorWidget(QWidget):
             cmd.execute()
             self.push_command(cmd)
 
-    def _on_export_scene_clicked(self):
+    def _on_export_scene_clicked(self, fmt=None):
         if not self.viewport.scene.objects:
             QMessageBox.warning(
                 self, "Export Warning", "There are no objects in the scene to export."
             )
             return
             
+        filter_str = "3D Mesh Files (*.obj *.glb *.usdz)"
+        default_suffix = ""
+        if fmt == ".glb":
+            filter_str = "GLB Files (*.glb)"
+            default_suffix = ".glb"
+        elif fmt == ".obj":
+            filter_str = "OBJ Files (*.obj)"
+            default_suffix = ".obj"
+        elif fmt == ".usdz":
+            filter_str = "USDZ Files (*.usdz)"
+            default_suffix = ".usdz"
+            
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Scene", "", "3D Mesh Files (*.obj *.glb)"
+            self, "Export Scene", "", filter_str
         )
         if not file_path:
             return
+            
+        if default_suffix and not file_path.lower().endswith(default_suffix):
+            file_path += default_suffix
             
         # Create and configure the waiting dialog
         self.export_dialog = QDialog(self, Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint)

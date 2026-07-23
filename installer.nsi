@@ -5,7 +5,7 @@
 ; GENERAL SETTINGS
 ; =========================================================================
 !define PRODUCT_NAME "Proximap"
-!define PRODUCT_VERSION "1.0.0"
+!define PRODUCT_VERSION "1.4.0"
 !define PRODUCT_PUBLISHER "ProximaXR Spatial Technologies"
 !define PRODUCT_WEB_SITE "https://proximap.space"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\Proximap.exe"

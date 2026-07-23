@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QProgressBar, QRadioButton, QButtonGroup,
     QFrame, QFileDialog, QTextEdit, QStackedWidget, QComboBox,
     QScrollArea, QTabWidget, QGridLayout, QCheckBox, QSlider,
-    QMessageBox, QDialog, QColorDialog, QMenu, QSizePolicy
+    QMessageBox, QDialog, QColorDialog, QMenu, QSizePolicy, QInputDialog,
+    QLineEdit, QSpinBox
 )
 
 from vispy import app, scene
@@ -314,13 +315,28 @@ class ViewerWrapperWidget(QFrame):
         self.file_menu.addSeparator()
         self.action_export_dense = self.file_menu.addAction("Export Dense")
         self.action_export_sparse = self.file_menu.addAction("Export Sparse")
-        self.action_export_obj = self.file_menu.addAction("Export OBJ")
+        
+        # Unified sub-menu for exporting consolidated meshes (format-specific sub-actions)
+        self.export_mesh_menu = QMenu("Export Mesh", self.file_menu)
+        self.export_mesh_menu.setStyleSheet(self.file_menu.styleSheet())
+        
+        self.action_export_glb = self.export_mesh_menu.addAction("GLB (.glb)")
+        self.action_export_obj = self.export_mesh_menu.addAction("OBJ (.obj)")
+        self.action_export_usdz = self.export_mesh_menu.addAction("USDZ (.usdz)")
+        
+        self.file_menu.addMenu(self.export_mesh_menu)
+        self.file_menu.addSeparator()
+        self.action_mobile_import = self.file_menu.addAction("Import Images/Videos from Mobile Device")
+        self.action_mobile_export = self.file_menu.addAction("Send 3D Model to Mobile")
         self.file_menu.addSeparator()
         self.action_upload_proximap = self.file_menu.addAction("Upload to Proximap")
         
         self.action_export_dense.setEnabled(False)
         self.action_export_sparse.setEnabled(False)
+        self.action_export_glb.setEnabled(False)
         self.action_export_obj.setEnabled(False)
+        self.action_export_usdz.setEnabled(False)
+        self.action_mobile_export.setEnabled(False)
         self.action_upload_proximap.setEnabled(False)
         
         self.file_menu_btn.setMenu(self.file_menu)
@@ -1071,7 +1087,7 @@ class UploadProgressDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Proximap 1.3.0")
+        self.setWindowTitle("Proximap 1.4.0")
         self.setMinimumSize(1100, 750)
         self.image_list = []
         self.worker = None
@@ -1164,6 +1180,9 @@ class MainWindow(QMainWindow):
         self.browse_btn = QPushButton("Select Images/Videos Directory", step1_box)
         self.browse_btn.clicked.connect(self._open_dir_dialog)
         
+        self.mobile_import_btn = QPushButton("Import from Mobile Device", step1_box)
+        self.mobile_import_btn.clicked.connect(self._on_import_from_mobile_clicked)
+        
         self.bg_remove_btn = QPushButton("Remove Image Background", step1_box)
         self.bg_remove_btn.setObjectName("BgRemoveBtn")
         self.bg_remove_btn.setEnabled(False)
@@ -1213,6 +1232,7 @@ class MainWindow(QMainWindow):
         step1_layout.addWidget(self.camera_label)
         step1_layout.addWidget(self.badge)
         step1_layout.addWidget(self.browse_btn)
+        step1_layout.addWidget(self.mobile_import_btn)
         step1_layout.addWidget(self.bg_remove_btn)
         step1_layout.addWidget(self.ref_cloud_btn)
         step1_layout.addWidget(self.ref_cloud_container)
@@ -1247,6 +1267,198 @@ class MainWindow(QMainWindow):
         self.plain_surfaces_checkbox = QCheckBox("Surface is plain/smooth", step2_box)
         self.plain_surfaces_checkbox.setChecked(False)
         
+        # Advanced Options Collapsible Panel
+        self.advanced_toggle_btn = QPushButton("▸  Advanced Options", step2_box)
+        self.advanced_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.advanced_toggle_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #888888;
+                border: none;
+                text-align: left;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 4px 0px;
+            }
+            QPushButton:hover {
+                color: #00E676;
+            }
+        """)
+        
+        self.advanced_panel = QFrame(step2_box)
+        self.advanced_panel.setStyleSheet("""
+            QFrame {
+                background-color: #1A1A1A;
+                border: 1px solid #2D2D2D;
+                border-radius: 4px;
+                padding: 6px;
+            }
+        """)
+        advanced_layout = QVBoxLayout(self.advanced_panel)
+        advanced_layout.setContentsMargins(6, 6, 6, 6)
+        advanced_layout.setSpacing(4)
+        
+        self.mapper_label = QLabel("SfM Mapper Algorithm:", self.advanced_panel)
+        self.mapper_label.setStyleSheet("font-size: 11px; color: #aaaaaa; border: none; background: transparent;")
+        self.mapper_combo = QComboBox(self.advanced_panel)
+        self.mapper_combo.addItems([
+            "COLMAP  —  Incremental (default, most robust)",
+            "GLOMAP  —  Global (faster on large captures)"
+        ])
+        self.mapper_combo.setCurrentIndex(0)
+        
+        self.mesh_mode_label = QLabel("Mesh Reconstruction Mode:", self.advanced_panel)
+        self.mesh_mode_label.setStyleSheet("font-size: 11px; color: #aaaaaa; border: none; background: transparent;")
+        self.mesh_mode_combo = QComboBox(self.advanced_panel)
+        self.mesh_mode_combo.addItems([
+            "Default  —  OpenMVS (Delaunay + Texture)",
+            "Poisson  —  Open3D (smooth, watertight)"
+        ])
+        self.mesh_mode_combo.setCurrentIndex(0)
+        self.mesh_mode_combo.currentIndexChanged.connect(self._on_mesh_mode_changed)
+
+        self.poisson_widget = QWidget(self.advanced_panel)
+        self.poisson_widget.setStyleSheet("border: none; background: transparent; padding: 0;")
+        poisson_w_layout = QVBoxLayout(self.poisson_widget)
+        poisson_w_layout.setContentsMargins(0, 0, 0, 0)
+        poisson_w_layout.setSpacing(4)
+        
+        self.poisson_depth_label = QLabel("Poisson Depth: 9", self.poisson_widget)
+        self.poisson_depth_label.setStyleSheet("font-size: 11px; color: #aaaaaa; border: none; background: transparent;")
+        self.poisson_depth_slider = QSlider(Qt.Horizontal, self.poisson_widget)
+        self.poisson_depth_slider.setRange(6, 12)
+        self.poisson_depth_slider.setValue(9)
+        self.poisson_depth_slider.valueChanged.connect(self._on_poisson_depth_changed)
+        
+        poisson_w_layout.addWidget(self.poisson_depth_label)
+        poisson_w_layout.addWidget(self.poisson_depth_slider)
+        self.poisson_widget.setVisible(False)
+
+        # Custom Overrides Toggle
+        self.custom_settings_toggle = QCheckBox("Enable Custom Parameter Overrides", self.advanced_panel)
+        self.custom_settings_toggle.setStyleSheet("font-size: 11px; font-weight: bold; color: #aaaaaa;")
+        self.custom_settings_toggle.setChecked(False)
+        self.custom_settings_toggle.toggled.connect(self._on_custom_settings_toggled)
+
+        # Custom Settings Container Widget
+        self.custom_settings_container = QWidget(self.advanced_panel)
+        self.custom_settings_container.setStyleSheet("border: none; background: transparent; padding: 0;")
+        self.custom_settings_container.setEnabled(False)
+        
+        custom_grid = QGridLayout(self.custom_settings_container)
+        custom_grid.setContentsMargins(0, 4, 0, 0)
+        custom_grid.setSpacing(6)
+
+        lbl_style = "font-size: 10px; color: #888888; border: none; background: transparent;"
+
+        # COLMAP section
+        colmap_sec = QLabel("COLMAP Settings", self.custom_settings_container)
+        colmap_sec.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676; margin-top: 4px; border: none; background: transparent;")
+        custom_grid.addWidget(colmap_sec, 0, 0, 1, 2)
+
+        # SIFT Max Features
+        lbl_features = QLabel("SIFT Max Features:", self.custom_settings_container)
+        lbl_features.setStyleSheet(lbl_style)
+        self.custom_features_spin = QSpinBox(self.custom_settings_container)
+        self.custom_features_spin.setRange(1000, 65536)
+        self.custom_features_spin.setSingleStep(1000)
+        self.custom_features_spin.setValue(8000)
+        self.custom_features_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_features, 1, 0)
+        custom_grid.addWidget(self.custom_features_spin, 1, 1)
+
+        # Exhaustive Max Matches
+        lbl_matches = QLabel("Max Num Matches:", self.custom_settings_container)
+        lbl_matches.setStyleSheet(lbl_style)
+        self.custom_matches_spin = QSpinBox(self.custom_settings_container)
+        self.custom_matches_spin.setRange(4096, 262144)
+        self.custom_matches_spin.setSingleStep(4096)
+        self.custom_matches_spin.setValue(16384)
+        self.custom_matches_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_matches, 2, 0)
+        custom_grid.addWidget(self.custom_matches_spin, 2, 1)
+
+        # Guided Matching
+        self.custom_guided_check = QCheckBox("Use Guided Matching", self.custom_settings_container)
+        self.custom_guided_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
+        self.custom_guided_check.setChecked(True)
+        custom_grid.addWidget(self.custom_guided_check, 3, 0, 1, 2)
+
+        # Bundle Adjuster
+        self.custom_ba_check = QCheckBox("Run Extra Bundle Adjuster", self.custom_settings_container)
+        self.custom_ba_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
+        self.custom_ba_check.setChecked(False)
+        custom_grid.addWidget(self.custom_ba_check, 4, 0, 1, 2)
+
+        # OpenMVS section
+        openmvs_sec = QLabel("OpenMVS Settings", self.custom_settings_container)
+        openmvs_sec.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676; margin-top: 4px; border: none; background: transparent;")
+        custom_grid.addWidget(openmvs_sec, 5, 0, 1, 2)
+
+        # Densification Resolution
+        lbl_densify_res = QLabel("Densification Res:", self.custom_settings_container)
+        lbl_densify_res.setStyleSheet(lbl_style)
+        self.custom_densify_res_combo = QComboBox(self.custom_settings_container)
+        self.custom_densify_res_combo.addItems([
+            "0 — Ultra (highest detail, slow)",
+            "1 — High (half resolution)",
+            "2 — Medium (quarter resolution)",
+            "3 — Low (preview resolution)"
+        ])
+        self.custom_densify_res_combo.setCurrentIndex(1)
+        self.custom_densify_res_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_densify_res, 6, 0)
+        custom_grid.addWidget(self.custom_densify_res_combo, 6, 1)
+
+        # Max Views for Densification
+        lbl_densify_views = QLabel("Max Densify Views:", self.custom_settings_container)
+        lbl_densify_views.setStyleSheet(lbl_style)
+        self.custom_densify_views_spin = QSpinBox(self.custom_settings_container)
+        self.custom_densify_views_spin.setRange(1, 16)
+        self.custom_densify_views_spin.setValue(4)
+        self.custom_densify_views_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_densify_views, 7, 0)
+        custom_grid.addWidget(self.custom_densify_views_spin, 7, 1)
+
+        # Mesh Refinement Scales
+        lbl_refine_scales = QLabel("Mesh Refinement Scales:", self.custom_settings_container)
+        lbl_refine_scales.setStyleSheet(lbl_style)
+        self.custom_refine_scales_spin = QSpinBox(self.custom_settings_container)
+        self.custom_refine_scales_spin.setRange(1, 5)
+        self.custom_refine_scales_spin.setValue(2)
+        self.custom_refine_scales_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_refine_scales, 8, 0)
+        custom_grid.addWidget(self.custom_refine_scales_spin, 8, 1)
+
+        # Texturing Resolution
+        lbl_texture_res = QLabel("Texturing Res:", self.custom_settings_container)
+        lbl_texture_res.setStyleSheet(lbl_style)
+        self.custom_texture_res_combo = QComboBox(self.custom_settings_container)
+        self.custom_texture_res_combo.addItems([
+            "0 — Ultra (highest resolution)",
+            "1 — High (half resolution)",
+            "2 — Medium (quarter resolution)",
+            "3 — Low (preview resolution)"
+        ])
+        self.custom_texture_res_combo.setCurrentIndex(1)
+        self.custom_texture_res_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_texture_res, 9, 0)
+        custom_grid.addWidget(self.custom_texture_res_combo, 9, 1)
+        
+        advanced_layout.addWidget(self.custom_settings_toggle)
+        advanced_layout.addWidget(self.mapper_label)
+        advanced_layout.addWidget(self.mapper_combo)
+        advanced_layout.addWidget(self.mesh_mode_label)
+        advanced_layout.addWidget(self.mesh_mode_combo)
+        advanced_layout.addWidget(self.poisson_widget)
+        advanced_layout.addWidget(self.custom_settings_container)
+        self.advanced_panel.setVisible(False)
+        
+        # Initialize enabling states based on the default state of custom settings toggle
+        self._on_custom_settings_toggled(self.custom_settings_toggle.isChecked())
+        
+        self.advanced_toggle_btn.clicked.connect(self._toggle_advanced_options)
+        
         self.process_btn = QPushButton("▶  Start Processing", step2_box)
         self.process_btn.setObjectName("ProcessBtn")
         self.process_btn.setEnabled(False)
@@ -1265,6 +1477,8 @@ class MainWindow(QMainWindow):
         step2_layout.addWidget(self.gpu_label)
         step2_layout.addWidget(self.gpu_combo)
         step2_layout.addWidget(self.plain_surfaces_checkbox)
+        step2_layout.addWidget(self.advanced_toggle_btn)
+        step2_layout.addWidget(self.advanced_panel)
         step2_layout.addWidget(self.process_btn)
         step2_layout.addWidget(self.progress_bar)
         step2_layout.addWidget(self.status_label)
@@ -1320,7 +1534,11 @@ class MainWindow(QMainWindow):
         self.viewer_widget.action_recover.triggered.connect(self._retrieve_last_session)
         self.viewer_widget.action_export_dense.triggered.connect(lambda: self._export_mesh(".glb"))
         self.viewer_widget.action_export_sparse.triggered.connect(lambda: self._export_mesh(".ply"))
+        self.viewer_widget.action_export_glb.triggered.connect(lambda: self._export_mesh(".glb"))
         self.viewer_widget.action_export_obj.triggered.connect(lambda: self._export_mesh(".obj"))
+        self.viewer_widget.action_export_usdz.triggered.connect(lambda: self._export_mesh(".usdz"))
+        self.viewer_widget.action_mobile_import.triggered.connect(self._on_import_from_mobile_clicked)
+        self.viewer_widget.action_mobile_export.triggered.connect(self._on_send_to_mobile_clicked)
         self.viewer_widget.action_upload_proximap.triggered.connect(self._upload_to_proximap)
         
         # Initialize VisPy Canvas
@@ -1998,6 +2216,7 @@ class MainWindow(QMainWindow):
         self.total_videos_to_extract = len(videos)
         
         self.browse_btn.setEnabled(False)
+        self.mobile_import_btn.setEnabled(False)
         self.bg_remove_btn.setEnabled(False)
         self.process_btn.setEnabled(False)
         
@@ -2090,6 +2309,7 @@ class MainWindow(QMainWindow):
 
     def _cleanup_extraction_ui(self, cancelled=False):
         self.browse_btn.setEnabled(True)
+        self.mobile_import_btn.setEnabled(True)
         self.bg_remove_btn.setEnabled(len(self.image_list) > 0)
         
         try:
@@ -2107,6 +2327,7 @@ class MainWindow(QMainWindow):
 
     def _on_all_extractions_finished(self):
         self.browse_btn.setEnabled(True)
+        self.mobile_import_btn.setEnabled(True)
         self.bg_remove_btn.setEnabled(True)
         
         try:
@@ -2158,6 +2379,7 @@ class MainWindow(QMainWindow):
         
         # Disable inputs to avoid modification during processing
         self.browse_btn.setEnabled(False)
+        self.mobile_import_btn.setEnabled(False)
         self.bg_remove_btn.setEnabled(False)
         self.process_btn.setEnabled(False)
         self._set_export_actions_enabled(False)
@@ -2207,6 +2429,7 @@ class MainWindow(QMainWindow):
 
     def _on_bg_removal_finished(self, success: bool, updated_list: list, message: str):
         self.browse_btn.setEnabled(True)
+        self.mobile_import_btn.setEnabled(True)
         self.photos_tab.setEnabled(True)
         
         if success:
@@ -2263,6 +2486,68 @@ class MainWindow(QMainWindow):
         self.console_text.append(f"[PREP] Staged {len(staged)} images for reconstruction → {staging_dir}")
         return staging_dir
 
+    def _toggle_advanced_options(self):
+        is_visible = not self.advanced_panel.isVisible()
+        self.advanced_panel.setVisible(is_visible)
+        self.advanced_toggle_btn.setText("▾  Advanced Options" if is_visible else "▸  Advanced Options")
+
+    def _on_mesh_mode_changed(self, index):
+        self.poisson_widget.setVisible(index == 1)
+
+    def _on_poisson_depth_changed(self, value):
+        self.poisson_depth_label.setText(f"Poisson Depth: {value}")
+
+    def _on_custom_settings_toggled(self, checked):
+        self.mapper_label.setEnabled(checked)
+        self.mapper_combo.setEnabled(checked)
+        self.mesh_mode_label.setEnabled(checked)
+        self.mesh_mode_combo.setEnabled(checked)
+        self.poisson_widget.setEnabled(checked)
+        self.custom_settings_container.setEnabled(checked)
+        self.quality_label.setEnabled(not checked)
+        self.quality_combo.setEnabled(not checked)
+        if checked:
+            self._prepopulate_custom_parameters_from_preset()
+
+    def _prepopulate_custom_parameters_from_preset(self):
+        quality_idx = self.quality_combo.currentIndex()
+        if quality_idx == 0:  # Preview
+            self.custom_features_spin.setValue(4096)
+            self.custom_matches_spin.setValue(16384)
+            self.custom_guided_check.setChecked(False)
+            self.custom_ba_check.setChecked(False)
+            self.custom_densify_res_combo.setCurrentIndex(2)
+            self.custom_densify_views_spin.setValue(3)
+            self.custom_refine_scales_spin.setValue(1)
+            self.custom_texture_res_combo.setCurrentIndex(2)
+        elif quality_idx == 1:  # Medium
+            self.custom_features_spin.setValue(8192)
+            self.custom_matches_spin.setValue(16384)
+            self.custom_guided_check.setChecked(self.plain_surfaces_checkbox.isChecked())
+            self.custom_ba_check.setChecked(False)
+            self.custom_densify_res_combo.setCurrentIndex(1)
+            self.custom_densify_views_spin.setValue(4)
+            self.custom_refine_scales_spin.setValue(2)
+            self.custom_texture_res_combo.setCurrentIndex(1)
+        elif quality_idx == 2:  # High
+            self.custom_features_spin.setValue(12288)
+            self.custom_matches_spin.setValue(32768)
+            self.custom_guided_check.setChecked(True)
+            self.custom_ba_check.setChecked(True)
+            self.custom_densify_res_combo.setCurrentIndex(1)
+            self.custom_densify_views_spin.setValue(5)
+            self.custom_refine_scales_spin.setValue(2)
+            self.custom_texture_res_combo.setCurrentIndex(1)
+        elif quality_idx == 3:  # Ultra
+            self.custom_features_spin.setValue(16384)
+            self.custom_matches_spin.setValue(65536)
+            self.custom_guided_check.setChecked(True)
+            self.custom_ba_check.setChecked(True)
+            self.custom_densify_res_combo.setCurrentIndex(0)
+            self.custom_densify_views_spin.setValue(8)
+            self.custom_refine_scales_spin.setValue(3)
+            self.custom_texture_res_combo.setCurrentIndex(0)
+
     def _start_processing(self):
         if not self.image_list:
             return
@@ -2272,6 +2557,7 @@ class MainWindow(QMainWindow):
         
         self._set_process_btn_state("progress")
         self.browse_btn.setEnabled(False)
+        self.mobile_import_btn.setEnabled(False)
         self._set_export_actions_enabled(False)
         self.bg_remove_btn.setEnabled(False)
         self.ref_cloud_btn.setEnabled(False)
@@ -2279,6 +2565,12 @@ class MainWindow(QMainWindow):
         self.quality_combo.setEnabled(False)
         self.gpu_combo.setEnabled(False)
         self.plain_surfaces_checkbox.setEnabled(False)
+        self.mapper_combo.setEnabled(False)
+        self.mesh_mode_combo.setEnabled(False)
+        self.poisson_depth_slider.setEnabled(False)
+        self.custom_settings_toggle.setEnabled(False)
+        self.custom_settings_container.setEnabled(False)
+        self.advanced_toggle_btn.setEnabled(False)
         
         # Temp output dir inside the workspace or local appdata if not writable
         output_dir = get_reconstruction_out_dir()
@@ -2290,20 +2582,40 @@ class MainWindow(QMainWindow):
             self.console_text.append("[ERROR] Could not stage images. Aborting reconstruction.")
             self._set_process_btn_state("ready")
             self.browse_btn.setEnabled(True)
+            self.mobile_import_btn.setEnabled(True)
             self.bg_remove_btn.setEnabled(True)
             self.ref_cloud_btn.setEnabled(True)
             self.ref_cloud_clear_btn.setEnabled(True)
-            self.quality_combo.setEnabled(True)
             self.gpu_combo.setEnabled(True)
             self.plain_surfaces_checkbox.setEnabled(True)
+            self.custom_settings_toggle.setEnabled(True)
+            self._on_custom_settings_toggled(self.custom_settings_toggle.isChecked())
+            self.advanced_toggle_btn.setEnabled(True)
             return
 
-        # Extract quality and gpu mode
+        # Extract quality, gpu mode, and mapper mode
         quality_presets = ["preview", "medium", "high", "ultra"]
         gpu_modes = ["auto", "force_gpu", "force_cpu"]
+        mapper_modes = ["incremental", "global"]
         quality_preset = quality_presets[self.quality_combo.currentIndex()]
         gpu_mode = gpu_modes[self.gpu_combo.currentIndex()]
+        mapper_mode = mapper_modes[self.mapper_combo.currentIndex()]
         has_plain = self.plain_surfaces_checkbox.isChecked()
+        mesh_mode = "poisson" if self.mesh_mode_combo.currentIndex() == 1 else "default"
+        poisson_depth = self.poisson_depth_slider.value()
+
+        custom_params = None
+        if self.custom_settings_toggle.isChecked():
+            custom_params = {
+                "colmap_max_num_features": self.custom_features_spin.value(),
+                "colmap_max_num_matches": self.custom_matches_spin.value(),
+                "guided_matching": "1" if self.custom_guided_check.isChecked() else "0",
+                "run_bundle_adjuster": self.custom_ba_check.isChecked(),
+                "densify_res": str(self.custom_densify_res_combo.currentIndex()),
+                "densify_views": str(self.custom_densify_views_spin.value()),
+                "refine_scales": str(self.custom_refine_scales_spin.value()),
+                "texture_res": str(self.custom_texture_res_combo.currentIndex())
+            }
 
         from pipeline_manager import PipelineWorker
         self.worker = PipelineWorker(
@@ -2312,7 +2624,11 @@ class MainWindow(QMainWindow):
             quality_preset=quality_preset, 
             gpu_mode=gpu_mode, 
             has_plain_surfaces=has_plain,
+            mapper_mode=mapper_mode,
             ref_cloud_path=self.ref_cloud_path,
+            mesh_mode=mesh_mode,
+            poisson_depth=poisson_depth,
+            custom_params=custom_params,
             parent=self
         )
         self.worker.progress_changed.connect(self._on_progress_changed)
@@ -2346,10 +2662,13 @@ class MainWindow(QMainWindow):
 
     def _on_pipeline_finished(self, success: bool, msg: str):
         self.browse_btn.setEnabled(True)
+        self.mobile_import_btn.setEnabled(True)
         self.view_scene_btn.setEnabled(True)
-        self.quality_combo.setEnabled(True)
         self.gpu_combo.setEnabled(True)
         self.plain_surfaces_checkbox.setEnabled(True)
+        self.custom_settings_toggle.setEnabled(True)
+        self._on_custom_settings_toggled(self.custom_settings_toggle.isChecked())
+        self.advanced_toggle_btn.setEnabled(True)
         self.ref_cloud_btn.setEnabled(True)
         self.ref_cloud_clear_btn.setEnabled(True)
         self.bg_remove_btn.setEnabled(len(self.image_list) > 0)
@@ -2464,6 +2783,34 @@ class MainWindow(QMainWindow):
                         self.console_text.append(f"[ERROR] Failed to convert to GLB. Ensure Node.js and obj2gltf are installed: {e}")
                 else:
                     self.console_text.append(f"[ERROR] Could not find reconstructed GLB or OBJ file at {mvs_out}")
+            elif fmt == ".usdz":
+                src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+                src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
+                
+                source_path = None
+                if os.path.exists(src_glb):
+                    source_path = src_glb
+                elif os.path.exists(src_obj):
+                    source_path = src_obj
+                else:
+                    for candidate in ["scene_dense_mesh_texture.ply", "scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+                        path = os.path.join(mvs_out, candidate)
+                        if os.path.exists(path):
+                            source_path = path
+                            break
+
+                if source_path:
+                    self.console_text.append("[INFO] Loading source mesh to export as USDZ...")
+                    try:
+                        import trimesh
+                        from mesh_editor.scene import _export_usdz_from_trimesh
+                        mesh = trimesh.load(source_path, force="mesh")
+                        _export_usdz_from_trimesh(mesh, file_path)
+                        self.console_text.append(f"[EXPORT] USDZ mesh successfully written to {file_path}")
+                    except Exception as e:
+                        self.console_text.append(f"[ERROR] Failed to export to USDZ: {e}")
+                else:
+                    self.console_text.append(f"[ERROR] Could not find any reconstructed source mesh files in {mvs_out} to export as USDZ.")
         except Exception as e:
             self.console_text.append(f"[ERROR] Failed to export mesh: {e}")
 
@@ -2477,7 +2824,10 @@ class MainWindow(QMainWindow):
     def _set_export_actions_enabled(self, enabled: bool):
         self.viewer_widget.action_export_dense.setEnabled(enabled)
         self.viewer_widget.action_export_sparse.setEnabled(enabled)
+        self.viewer_widget.action_export_glb.setEnabled(enabled)
         self.viewer_widget.action_export_obj.setEnabled(enabled)
+        self.viewer_widget.action_export_usdz.setEnabled(enabled)
+        self.viewer_widget.action_mobile_export.setEnabled(enabled)
         self.viewer_widget.action_upload_proximap.setEnabled(enabled)
 
     def _update_upload_button_state(self):
@@ -3520,6 +3870,485 @@ class MainWindow(QMainWindow):
                 os.remove(temp_glb_path)
         except Exception:
             pass
+
+    # =========================================================================
+    # MOBILE DEVICE BRIDGE (IMPORT & EXPORT OVER LOCAL NETWORK)
+    # =========================================================================
+    def _on_import_from_mobile_clicked(self):
+        default_save_path = os.path.join(get_reconstruction_out_dir(), "mobile_imports")
+        os.makedirs(default_save_path, exist_ok=True)
+
+        setup_dialog = MobileImportSetupDialog(default_path=default_save_path, parent=self)
+        if setup_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        save_dir = setup_dialog.get_save_dir()
+        if not save_dir:
+            return
+        os.makedirs(save_dir, exist_ok=True)
+
+        from mobile_bridge_server import MobileBridgeServer
+        self.received_mobile_files = []
+        self.mobile_server = MobileBridgeServer(save_dir=save_dir, mode="import", parent=self)
+        
+        self.mobile_server.file_received.connect(self._on_mobile_file_received)
+        self.mobile_server.all_files_received.connect(self._on_mobile_all_files_received)
+        self.mobile_server.error.connect(self._on_mobile_server_error)
+        
+        self.mobile_server.start()
+        
+        # Remove the 150ms sleep — port is now bound in __init__, no race condition
+        urls = self.mobile_server.get_urls()
+        
+        self.console_text.append(f"[MOBILE BRIDGE] Server listening at: {', '.join(urls)}")
+        
+        self.mobile_qr_dialog = MobileQRDialog(urls=urls, mode="import", parent=self)
+        
+        if self.mobile_qr_dialog.exec() == QDialog.DialogCode.Rejected:
+            if hasattr(self, 'mobile_server') and self.mobile_server:
+                self.mobile_server.stop()
+                self.mobile_server = None
+            self.console_text.append("[MOBILE BRIDGE] Mobile import session cancelled.")
+
+    def _on_mobile_file_received(self, file_path: str):
+        self.console_text.append(f"[MOBILE BRIDGE] Received file: {os.path.basename(file_path)}")
+        if not hasattr(self, 'received_mobile_files'):
+            self.received_mobile_files = []
+        self.received_mobile_files.append(file_path)
+        
+        if hasattr(self, 'mobile_qr_dialog') and self.mobile_qr_dialog:
+            self.mobile_qr_dialog.status_lbl.setText(f"Receiving files... ({len(self.received_mobile_files)} uploaded)")
+
+    def _on_mobile_all_files_received(self, files: list):
+        self.console_text.append(f"[MOBILE BRIDGE] Transfer complete! Received {len(files)} media file(s).")
+        
+        if hasattr(self, 'mobile_qr_dialog') and self.mobile_qr_dialog:
+            self.mobile_qr_dialog.accept()
+            self.mobile_qr_dialog = None
+
+        if hasattr(self, 'mobile_server') and self.mobile_server:
+            self.mobile_server.stop()
+            self.mobile_server = None
+            
+        if files:
+            images = []
+            videos = []
+            for f in files:
+                normalized = os.path.normpath(f)
+                ext = os.path.splitext(normalized)[1].lower()
+                if ext in IMAGE_EXTS:
+                    images.append(normalized)
+                elif ext in VIDEO_EXTS:
+                    videos.append(normalized)
+            
+            self._route_import(images, videos, append_to_existing=True)
+
+    def _on_mobile_server_error(self, err_msg: str):
+        self.console_text.append(f"[MOBILE BRIDGE ERROR] {err_msg}")
+        QMessageBox.critical(self, "Mobile Bridge Error", f"Mobile bridge server error:\n{err_msg}")
+
+    def _on_send_to_mobile_clicked(self):
+        formats = [".glb", ".obj", ".usdz"]
+        items = ["GLB (.glb)", "OBJ (.obj)", "USDZ (.usdz)"]
+        item, ok = QInputDialog.getItem(self, "Send 3D Model to Mobile", "Select 3D Model Format:", items, 0, False)
+        if not ok or not item:
+            return
+            
+        fmt = formats[items.index(item)]
+        mvs_out = self._get_active_mvs_dir()
+        
+        target_file = None
+        if fmt == ".glb":
+            target_file = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
+            if not os.path.exists(target_file):
+                target_file = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+        elif fmt == ".obj":
+            target_file = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+        elif fmt == ".usdz":
+            candidate = os.path.join(mvs_out, "scene_dense_mesh_texture.usdz")
+            if os.path.exists(candidate):
+                target_file = candidate
+            else:
+                src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+                src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
+                src = src_glb if os.path.exists(src_glb) else (src_obj if os.path.exists(src_obj) else None)
+                if src:
+                    try:
+                        import trimesh
+                        from mesh_editor.scene import _export_usdz_from_trimesh
+                        mesh = trimesh.load(src, force="mesh")
+                        _export_usdz_from_trimesh(mesh, candidate)
+                        target_file = candidate
+                    except Exception as e:
+                        self.console_text.append(f"[ERROR] Failed to prepare USDZ for mobile: {e}")
+                        
+        if not target_file or not os.path.exists(target_file):
+            QMessageBox.warning(self, "No Model Found", f"Could not find or generate a {fmt.upper()} model file for mobile export.")
+            return
+
+        from mobile_bridge_server import MobileBridgeServer
+        self.mobile_server = MobileBridgeServer(mode="export", serve_file=target_file, parent=self)
+        self.mobile_server.start()
+        
+        QThread.msleep(150)
+        urls = self.mobile_server.get_urls()
+        
+        self.console_text.append(f"[MOBILE BRIDGE] Mobile model server running at: {', '.join(urls)}")
+        
+        dialog = MobileQRDialog(urls=urls, mode="export", parent=self)
+        dialog.exec()
+        
+        if hasattr(self, 'mobile_server') and self.mobile_server:
+            self.mobile_server.stop()
+            self.mobile_server = None
+            self.console_text.append("[MOBILE BRIDGE] Mobile model download session closed.")
+
+
+class MobileQRDialog(QDialog):
+    def __init__(self, urls: list, mode: str = "import", parent=None):
+        super().__init__(parent)
+        self.mode = mode
+        self.setWindowTitle("Mobile Device Bridge — " + ("Import Media" if mode == "import" else "Download 3D Model"))
+        self.setFixedSize(420, 520)
+        self.setModal(True)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #121212;
+                color: #e0e0e0;
+                border: 1px solid #2B2B2B;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        title = QLabel("📱 Scan with your Mobile Phone", self)
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #00E676;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        # Get active network Wi-Fi SSID if possible
+        wifi_ssid = None
+        if os.name == "nt":
+            try:
+                import subprocess
+                res = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", "(Get-NetConnectionProfile).Name"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                if res.returncode == 0:
+                    lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
+                    if lines:
+                        wifi_ssid = lines[0]
+            except Exception:
+                pass
+
+        if wifi_ssid:
+            network_msg = f"\nMake sure your phone is connected to the same Wi-Fi: '{wifi_ssid}'"
+        else:
+            network_msg = "\nMake sure your phone is on the same network (Wi-Fi or Hotspot)."
+
+        desc_text = (
+            "Open your phone's camera app to scan the QR code below." + network_msg
+            if mode == "import" else
+            "Scan the QR code below on your mobile device\nto download the generated 3D model." + network_msg
+        )
+        desc = QLabel(desc_text, self)
+        desc.setStyleSheet("font-size: 12px; color: #aaaaaa;")
+        desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(desc)
+
+        # QR Code Image Label
+        self.qr_label = QLabel(self)
+        self.qr_label.setFixedSize(240, 240)
+        self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.qr_label.setStyleSheet("background-color: #ffffff; border-radius: 8px; padding: 10px;")
+        
+        primary_url = urls[0] if urls else "http://127.0.0.1"
+        self._set_qr_url(primary_url)
+
+        qr_container = QHBoxLayout()
+        qr_container.addStretch()
+        qr_container.addWidget(self.qr_label)
+        qr_container.addStretch()
+        layout.addLayout(qr_container)
+
+        # URL Text Box for manual typing
+        url_box = QFrame(self)
+        url_box.setStyleSheet("background-color: #1E1E1E; border: 1px solid #333333; border-radius: 6px; padding: 8px;")
+        url_layout = QVBoxLayout(url_box)
+        url_layout.setContentsMargins(8, 4, 8, 4)
+        
+        lbl_type = QLabel("Or type this URL into your phone browser:", url_box)
+        lbl_type.setStyleSheet("font-size: 11px; color: #888888;")
+        lbl_url = QLabel(primary_url, url_box)
+        lbl_url.setStyleSheet("font-size: 13px; font-weight: bold; color: #00E676;")
+        lbl_url.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        
+        url_layout.addWidget(lbl_type)
+        url_layout.addWidget(lbl_url)
+        layout.addWidget(url_box)
+
+        # Status text
+        self.status_lbl = QLabel("Waiting for phone connection...", self)
+        self.status_lbl.setStyleSheet("font-size: 12px; font-style: italic; color: #888888;")
+        self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.status_lbl)
+
+        # Cancel/Close button
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_text = "Cancel" if mode == "import" else "Done / Close"
+        self.cancel_btn = QPushButton(btn_text, self)
+        self.cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #292929;
+                color: #e0e0e0;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 8px 24px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #333333; border-color: #00E676; }
+        """)
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self.cancel_btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+    def _set_qr_url(self, url: str):
+        try:
+            import qrcode
+            from io import BytesIO
+            from PySide6.QtGui import QImage, QPixmap
+            
+            qr = qrcode.QRCode(
+                version=1,
+                error_correction=qrcode.constants.ERROR_CORRECT_L,
+                box_size=6,
+                border=2,
+            )
+            qr.add_data(url)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white").convert('RGB')
+
+            buffer = BytesIO()
+            img.save(buffer, format="PNG")
+            qimg = QImage.fromData(buffer.getvalue(), "PNG")
+            self.qr_label.setPixmap(QPixmap.fromImage(qimg))
+        except Exception as e:
+            self.qr_label.setText(f"QR Error:\n{e}")
+
+
+class MobileImportSetupDialog(QDialog):
+    def __init__(self, default_path: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Mobile Import Setup")
+        self.setFixedSize(450, 310)
+        self.setModal(True)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #121212;
+                color: #e0e0e0;
+                border: 1px solid #2B2B2B;
+            }
+            QLabel { color: #e0e0e0; }
+            QLineEdit {
+                background-color: #1E1E1E;
+                color: #ffffff;
+                border: 1px solid #333333;
+                border-radius: 4px;
+                padding: 6px;
+            }
+            QPushButton {
+                background-color: #292929;
+                color: #e0e0e0;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover { background-color: #333333; border-color: #00E676; }
+            QPushButton#StartBtn {
+                background-color: #00E676;
+                color: #121212;
+                border: none;
+                font-weight: bold;
+            }
+            QPushButton#StartBtn:hover { background-color: #00c860; }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        lbl = QLabel("Choose where to save imported images/videos on your PC:", self)
+        lbl.setStyleSheet("font-size: 12px; font-weight: bold;")
+        layout.addWidget(lbl)
+
+        # Path input row
+        row = QHBoxLayout()
+        self.path_edit = QLineEdit(self)
+        self.path_edit.setText(default_path)
+        row.addWidget(self.path_edit)
+
+        self.choose_btn = QPushButton("Choose...", self)
+        self.choose_btn.clicked.connect(self._on_choose_clicked)
+        row.addWidget(self.choose_btn)
+        layout.addLayout(row)
+
+        # Network Status Info Frame
+        self.network_status_frame = QFrame(self)
+        self.network_status_frame.setStyleSheet("""
+            QFrame {
+                background-color: #1E1E1E;
+                border: 1px solid #2B2B2B;
+                border-radius: 6px;
+                padding: 10px;
+            }
+        """)
+        net_layout = QVBoxLayout(self.network_status_frame)
+        net_layout.setContentsMargins(8, 8, 8, 8)
+        net_layout.setSpacing(6)
+        
+        net_header = QHBoxLayout()
+        net_header.setContentsMargins(0, 0, 0, 0)
+        
+        self.net_title_label = QLabel("📶 Local Network Check:", self.network_status_frame)
+        self.net_title_label.setStyleSheet("font-weight: bold; font-size: 11px; color: #00E676; border: none; background: transparent; padding: 0;")
+        net_header.addWidget(self.net_title_label, stretch=1)
+        
+        self.net_refresh_btn = QPushButton("Refresh", self.network_status_frame)
+        self.net_refresh_btn.setCursor(Qt.PointingHandCursor)
+        self.net_refresh_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #00E676;
+                border: 1px solid #00E676;
+                border-radius: 3px;
+                font-size: 10px;
+                padding: 2px 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: rgba(0, 230, 118, 0.1);
+            }
+        """)
+        self.net_refresh_btn.clicked.connect(self.check_network)
+        net_header.addWidget(self.net_refresh_btn)
+        
+        net_layout.addLayout(net_header)
+        
+        self.net_details_label = QLabel("Checking network connection...", self.network_status_frame)
+        self.net_details_label.setStyleSheet("font-size: 11px; color: #aaaaaa; border: none; background: transparent; padding: 0;")
+        self.net_details_label.setWordWrap(True)
+        net_layout.addWidget(self.net_details_label)
+        
+        layout.addWidget(self.network_status_frame)
+
+        layout.addStretch()
+
+        # Action Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        self.cancel_btn = QPushButton("Cancel", self)
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self.cancel_btn)
+        
+        self.start_btn = QPushButton("Start Server", self)
+        self.start_btn.setObjectName("StartBtn")
+        self.start_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(self.start_btn)
+        
+        layout.addLayout(btn_layout)
+
+        # Trigger network check
+        self.check_network()
+
+    def check_network(self):
+        import psutil
+        import socket
+        import subprocess
+        
+        # 1. Get active network connections from psutil
+        stats = psutil.net_if_stats()
+        addrs = psutil.net_if_addrs()
+        active_nets = []
+        
+        for name, stat in stats.items():
+            if stat.isup and name in addrs:
+                for addr in addrs[name]:
+                    if addr.family == socket.AF_INET:
+                        ip = addr.address
+                        if ip and ip != "127.0.0.1" and not ip.startswith("169.254"):
+                            name_lower = name.lower()
+                            if any(x in name_lower for x in ["wi-fi", "wifi", "wlan", "wireless", "802.11"]):
+                                conn_type = "Wi-Fi"
+                            elif any(x in name_lower for x in ["local area connection*", "direct"]):
+                                conn_type = "Wi-Fi Hotspot"
+                            elif any(x in name_lower for x in ["ethernet", "lan"]):
+                                conn_type = "Ethernet"
+                            else:
+                                conn_type = "LAN"
+                            active_nets.append((name, ip, conn_type))
+                            
+        # 2. Try to get Wi-Fi network name / SSID (Windows)
+        wifi_ssid = None
+        if os.name == "nt":
+            try:
+                res = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", "(Get-NetConnectionProfile).Name"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                if res.returncode == 0:
+                    lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
+                    if lines:
+                        wifi_ssid = lines[0]
+            except Exception:
+                pass
+                
+        # 3. Format description message
+        if not active_nets:
+            self.net_title_label.setText("📶 Local Network Check: Disconnected")
+            self.net_title_label.setStyleSheet("font-weight: bold; font-size: 11px; color: #ff5252; border: none; background: transparent; padding: 0;")
+            self.net_details_label.setText(
+                "⚠️ No active network detected! Please connect your PC to a Wi-Fi network or enable a mobile hotspot. "
+                "Both your PC and phone MUST be on the same network to transfer files."
+            )
+            self.start_btn.setEnabled(False)
+            self.start_btn.setToolTip("Please connect to a network first")
+        else:
+            self.net_title_label.setText("📶 Local Network Check: Connected")
+            self.net_title_label.setStyleSheet("font-weight: bold; font-size: 11px; color: #00E676; border: none; background: transparent; padding: 0;")
+            self.start_btn.setEnabled(True)
+            self.start_btn.setToolTip("")
+            
+            lines = []
+            for name, ip, conn_type in active_nets:
+                net_name_str = f"'{wifi_ssid}'" if (wifi_ssid and conn_type in ["Wi-Fi", "Wi-Fi Hotspot"]) else f"({name})"
+                lines.append(f"• {conn_type}: {net_name_str} — IP: <b>{ip}</b>")
+                
+            connections_str = "<br>".join(lines)
+            self.net_details_label.setText(
+                f"Your PC is connected to the following local network(s):<br>{connections_str}<br>"
+                "⚠️ <b>Important:</b> Your mobile device <b>MUST</b> be connected to the exact same Wi-Fi/Hotspot network to upload."
+            )
+
+    def _on_choose_clicked(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Save Directory", self.path_edit.text())
+        if folder:
+            self.path_edit.setText(os.path.normpath(folder))
+
+    def get_save_dir(self) -> str:
+        return self.path_edit.text()
 
 
 class VideoPresetModal(QDialog):

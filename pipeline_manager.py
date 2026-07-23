@@ -50,14 +50,18 @@ class PipelineWorker(QThread):
     log_message = Signal(str)
     finished = Signal(bool, str)
 
-    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, ref_cloud_path: str = None, parent=None):
+    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, mapper_mode: str = "incremental", ref_cloud_path: str = None, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, parent=None):
         super().__init__(parent)
         self.image_dir = image_dir
         self.output_dir = output_dir
         self.quality_preset = quality_preset
         self.gpu_mode = gpu_mode
         self.has_plain_surfaces = has_plain_surfaces
+        self.mapper_mode = mapper_mode
         self.ref_cloud_path = ref_cloud_path
+        self.mesh_mode = mesh_mode
+        self.poisson_depth = poisson_depth
+        self.custom_params = custom_params
         self.is_running = True
         self.toolchain_map = self._load_toolchain_map()
         self.last_output_lines = []
@@ -482,6 +486,26 @@ class PipelineWorker(QThread):
             refine_res     = "0"
             texture_res    = "0"
 
+        # Override presets with custom parameters if custom overrides checkbox was checked
+        if self.custom_params:
+            self.log_message.emit("[INFO] Custom parameter overrides enabled. Overriding quality preset configuration.")
+            if "colmap_max_num_features" in self.custom_params:
+                colmap_max_num_features = self.custom_params["colmap_max_num_features"]
+            if "colmap_max_num_matches" in self.custom_params:
+                colmap_max_num_matches = self.custom_params["colmap_max_num_matches"]
+            if "guided_matching" in self.custom_params:
+                guided_matching = self.custom_params["guided_matching"]
+            if "run_bundle_adjuster" in self.custom_params:
+                run_bundle_adjuster = self.custom_params["run_bundle_adjuster"]
+            if "densify_res" in self.custom_params:
+                densify_res = self.custom_params["densify_res"]
+            if "densify_views" in self.custom_params:
+                densify_views = self.custom_params["densify_views"]
+            if "refine_scales" in self.custom_params:
+                refine_scales = self.custom_params["refine_scales"]
+            if "texture_res" in self.custom_params:
+                texture_res = self.custom_params["texture_res"]
+
         # =========================================================================
         # STEP 1/9 — Image Preparation
         # =========================================================================
@@ -664,7 +688,8 @@ class PipelineWorker(QThread):
         # =========================================================================
         # STEP 4/9 — Sparse Reconstruction (Mapper)
         # =========================================================================
-        self.status_changed.emit("Step 4/9: Estimating Camera Poses (SfM)...")
+        self._triangulated_points = 0
+        self._registered_count = 0
         sparse_dir = self._to_colmap_path(os.path.join(colmap_out, "sparse"))
         if os.path.exists(sparse_dir):
             try:
@@ -673,7 +698,7 @@ class PipelineWorker(QThread):
                 self.log_message.emit(f"[WARNING] Failed to clean sparse folder: {e}")
         os.makedirs(sparse_dir, exist_ok=True)
 
-        cmd_mapper = [
+        cmd_incremental = [
             colmap_exe, "mapper",
             "--database_path", database_path,
             "--image_path", working_image_dir,
@@ -686,10 +711,34 @@ class PipelineWorker(QThread):
             "--Mapper.abs_pose_min_inlier_ratio", "0.25",
             "--Mapper.num_threads", str(num_threads),
         ]
-        self._triangulated_points = 0
-        self._registered_count = 0
-        if not self._run_process_realtime(cmd_mapper, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
-            return False
+
+        if self.mapper_mode == "global":
+            self.status_changed.emit("Step 4/9: Estimating Camera Poses (GLOMAP Global SfM)...")
+            self.log_message.emit("[INFO] SfM Mapper: GLOMAP global_mapper selected.")
+            cmd_global = [
+                colmap_exe, "global_mapper",
+                "--database_path", database_path,
+                "--image_path", working_image_dir,
+                "--output_path", sparse_dir,
+                "--GlobalMapper.min_num_matches", "15",
+                "--GlobalMapper.num_threads", str(num_threads),
+                "--GlobalMapper.ba_num_iterations", str(ba_global_max_refinements),
+            ]
+            ok = self._run_process_realtime(cmd_global, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line)
+            if not ok or not self._select_best_sparse_model(sparse_dir):
+                self.log_message.emit("[WARNING] GLOMAP global_mapper failed or produced no model. Falling back to COLMAP incremental mapper...")
+                if os.path.exists(sparse_dir):
+                    try:
+                        shutil.rmtree(sparse_dir)
+                    except Exception:
+                        pass
+                os.makedirs(sparse_dir, exist_ok=True)
+                if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
+                    return False
+        else:
+            self.status_changed.emit("Step 4/9: Estimating Camera Poses (SfM)...")
+            if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
+                return False
 
         best_model_dir = self._to_colmap_path(self._select_best_sparse_model(sparse_dir)) if self._select_best_sparse_model(sparse_dir) else None
         if not best_model_dir:
@@ -810,6 +859,15 @@ class PipelineWorker(QThread):
         # =========================================================================
         # STEP 7/9 — Surface Mesh Reconstruction
         # =========================================================================
+        if self.mesh_mode == "poisson":
+            poisson_ok = self._run_poisson_reconstruction(mvs_out, self.poisson_depth)
+            if poisson_ok:
+                self.log_message.emit("[POISSON] Poisson reconstruction completed successfully. Skipping OpenMVS meshing, refinement, and texturing.")
+                self.progress_changed.emit(99)
+                return True
+            else:
+                self.log_message.emit("[WARNING] Poisson reconstruction failed. Falling back to default OpenMVS Delaunay meshing pipeline...")
+
         self.status_changed.emit("Step 7/9: Reconstructing Surface Mesh...")
         mvs_mesh_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["ReconstructMesh"])
 
@@ -1596,6 +1654,86 @@ class PipelineWorker(QThread):
             f"  Holes closed:         {self._holes_closed}\n"
             f"{'='*60}"
         )
+
+    def _run_poisson_reconstruction(self, mvs_out: str, depth: int) -> bool:
+        """
+        Step 7P: Poisson Surface Reconstruction using Open3D and cloud_fusion module.
+        Reads the dense point cloud, reconstructs surface, trims low-density components,
+        and saves PLY, OBJ, and GLB mesh outputs.
+        """
+        self.log_message.emit("[POISSON] Starting Poisson surface reconstruction...")
+        
+        # 1. Find the input dense point cloud PLY file
+        dense_ply = os.path.join(mvs_out, "scene_dense.ply")
+        if not os.path.exists(dense_ply):
+            dense_ply = os.path.join(mvs_out, "scene.ply")
+            
+        if not os.path.exists(dense_ply):
+            self.log_message.emit("[ERROR] No dense or sparse PLY cloud found for Poisson reconstruction.")
+            return False
+
+        try:
+            import open3d as o3d
+            import cloud_fusion
+            import trimesh
+            import numpy as np
+
+            # Load the point cloud
+            self.log_message.emit(f"[POISSON] Loading point cloud: {os.path.basename(dense_ply)}...")
+            pcd = o3d.io.read_point_cloud(dense_ply)
+            if pcd is None or len(pcd.points) == 0:
+                self.log_message.emit("[ERROR] Point cloud is empty or failed to load.")
+                return False
+
+            self.status_changed.emit("Step 7P: Reconstructing Poisson Surface...")
+            self.progress_changed.emit(83)
+
+            # Generate Poisson mesh using the cloud_fusion module's helper
+            # This handles normal estimation, orientation consistency check, density trimming, and cluster fragment cleaning.
+            mesh = cloud_fusion.generate_mesh(
+                pcd, 
+                log_fn=self.log_message.emit, 
+                poisson_depth=depth, 
+                density_threshold_pct=5.0
+            )
+
+            if mesh is None or len(mesh.vertices) == 0:
+                self.log_message.emit("[ERROR] Poisson reconstruction produced an empty mesh.")
+                return False
+
+            self.status_changed.emit("Step 7P: Exporting Mesh Formats...")
+            self.progress_changed.emit(92)
+
+            # Output paths
+            ply_path = os.path.normpath(os.path.join(mvs_out, "scene_dense_mesh_texture.ply"))
+            obj_path = os.path.normpath(os.path.join(mvs_out, "scene_dense_mesh_texture.obj"))
+            glb_path = os.path.normpath(os.path.join(mvs_out, "scene_dense_mesh_texture.glb"))
+
+            # Write PLY using Open3D (includes vertex colors)
+            o3d.io.write_triangle_mesh(ply_path, mesh)
+            self.log_message.emit(f"[POISSON] Successfully saved PLY mesh to: {os.path.basename(ply_path)}")
+
+            # Load with trimesh to convert to OBJ and GLB (keeps vertex colors)
+            self.log_message.emit("[POISSON] Exporting mesh to OBJ and GLB formats...")
+            tri_mesh = trimesh.load(ply_path, force="mesh")
+            tri_mesh.export(obj_path)
+            self.log_message.emit(f"[POISSON] Successfully saved OBJ mesh to: {os.path.basename(obj_path)}")
+
+            tri_mesh.export(glb_path)
+            self.log_message.emit(f"[POISSON] Successfully saved GLB mesh to: {os.path.basename(glb_path)}")
+
+            # Update stats for display in the summary
+            self._mesh_vertices = len(mesh.vertices)
+            self._mesh_faces = len(mesh.triangles)
+
+            self.progress_changed.emit(98)
+            return True
+
+        except Exception as e:
+            self.log_message.emit(f"[WARNING] Poisson reconstruction failed with error: {e}")
+            import traceback
+            self.log_message.emit(traceback.format_exc())
+            return False
 
 
 class BackgroundRemovalWorker(QThread):
