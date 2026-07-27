@@ -494,6 +494,14 @@ class ViewerWrapperWidget(QFrame):
         self.current_mvs_dir = mvs_dir
 
     def get_selected_file_path(self) -> str:
+        parent = self.parent()
+        if parent and hasattr(parent, 'standalone_cloud_path') and parent.standalone_cloud_path:
+            mvs_dir = self.current_mvs_dir if self.current_mvs_dir else os.path.join(get_reconstruction_out_dir(), "mvs")
+            has_reconstruction = os.path.exists(os.path.join(mvs_dir, "scene_dense_mesh_refine.ply")) or \
+                                 os.path.exists(os.path.join(mvs_dir, "scene_dense_mesh.ply"))
+            if not has_reconstruction:
+                return parent.standalone_cloud_path
+
         if not self.current_mvs_dir:
             return None
             
@@ -1189,23 +1197,62 @@ class MainWindow(QMainWindow):
         self.bg_remove_btn.clicked.connect(self._remove_backgrounds_clicked)
 
         # Reference Cloud Import (Optional)
-        self.ref_cloud_btn = QPushButton("Import Reference Cloud", step1_box)
-        self.ref_cloud_btn.setObjectName("RefCloudBtn")
-        self.ref_cloud_btn.clicked.connect(self._import_reference_cloud_clicked)
+        # self.ref_cloud_btn = QPushButton("Import Reference Cloud", step1_box)
+        # self.ref_cloud_btn.setObjectName("RefCloudBtn")
+        # self.ref_cloud_btn.clicked.connect(self._import_reference_cloud_clicked)
+        # 
+        # self.ref_cloud_container = QWidget(step1_box)
+        # ref_cloud_layout = QHBoxLayout(self.ref_cloud_container)
+        # ref_cloud_layout.setContentsMargins(0, 0, 0, 0)
+        # ref_cloud_layout.setSpacing(5)
+        # 
+        # self.ref_cloud_label = QLabel("", self.ref_cloud_container)
+        # self.ref_cloud_label.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold;")
+        # self.ref_cloud_label.setTextFormat(Qt.PlainText)
+        # 
+        # self.ref_cloud_clear_btn = QPushButton("✕", self.ref_cloud_container)
+        # self.ref_cloud_clear_btn.setFixedSize(20, 20)
+        # self.ref_cloud_clear_btn.setToolTip("Clear reference cloud selection")
+        # self.ref_cloud_clear_btn.setStyleSheet("""
+        #     QPushButton {
+        #         background: transparent;
+        #         color: #ff5252;
+        #         border: 1px solid #ff5252;
+        #         border-radius: 10px;
+        #         font-weight: bold;
+        #         font-size: 10px;
+        #     }
+        #     QPushButton:hover {
+        #         background: #ff5252;
+        #         color: #ffffff;
+        #     }
+        # """)
+        # self.ref_cloud_clear_btn.clicked.connect(self._clear_reference_cloud_clicked)
+        # 
+        # ref_cloud_layout.addWidget(self.ref_cloud_label, stretch=1)
+        # ref_cloud_layout.addWidget(self.ref_cloud_clear_btn)
+        # self.ref_cloud_container.setVisible(False)
+        # 
+        # self.ref_cloud_path = None
         
-        self.ref_cloud_container = QWidget(step1_box)
-        ref_cloud_layout = QHBoxLayout(self.ref_cloud_container)
-        ref_cloud_layout.setContentsMargins(0, 0, 0, 0)
-        ref_cloud_layout.setSpacing(5)
+        # Standalone Cloud Import (Optional/Mutual Exclusive Mode)
+        self.standalone_cloud_btn = QPushButton("Import Standalone Point Cloud", step1_box)
+        self.standalone_cloud_btn.setObjectName("StandaloneCloudBtn")
+        self.standalone_cloud_btn.clicked.connect(self._import_standalone_cloud_clicked)
         
-        self.ref_cloud_label = QLabel("", self.ref_cloud_container)
-        self.ref_cloud_label.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold;")
-        self.ref_cloud_label.setTextFormat(Qt.PlainText)
+        self.standalone_cloud_container = QWidget(step1_box)
+        standalone_cloud_layout = QHBoxLayout(self.standalone_cloud_container)
+        standalone_cloud_layout.setContentsMargins(0, 0, 0, 0)
+        standalone_cloud_layout.setSpacing(5)
+        
+        self.standalone_cloud_label = QLabel("", self.standalone_cloud_container)
+        self.standalone_cloud_label.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold;")
+        self.standalone_cloud_label.setTextFormat(Qt.PlainText)
 
-        self.ref_cloud_clear_btn = QPushButton("✕", self.ref_cloud_container)
-        self.ref_cloud_clear_btn.setFixedSize(20, 20)
-        self.ref_cloud_clear_btn.setToolTip("Clear reference cloud selection")
-        self.ref_cloud_clear_btn.setStyleSheet("""
+        self.standalone_cloud_clear_btn = QPushButton("✕", self.standalone_cloud_container)
+        self.standalone_cloud_clear_btn.setFixedSize(20, 20)
+        self.standalone_cloud_clear_btn.setToolTip("Clear standalone cloud selection")
+        self.standalone_cloud_clear_btn.setStyleSheet("""
             QPushButton {
                 background: transparent;
                 color: #ff5252;
@@ -1219,13 +1266,13 @@ class MainWindow(QMainWindow):
                 color: #ffffff;
             }
         """)
-        self.ref_cloud_clear_btn.clicked.connect(self._clear_reference_cloud_clicked)
+        self.standalone_cloud_clear_btn.clicked.connect(self._clear_standalone_cloud_clicked)
         
-        ref_cloud_layout.addWidget(self.ref_cloud_label, stretch=1)
-        ref_cloud_layout.addWidget(self.ref_cloud_clear_btn)
-        self.ref_cloud_container.setVisible(False)
+        standalone_cloud_layout.addWidget(self.standalone_cloud_label, stretch=1)
+        standalone_cloud_layout.addWidget(self.standalone_cloud_clear_btn)
+        self.standalone_cloud_container.setVisible(False)
         
-        self.ref_cloud_path = None
+        self.standalone_cloud_path = None
         
         step1_layout.addWidget(s1_title)
         step1_layout.addWidget(self.img_count_label)
@@ -1234,8 +1281,10 @@ class MainWindow(QMainWindow):
         step1_layout.addWidget(self.browse_btn)
         step1_layout.addWidget(self.mobile_import_btn)
         step1_layout.addWidget(self.bg_remove_btn)
-        step1_layout.addWidget(self.ref_cloud_btn)
-        step1_layout.addWidget(self.ref_cloud_container)
+        # step1_layout.addWidget(self.ref_cloud_btn)
+        # step1_layout.addWidget(self.ref_cloud_container)
+        step1_layout.addWidget(self.standalone_cloud_btn)
+        step1_layout.addWidget(self.standalone_cloud_container)
         scroll_content_layout.addWidget(step1_box)
         
         # STEP 2: Process
@@ -1459,6 +1508,36 @@ class MainWindow(QMainWindow):
         
         self.advanced_toggle_btn.clicked.connect(self._toggle_advanced_options)
         
+        # Standalone Panel for Step 2 Settings
+        self.standalone_panel = QFrame(step2_box)
+        self.standalone_panel.setStyleSheet("""
+            QFrame {
+                background-color: #1A1A1A;
+                border: 1px solid #2D2D2D;
+                border-radius: 4px;
+                padding: 6px;
+            }
+        """)
+        standalone_layout = QVBoxLayout(self.standalone_panel)
+        standalone_layout.setContentsMargins(6, 6, 6, 6)
+        standalone_layout.setSpacing(6)
+        
+        self.standalone_poisson_label = QLabel("Poisson Depth: 9", self.standalone_panel)
+        self.standalone_poisson_label.setStyleSheet("font-size: 11px; color: #aaaaaa; border: none; background: transparent;")
+        self.standalone_poisson_slider = QSlider(Qt.Horizontal, self.standalone_panel)
+        self.standalone_poisson_slider.setRange(6, 12)
+        self.standalone_poisson_slider.setValue(9)
+        self.standalone_poisson_slider.valueChanged.connect(self._on_standalone_poisson_depth_changed)
+        
+        self.vertex_color_toggle = QCheckBox("Include vertex colors in final mesh", self.standalone_panel)
+        self.vertex_color_toggle.setStyleSheet("font-size: 11px; font-weight: bold; color: #aaaaaa; border: none; background: transparent;")
+        self.vertex_color_toggle.setChecked(True)
+        
+        standalone_layout.addWidget(self.standalone_poisson_label)
+        standalone_layout.addWidget(self.standalone_poisson_slider)
+        standalone_layout.addWidget(self.vertex_color_toggle)
+        self.standalone_panel.setVisible(False)
+        
         self.process_btn = QPushButton("▶  Start Processing", step2_box)
         self.process_btn.setObjectName("ProcessBtn")
         self.process_btn.setEnabled(False)
@@ -1479,6 +1558,7 @@ class MainWindow(QMainWindow):
         step2_layout.addWidget(self.plain_surfaces_checkbox)
         step2_layout.addWidget(self.advanced_toggle_btn)
         step2_layout.addWidget(self.advanced_panel)
+        step2_layout.addWidget(self.standalone_panel)
         step2_layout.addWidget(self.process_btn)
         step2_layout.addWidget(self.progress_bar)
         step2_layout.addWidget(self.status_label)
@@ -2064,6 +2144,8 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(qss)
 
     def _handle_dropped_images(self, files: list):
+        if hasattr(self, 'standalone_cloud_path') and self.standalone_cloud_path:
+            self._clear_standalone_cloud_clicked()
         self.image_list = files
         self.img_count_label.setText(f"Images Loaded: {len(files)}")
         self.photos_tab.set_images(self.image_list)
@@ -2277,10 +2359,34 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Video Extraction Error", f"An error occurred while extracting frames:\n\n{err_msg}")
         self._cleanup_extraction_ui()
 
-    def _import_reference_cloud_clicked(self):
+    # def _import_reference_cloud_clicked(self):
+    #     file_path, _ = QFileDialog.getOpenFileName(
+    #         self,
+    #         "Import Reference Point Cloud",
+    #         self.last_accessed_dir,
+    #         "Point Cloud Files (*.ply *.las *.laz *.xyz *.pts *.txt)"
+    #     )
+    #     if not file_path:
+    #         return
+    # 
+    #     self.last_accessed_dir = os.path.dirname(file_path)
+    #     self.ref_cloud_path = file_path
+    #     filename = os.path.basename(file_path)
+    # 
+    #     self.ref_cloud_label.setText(f"✓ {filename}")
+    #     self.ref_cloud_container.setVisible(True)
+    #     self.console_text.append(f"[REF_CLOUD] Selected external reference cloud: {file_path}")
+    # 
+    # def _clear_reference_cloud_clicked(self):
+    #     self.ref_cloud_path = None
+    #     self.ref_cloud_label.setText("")
+    #     self.ref_cloud_container.setVisible(False)
+    #     self.console_text.append("[REF_CLOUD] Reference cloud selection cleared.")
+
+    def _import_standalone_cloud_clicked(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Import Reference Point Cloud",
+            "Import Standalone Point Cloud",
             self.last_accessed_dir,
             "Point Cloud Files (*.ply *.las *.laz *.xyz *.pts *.txt)"
         )
@@ -2288,18 +2394,104 @@ class MainWindow(QMainWindow):
             return
 
         self.last_accessed_dir = os.path.dirname(file_path)
-        self.ref_cloud_path = file_path
+        
+        # Load cloud to detect colors
+        self.console_text.append(f"[STANDALONE] Checking point cloud metadata: {file_path}...")
+        try:
+            import point_cloud_io
+            res = point_cloud_io.load_point_cloud(file_path, self.console_text.append)
+            if not res.success or res.cloud is None:
+                raise RuntimeError(f"Failed to read point cloud: {', '.join(res.warnings)}")
+            has_colors = res.has_colors
+            self.console_text.append(f"[STANDALONE] Point cloud loaded successfully. Points: {res.point_count:,} | Colors: {has_colors}")
+        except Exception as e:
+            self.console_text.append(f"[ERROR] Failed to load standalone cloud: {e}")
+            QMessageBox.critical(self, "Import Error", f"Failed to load point cloud file:\n\n{e}")
+            return
+
+        self.standalone_cloud_path = file_path
         filename = os.path.basename(file_path)
+        self.standalone_cloud_label.setText(f"✓ {filename}")
+        self.standalone_cloud_container.setVisible(True)
+        
+        # Switch UI to standalone mode
+        self._enter_standalone_mode(has_colors)
+        
+        # Automatically select Dense Point Cloud mode and reload viewer to preview the cloud
+        self.view_scene_btn.setEnabled(True)
+        self.viewer_widget.mode_select.blockSignals(True)
+        self.viewer_widget.mode_select.setCurrentIndex(1)
+        self.viewer_widget.mode_select.blockSignals(False)
+        self._reload_viewer(file_path)
 
-        self.ref_cloud_label.setText(f"✓ {filename}")
-        self.ref_cloud_container.setVisible(True)
-        self.console_text.append(f"[REF_CLOUD] Selected external reference cloud: {file_path}")
+    def _clear_standalone_cloud_clicked(self):
+        self.standalone_cloud_path = None
+        self.standalone_cloud_label.setText("")
+        self.standalone_cloud_container.setVisible(False)
+        self.console_text.append("[STANDALONE] Standalone cloud cleared.")
+        self._exit_standalone_mode()
 
-    def _clear_reference_cloud_clicked(self):
-        self.ref_cloud_path = None
-        self.ref_cloud_label.setText("")
-        self.ref_cloud_container.setVisible(False)
-        self.console_text.append("[REF_CLOUD] Reference cloud selection cleared.")
+    def _enter_standalone_mode(self, has_colors: bool):
+        # 1. Clear any loaded images
+        self.image_list = []
+        self.extracted_frames = []
+        self.img_count_label.setText("Images Loaded: 0 (Standalone Mode)")
+        self.camera_label.setText("Camera: N/A (Direct point cloud reconstruction)")
+        self.bg_remove_btn.setEnabled(False)
+        
+        # 2. Clear & disable reference cloud fusion
+        # self._clear_reference_cloud_clicked()
+        # self.ref_cloud_btn.setEnabled(False)
+        
+        # 3. Disable images directory browse/mobile import
+        self.browse_btn.setEnabled(False)
+        self.mobile_import_btn.setEnabled(False)
+
+        # 4. Hide photogrammetry options in Step 2
+        self.quality_label.setVisible(False)
+        self.quality_combo.setVisible(False)
+        self.gpu_label.setVisible(False)
+        self.gpu_combo.setVisible(False)
+        self.plain_surfaces_checkbox.setVisible(False)
+        self.advanced_toggle_btn.setVisible(False)
+        self.advanced_panel.setVisible(False)
+
+        # 5. Show standalone options
+        self.standalone_panel.setVisible(True)
+        self.vertex_color_toggle.setVisible(has_colors)
+        self.vertex_color_toggle.setChecked(has_colors)
+        
+        # 6. Enable process button
+        self._set_process_btn_state("ready")
+        self.console_text.append("[STANDALONE] UI transitioned to Standalone Reconstruction mode.")
+
+    def _exit_standalone_mode(self):
+        # 1. Enable main buttons again
+        self.browse_btn.setEnabled(True)
+        self.mobile_import_btn.setEnabled(True)
+        # self.ref_cloud_btn.setEnabled(True)
+        
+        self.img_count_label.setText("Images Loaded: 0")
+        self.camera_label.setText("Camera: Undetected")
+        
+        # 2. Show photogrammetry options
+        self.quality_label.setVisible(True)
+        self.quality_combo.setVisible(True)
+        self.gpu_label.setVisible(True)
+        self.gpu_combo.setVisible(True)
+        self.plain_surfaces_checkbox.setVisible(True)
+        self.advanced_toggle_btn.setVisible(True)
+        self.advanced_panel.setVisible(False)
+
+        # 3. Hide standalone panel
+        self.standalone_panel.setVisible(False)
+        
+        # 4. Reset process button state
+        self._set_process_btn_state("idle")
+        self.console_text.append("[STANDALONE] UI exited Standalone Reconstruction mode.")
+
+    def _on_standalone_poisson_depth_changed(self, value):
+        self.standalone_poisson_label.setText(f"Poisson Depth: {value}")
 
     def _cancel_video_extraction(self):
         self.console_text.append("[VIDEO] Cancelling video extraction...")
@@ -2549,7 +2741,7 @@ class MainWindow(QMainWindow):
             self.custom_texture_res_combo.setCurrentIndex(0)
 
     def _start_processing(self):
-        if not self.image_list:
+        if not self.standalone_cloud_path and not self.image_list:
             return
             
         # Terminate any active viewer to prevent lock conflict on MVS files during reconstruction
@@ -2560,8 +2752,8 @@ class MainWindow(QMainWindow):
         self.mobile_import_btn.setEnabled(False)
         self._set_export_actions_enabled(False)
         self.bg_remove_btn.setEnabled(False)
-        self.ref_cloud_btn.setEnabled(False)
-        self.ref_cloud_clear_btn.setEnabled(False)
+        # self.ref_cloud_btn.setEnabled(False)
+        # self.ref_cloud_clear_btn.setEnabled(False)
         self.quality_combo.setEnabled(False)
         self.gpu_combo.setEnabled(False)
         self.plain_surfaces_checkbox.setEnabled(False)
@@ -2576,6 +2768,34 @@ class MainWindow(QMainWindow):
         output_dir = get_reconstruction_out_dir()
         os.makedirs(output_dir, exist_ok=True)
         
+        if self.standalone_cloud_path:
+            # Standalone reconstruction mode execution path
+            self.standalone_cloud_btn.setEnabled(False)
+            self.standalone_cloud_clear_btn.setEnabled(False)
+            self.standalone_poisson_slider.setEnabled(False)
+            self.vertex_color_toggle.setEnabled(False)
+            
+            from standalone_reconstruction import StandaloneReconstructionWorker
+            include_colors = self.vertex_color_toggle.isChecked()
+            poisson_depth = self.standalone_poisson_slider.value()
+            
+            self.worker = StandaloneReconstructionWorker(
+                self.standalone_cloud_path,
+                output_dir,
+                include_colors=include_colors,
+                poisson_depth=poisson_depth,
+                parent=self
+            )
+            self.worker.progress_changed.connect(self._on_progress_changed)
+            self.worker.status_changed.connect(self.status_label.setText)
+            self.worker.log_message.connect(self._append_log)
+            self.worker.finished.connect(self._on_pipeline_finished)
+            
+            self.console_text.append("[START] Initializing asynchronous standalone point cloud reconstruction task thread...")
+            self.worker.start()
+            self._update_file_menu_states()
+            return
+        
         # stage all images into one flat directory
         image_dir = self._stage_images_for_reconstruction()
         if image_dir is None:
@@ -2584,8 +2804,8 @@ class MainWindow(QMainWindow):
             self.browse_btn.setEnabled(True)
             self.mobile_import_btn.setEnabled(True)
             self.bg_remove_btn.setEnabled(True)
-            self.ref_cloud_btn.setEnabled(True)
-            self.ref_cloud_clear_btn.setEnabled(True)
+            # self.ref_cloud_btn.setEnabled(True)
+            # self.ref_cloud_clear_btn.setEnabled(True)
             self.gpu_combo.setEnabled(True)
             self.plain_surfaces_checkbox.setEnabled(True)
             self.custom_settings_toggle.setEnabled(True)
@@ -2625,7 +2845,7 @@ class MainWindow(QMainWindow):
             gpu_mode=gpu_mode, 
             has_plain_surfaces=has_plain,
             mapper_mode=mapper_mode,
-            ref_cloud_path=self.ref_cloud_path,
+            ref_cloud_path=None,
             mesh_mode=mesh_mode,
             poisson_depth=poisson_depth,
             custom_params=custom_params,
@@ -2661,6 +2881,34 @@ class MainWindow(QMainWindow):
                 self.view_scene_btn.setEnabled(True)
 
     def _on_pipeline_finished(self, success: bool, msg: str):
+        if hasattr(self, 'standalone_cloud_path') and self.standalone_cloud_path:
+            # Standalone reconstruction mode finished cleanup
+            self.view_scene_btn.setEnabled(True)
+            self.standalone_cloud_btn.setEnabled(True)
+            self.standalone_cloud_clear_btn.setEnabled(True)
+            self.standalone_poisson_slider.setEnabled(True)
+            self.vertex_color_toggle.setEnabled(True)
+            
+            if success:
+                self._set_process_btn_state("ready")
+                self.console_text.append(f"[FINISHED] {msg}")
+                self._update_upload_button_state()
+                
+                mvs_dir = os.path.join(get_reconstruction_out_dir(), "mvs")
+                self.viewer_widget.set_mvs_directory(mvs_dir)
+                self.viewer_widget.mode_select.blockSignals(True)
+                self.viewer_widget.mode_select.setCurrentIndex(2) # Default to mesh mode (index 2)
+                self.viewer_widget.mode_select.blockSignals(False)
+                
+                mesh_path = self.viewer_widget.get_selected_file_path()
+                if mesh_path:
+                    self._reload_viewer(mesh_path)
+            else:
+                self._set_process_btn_state("failed")
+                self.console_text.append(f"[FAILED] Reconstruction failed: {msg}")
+            self._update_file_menu_states()
+            return
+
         self.browse_btn.setEnabled(True)
         self.mobile_import_btn.setEnabled(True)
         self.view_scene_btn.setEnabled(True)
@@ -2669,8 +2917,8 @@ class MainWindow(QMainWindow):
         self.custom_settings_toggle.setEnabled(True)
         self._on_custom_settings_toggled(self.custom_settings_toggle.isChecked())
         self.advanced_toggle_btn.setEnabled(True)
-        self.ref_cloud_btn.setEnabled(True)
-        self.ref_cloud_clear_btn.setEnabled(True)
+        # self.ref_cloud_btn.setEnabled(True)
+        # self.ref_cloud_clear_btn.setEnabled(True)
         self.bg_remove_btn.setEnabled(len(self.image_list) > 0)
         
         if success:
@@ -2719,6 +2967,45 @@ class MainWindow(QMainWindow):
             
         mvs_out = self._get_active_mvs_dir()
         
+        if hasattr(self, 'standalone_cloud_path') and self.standalone_cloud_path:
+            # Standalone reconstruction export logic
+            src_ply = None
+            for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh.ply"]:
+                path = os.path.join(mvs_out, candidate)
+                if os.path.exists(path):
+                    src_ply = path
+                    break
+            
+            if not src_ply:
+                self.console_text.append(f"[ERROR] Could not find reconstructed standalone PLY file in {mvs_out}")
+                QMessageBox.critical(self, "Export Error", f"Could not find reconstructed PLY file in {mvs_out}")
+                return
+
+            try:
+                import shutil
+                if fmt == ".ply":
+                    shutil.copy2(src_ply, file_path)
+                    self.console_text.append(f"[EXPORT] Standalone PLY mesh successfully written to {file_path}")
+                elif fmt in [".obj", ".glb"]:
+                    import trimesh
+                    self.console_text.append(f"[INFO] Converting and exporting standalone mesh as {fmt.upper()}...")
+                    mesh = trimesh.load(src_ply, force="mesh")
+                    mesh.export(file_path, file_type=fmt[1:])
+                    self.console_text.append(f"[EXPORT] Standalone {fmt.upper()} mesh successfully written to {file_path}")
+                elif fmt == ".usdz":
+                    import trimesh
+                    from mesh_editor.scene import _export_usdz_from_trimesh
+                    self.console_text.append("[INFO] Converting and exporting standalone mesh as USDZ...")
+                    mesh = trimesh.load(src_ply, force="mesh")
+                    _export_usdz_from_trimesh(mesh, file_path)
+                    self.console_text.append(f"[EXPORT] Standalone USDZ mesh successfully written to {file_path}")
+                else:
+                    self.console_text.append(f"[ERROR] Unsupported export format: {fmt}")
+            except Exception as e:
+                self.console_text.append(f"[ERROR] Failed to export standalone mesh: {e}")
+                QMessageBox.critical(self, "Export Error", f"Failed to export mesh:\n\n{e}")
+            return
+
         import shutil
         try:
             if fmt == ".ply":
@@ -2832,9 +3119,13 @@ class MainWindow(QMainWindow):
 
     def _update_upload_button_state(self):
         mvs_out = self._get_active_mvs_dir()
-        src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
-        src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
-        has_model = os.path.exists(src_glb) or os.path.exists(src_obj)
+        if hasattr(self, 'standalone_cloud_path') and self.standalone_cloud_path:
+            has_model = os.path.exists(os.path.join(mvs_out, "scene_dense_mesh_refine.ply")) or \
+                        os.path.exists(os.path.join(mvs_out, "scene_dense_mesh.ply"))
+        else:
+            src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
+            src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+            has_model = os.path.exists(src_glb) or os.path.exists(src_obj)
         self._set_export_actions_enabled(has_model)
 
     def _check_existing_scene(self):
@@ -3548,7 +3839,21 @@ class MainWindow(QMainWindow):
             if not os.path.exists(ply_path):
                 ply_path = file_path
             if os.path.exists(ply_path):
-                points, colors, _ = self._read_ply(ply_path)
+                ext = os.path.splitext(ply_path)[1].lower()
+                if ext == ".ply":
+                    points, colors, _ = self._read_ply(ply_path)
+                else:
+                    try:
+                        import point_cloud_io
+                        res = point_cloud_io.load_point_cloud(ply_path)
+                        if res.success and res.cloud is not None:
+                            points = np.asarray(res.cloud.points, dtype=np.float32)
+                            if res.has_colors:
+                                colors = (np.asarray(res.cloud.colors) * 255.0).astype(np.uint8)
+                            else:
+                                colors = np.ones((len(points), 3), dtype=np.uint8) * 180
+                    except Exception as e:
+                        self.console_text.append(f"[WARNING] Vispy fallback loader failed: {e}")
                 
         elif mode == 2:
             # Textured Mesh
@@ -3558,17 +3863,31 @@ class MainWindow(QMainWindow):
             elif file_path.lower().endswith(".ply"):
                 points, colors, faces = self._read_ply(file_path)
             else:
-                dirname = os.path.dirname(file_path)
-                cand_obj = os.path.join(dirname, "scene_dense_mesh_texture.obj")
-                obj_cand = file_path.replace(".ply", ".obj").replace(".mvs", ".obj")
-                if os.path.exists(cand_obj):
-                    vertices, texcoords, faces, texture_path = self._read_obj(cand_obj)
-                    points = vertices
-                elif os.path.exists(obj_cand):
-                    vertices, texcoords, faces, texture_path = self._read_obj(obj_cand)
-                    points = vertices
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext not in [".obj", ".ply"]:
+                    try:
+                        import point_cloud_io
+                        res = point_cloud_io.load_point_cloud(file_path)
+                        if res.success and res.cloud is not None:
+                            points = np.asarray(res.cloud.points, dtype=np.float32)
+                            if res.has_colors:
+                                colors = (np.asarray(res.cloud.colors) * 255.0).astype(np.uint8)
+                            else:
+                                colors = np.ones((len(points), 3), dtype=np.uint8) * 180
+                    except Exception as e:
+                        self.console_text.append(f"[WARNING] Vispy fallback loader failed: {e}")
                 else:
-                    points, colors, faces = self._read_ply(file_path)
+                    dirname = os.path.dirname(file_path)
+                    cand_obj = os.path.join(dirname, "scene_dense_mesh_texture.obj")
+                    obj_cand = file_path.replace(".ply", ".obj").replace(".mvs", ".obj")
+                    if os.path.exists(cand_obj):
+                        vertices, texcoords, faces, texture_path = self._read_obj(cand_obj)
+                        points = vertices
+                    elif os.path.exists(obj_cand):
+                        vertices, texcoords, faces, texture_path = self._read_obj(obj_cand)
+                        points = vertices
+                    else:
+                        points, colors, faces = self._read_ply(file_path)
                     
         if mode == 2 and faces is not None and len(faces) > 0:
             mesh_colors = None
