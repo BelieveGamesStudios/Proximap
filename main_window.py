@@ -81,7 +81,180 @@ CAMERA_CONTROLS = {
        "• Shift + Mouse Move: Adjust focus area"
 }
 
+
+# ---------------------------------------------------------------------------
+# Background worker: loads a point cloud file off the UI thread on import
+# ---------------------------------------------------------------------------
+class CloudImportWorker(QThread):
+    """Loads a point cloud in the background so the UI stays responsive."""
+    finished = Signal(object, str)   # (LoadResult, file_path)
+    error    = Signal(str)
+
+    def __init__(self, file_path: str, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+
+    def run(self):
+        try:
+            import point_cloud_io
+            res = point_cloud_io.load_point_cloud(self.file_path)
+            self.finished.emit(res, self.file_path)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Background worker: parses geometry (PLY / Open3D) off the UI thread
+# so _render_in_vispy can receive ready arrays and only do the fast GPU upload
+# ---------------------------------------------------------------------------
+class ViewerLoadWorker(QThread):
+    """Parses point cloud / mesh data in a background thread."""
+    # Emits (points_f32, colors_u8_or_None, faces_or_None, texcoords_or_None, texture_path_or_None)
+    finished = Signal(object, object, object, object, object)
+    error    = Signal(str)
+
+    def __init__(self, file_path: str, mode: int, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.mode = mode
+
+    def run(self):
+        import numpy as np
+        try:
+            file_path = self.file_path
+            mode      = self.mode
+            points = colors = faces = texcoords = texture_path = None
+
+            if mode == 1:
+                # Dense Point Cloud
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext == '.ply':
+                    import struct
+                    points, colors, _ = _read_ply_static(file_path)
+                else:
+                    import point_cloud_io
+                    res = point_cloud_io.load_point_cloud(file_path)
+                    if res.success and res.cloud is not None:
+                        points = np.asarray(res.cloud.points, dtype=np.float32)
+                        colors = (np.asarray(res.cloud.colors) * 255).astype(np.uint8) \
+                                 if res.has_colors else np.full((len(points), 3), 180, np.uint8)
+
+            elif mode == 2:
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext == '.ply':
+                    points, colors, faces = _read_ply_static(file_path)
+                elif ext not in ('.obj', '.ply'):
+                    import point_cloud_io
+                    res = point_cloud_io.load_point_cloud(file_path)
+                    if res.success and res.cloud is not None:
+                        points = np.asarray(res.cloud.points, dtype=np.float32)
+                        colors = (np.asarray(res.cloud.colors) * 255).astype(np.uint8) \
+                                 if res.has_colors else np.full((len(points), 3), 180, np.uint8)
+
+            self.finished.emit(points, colors, faces, texcoords, texture_path)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+def _read_ply_static(path):
+    """Module-level PLY reader used by ViewerLoadWorker (no 'self' needed)."""
+    import numpy as np, struct
+    if not os.path.exists(path):
+        return np.zeros((0,3), np.float32), np.zeros((0,3), np.uint8), None
+    with open(path, 'rb') as f:
+        header_lines = []
+        while True:
+            line = f.readline().decode('utf-8', errors='ignore').strip()
+            header_lines.append(line)
+            if line == 'end_header':
+                break
+        num_vertices = num_faces = 0
+        format_type = None
+        vertex_properties = []
+        element_type = None
+        for line in header_lines:
+            parts = line.split()
+            if not parts: continue
+            if parts[0] == 'format':  format_type = parts[1]
+            elif parts[0] == 'element':
+                element_type = parts[1]
+                if element_type == 'vertex': num_vertices = int(parts[2])
+                elif element_type == 'face': num_faces    = int(parts[2])
+            elif parts[0] == 'property' and element_type == 'vertex':
+                if parts[1] == 'list':
+                    vertex_properties.append((parts[4], 'list', True, parts[2], parts[3]))
+                else:
+                    vertex_properties.append((parts[2], parts[1], False, None, None))
+        type_map = {
+            'char':(np.int8,1),'uchar':(np.uint8,1),'short':(np.int16,2),'ushort':(np.uint16,2),
+            'int':(np.int32,4),'uint':(np.uint32,4),'float':(np.float32,4),'double':(np.float64,8),
+            'int8':(np.int8,1),'uint8':(np.uint8,1),'int16':(np.int16,2),'uint16':(np.uint16,2),
+            'int32':(np.int32,4),'uint32':(np.uint32,4),'float32':(np.float32,4),'float64':(np.float64,8)
+        }
+        has_list = any(p[2] for p in vertex_properties)
+        points = np.zeros((num_vertices, 3), dtype=np.float32)
+        colors = None
+        faces  = None
+        prop_names = [p[0] for p in vertex_properties]
+        has_color  = all(c in prop_names for c in ('red','green','blue'))
+        if has_color:
+            colors = np.zeros((num_vertices, 3), dtype=np.uint8)
+        if 'binary' in (format_type or ''):
+            fixed_props = [p for p in vertex_properties if not p[2]]
+            stride = sum(type_map[p[1]][1] for p in fixed_props if p[1] in type_map)
+            raw = f.read(stride * num_vertices)
+            offset = 0
+            col_offsets = {}
+            for p in fixed_props:
+                if p[1] in type_map:
+                    col_offsets[p[0]] = offset
+                    offset += type_map[p[1]][1]
+            dt_fields = []
+            for p in fixed_props:
+                if p[1] in type_map:
+                    dt_fields.append((p[0], type_map[p[1]][0]))
+            if dt_fields:
+                dt = np.dtype(dt_fields)
+                arr = np.frombuffer(raw, dtype=dt)
+                if 'x' in arr.dtype.names: points[:,0] = arr['x'].astype(np.float32)
+                if 'y' in arr.dtype.names: points[:,1] = arr['y'].astype(np.float32)
+                if 'z' in arr.dtype.names: points[:,2] = arr['z'].astype(np.float32)
+                if has_color and colors is not None:
+                    if 'red'   in arr.dtype.names: colors[:,0] = arr['red']
+                    if 'green' in arr.dtype.names: colors[:,1] = arr['green']
+                    if 'blue'  in arr.dtype.names: colors[:,2] = arr['blue']
+            if num_faces > 0:
+                faces_list = []
+                count_fmt = '>B' if 'big' in (format_type or '') else '<B'
+                idx_fmt   = '>I' if 'big' in (format_type or '') else '<I'
+                for _ in range(num_faces):
+                    cnt = struct.unpack(count_fmt, f.read(1))[0]
+                    idxs = list(struct.unpack(f'<{cnt}I', f.read(4*cnt)))
+                    if len(idxs) == 3: faces_list.append(idxs)
+                if faces_list: faces = np.array(faces_list, dtype=np.int32)
+        else:
+            for i in range(num_vertices):
+                vals = f.readline().decode('utf-8', errors='ignore').split()
+                if len(vals) >= 3:
+                    points[i] = [float(vals[0]), float(vals[1]), float(vals[2])]
+                    if has_color and colors is not None and len(vals) >= 6:
+                        ri = prop_names.index('red')   if 'red'   in prop_names else 3
+                        gi = prop_names.index('green') if 'green' in prop_names else 4
+                        bi = prop_names.index('blue')  if 'blue'  in prop_names else 5
+                        try: colors[i] = [int(vals[ri]), int(vals[gi]), int(vals[bi])]
+                        except: pass
+            if num_faces > 0:
+                faces_list = []
+                for _ in range(num_faces):
+                    vals = f.readline().decode('utf-8', errors='ignore').split()
+                    if vals and int(vals[0]) == 3 and len(vals) >= 4:
+                        faces_list.append([int(vals[1]), int(vals[2]), int(vals[3])])
+                if faces_list: faces = np.array(faces_list, dtype=np.int32)
+    return points, colors, faces
+
+
 class ModelServerHandler(http.server.BaseHTTPRequestHandler):
+
     model_path = ""
     
     def log_message(self, format, *args):
@@ -2394,35 +2567,33 @@ class MainWindow(QMainWindow):
             return
 
         self.last_accessed_dir = os.path.dirname(file_path)
-        
-        # Load cloud to detect colors
-        self.console_text.append(f"[STANDALONE] Checking point cloud metadata: {file_path}...")
-        try:
-            import point_cloud_io
-            res = point_cloud_io.load_point_cloud(file_path, self.console_text.append)
-            if not res.success or res.cloud is None:
-                raise RuntimeError(f"Failed to read point cloud: {', '.join(res.warnings)}")
-            has_colors = res.has_colors
-            self.console_text.append(f"[STANDALONE] Point cloud loaded successfully. Points: {res.point_count:,} | Colors: {has_colors}")
-        except Exception as e:
-            self.console_text.append(f"[ERROR] Failed to load standalone cloud: {e}")
-            QMessageBox.critical(self, "Import Error", f"Failed to load point cloud file:\n\n{e}")
-            return
 
+        # 1. Instant header-peek for color detection (reads ~4 KB, never blocks)
+        import point_cloud_io
+        has_colors = point_cloud_io.peek_has_colors(file_path)
+
+        # 2. Update UI immediately — no freeze
         self.standalone_cloud_path = file_path
         filename = os.path.basename(file_path)
         self.standalone_cloud_label.setText(f"✓ {filename}")
         self.standalone_cloud_container.setVisible(True)
-        
-        # Switch UI to standalone mode
         self._enter_standalone_mode(has_colors)
-        
-        # Automatically select Dense Point Cloud mode and reload viewer to preview the cloud
+
+        # 3. Kick off viewer preview in background (non-blocking)
         self.view_scene_btn.setEnabled(True)
         self.viewer_widget.mode_select.blockSignals(True)
         self.viewer_widget.mode_select.setCurrentIndex(1)
         self.viewer_widget.mode_select.blockSignals(False)
         self._reload_viewer(file_path)
+
+        # 4. Load full point cloud metadata in background (point count, normals, etc.)
+        self.console_text.append(f"[STANDALONE] Loading point cloud metadata in background: {filename}...")
+        self._cloud_import_worker = CloudImportWorker(file_path, parent=self)
+        self._cloud_import_worker.finished.connect(self._on_cloud_import_done)
+        self._cloud_import_worker.error.connect(
+            lambda err: self.console_text.append(f"[WARNING] Background cloud load warning: {err}")
+        )
+        self._cloud_import_worker.start()
 
     def _clear_standalone_cloud_clicked(self):
         self.standalone_cloud_path = None
@@ -3798,6 +3969,61 @@ class MainWindow(QMainWindow):
             )
             self.cameras_visual.parent = self.view.scene
 
+    def _render_in_vispy_from_data(self, points, colors, faces, texcoords, texture_path, mode):
+        """Upload pre-parsed geometry arrays to the VisPy scene (UI thread only).
+        Called by _on_viewer_data_ready after ViewerLoadWorker finishes background parsing.
+        """
+        import numpy as np
+        from PIL import Image
+        self._clear_visuals()
+
+        if points is None or len(points) == 0:
+            self.canvas.native.hide()
+            self.viewer_widget.fallback_label.setText("No valid 3D points or faces could be parsed.")
+            self.viewer_widget.fallback_label.show()
+            return
+
+        if mode == 2 and faces is not None and len(faces) > 0:
+            mesh_colors = None
+            if colors is not None and len(colors) > 0:
+                mesh_colors = colors.astype(np.float32) / 255.0
+            self.mesh_visual = scene.visuals.Mesh(
+                vertices=points, faces=faces,
+                vertex_colors=mesh_colors, color='white',
+                parent=self.view.scene
+            )
+            if texture_path and texcoords is not None and len(texcoords) > 0:
+                try:
+                    texture_image = np.array(Image.open(texture_path))
+                    from vispy.visuals.filters import TextureFilter
+                    self.mesh_visual.attach(TextureFilter(texture_image, texcoords))
+                except Exception as tex_err:
+                    self.console_text.append(f"[WARNING] Could not apply texture filter: {tex_err}")
+        else:
+            marker_colors = 'white'
+            if colors is not None and len(colors) > 0:
+                mc = colors.astype(np.float32) / 255.0
+                if mc.shape[1] == 3:
+                    mc = np.hstack([mc, np.ones((mc.shape[0], 1), dtype=np.float32)])
+                marker_colors = mc
+            self.markers_visual = scene.visuals.Markers(parent=self.view.scene)
+            self.markers_visual.set_data(pos=points, face_color=marker_colors, size=2, edge_width=0)
+
+        self._last_points = points
+        self.canvas.native.show()
+        self.viewer_widget.fallback_label.hide()
+
+        bbox_min = np.min(points, axis=0)
+        bbox_max = np.max(points, axis=0)
+        center = (bbox_min + bbox_max) / 2.0
+        scale  = np.max(bbox_max - bbox_min)
+        self.view.camera.center   = center
+        self.view.camera.distance = max(0.1, scale * 1.5)
+        if self.viewer_widget.cam_select.currentIndex() == 1:
+            self.view.camera.elevation = 30
+            self.view.camera.azimuth   = 45
+        self.canvas.update()
+
     def _render_in_vispy(self, file_path, mode):
         import numpy as np
         from PIL import Image
@@ -3956,27 +4182,72 @@ class MainWindow(QMainWindow):
             
         self.canvas.update()
 
+    def _on_cloud_import_done(self, res, file_path):
+        """Called on the UI thread when background cloud import finishes."""
+        if res.success:
+            self.console_text.append(
+                f"[STANDALONE] Point cloud ready. Points: {res.point_count:,} | "
+                f"Colors: {res.has_colors} | BBox diag: {res.bbox_diagonal:.2f}"
+            )
+            # Refine vertex color toggle now that we have the definitive answer
+            self.vertex_color_toggle.setChecked(res.has_colors)
+            self.vertex_color_toggle.setVisible(res.has_colors)
+        else:
+            warnings_str = ', '.join(res.warnings) if res.warnings else 'unknown error'
+            self.console_text.append(f"[WARNING] Point cloud load issues: {warnings_str}")
+
     def _reload_viewer(self, file_path):
         if not os.path.exists(file_path):
-            self.viewer_widget.fallback_label.setText(f"File not found: {os.path.basename(file_path)}\nRun reconstruction to generate this file first.")
+            self.viewer_widget.fallback_label.setText(
+                f"File not found: {os.path.basename(file_path)}\nRun reconstruction to generate this file first."
+            )
             self.viewer_widget.fallback_label.show()
             self.console_text.append(f"[WARNING] 3D file not found: {file_path}")
             return
-            
+
         mode = self.viewer_widget.mode_select.currentIndex()
         mode_names = ["Sparse Point Cloud", "Dense Point Cloud", "Textured Mesh"]
         mode_name = mode_names[mode] if mode < len(mode_names) else "3D Scene"
-        
-        self.viewer_widget.fallback_label.setText(f"Loading {mode_name}...\n(This may take a few seconds for large models)")
+
+        self.viewer_widget.fallback_label.setText(f"Loading {mode_name}...\n(Parsing geometry in background…)")
         self.viewer_widget.fallback_label.show()
         if self.canvas and self.canvas.native:
             self.canvas.native.hide()
-            
-        # Force Qt event loop to repaint UI before we enter the heavy OBJ/PLY parsing
         QApplication.processEvents()
-        
+
+        # For mode 0 (sparse), keep existing sync path (reads COLMAP binary, fast)
+        # For OBJ files (mode 2), keep sync path (OBJ reader is already needed on UI thread)
+        ext = os.path.splitext(file_path)[1].lower()
+        use_background = mode in (1, 2) and ext != '.obj'
+
+        if use_background:
+            # Spawn background parser — UI stays responsive
+            self._viewer_load_worker = ViewerLoadWorker(file_path, mode, parent=self)
+            self._viewer_load_worker.finished.connect(
+                lambda pts, cols, fcs, tcs, tex: self._on_viewer_data_ready(pts, cols, fcs, tcs, tex, file_path, mode)
+            )
+            self._viewer_load_worker.error.connect(lambda err: (
+                self.console_text.append(f"[ERROR] VisPy background load failed: {err}"),
+                self.viewer_widget.fallback_label.setText(f"Rendering failed:\n{err}"),
+                self.viewer_widget.fallback_label.show()
+            ))
+            self._viewer_load_worker.start()
+        else:
+            # Sync path for sparse (mode 0) and OBJ (mode 2)
+            try:
+                self._render_in_vispy(file_path, mode)
+                self.console_text.append(f"[INFO] Successfully rendered {os.path.basename(file_path)} in VisPy canvas.")
+            except Exception as e:
+                self.console_text.append(f"[ERROR] VisPy rendering failed: {e}")
+                self.viewer_widget.fallback_label.setText(f"Rendering failed:\n{e}")
+                self.viewer_widget.fallback_label.show()
+                if self.canvas and self.canvas.native:
+                    self.canvas.native.hide()
+
+    def _on_viewer_data_ready(self, points, colors, faces, texcoords, texture_path, file_path, mode):
+        """Called on the UI thread once ViewerLoadWorker has finished parsing."""
         try:
-            self._render_in_vispy(file_path, mode)
+            self._render_in_vispy_from_data(points, colors, faces, texcoords, texture_path, mode)
             self.console_text.append(f"[INFO] Successfully rendered {os.path.basename(file_path)} in VisPy canvas.")
         except Exception as e:
             self.console_text.append(f"[ERROR] VisPy rendering failed: {e}")

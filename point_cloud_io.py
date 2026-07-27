@@ -94,7 +94,55 @@ def load_point_cloud(file_path: str, log_fn: Optional[Callable[[str], None]] = N
     )
 
 
+def peek_has_colors(file_path: str) -> bool:
+    """
+    Quickly checks whether a point cloud file contains vertex color data
+    by reading only the file header — NOT loading the full point cloud.
+    Supports PLY (binary & ASCII) and LAS/LAZ headers.
+    Falls back to True (assume colors present) for unsupported/unknown formats.
+    """
+    ext = os.path.splitext(file_path)[1].lower()
+    try:
+        if ext == '.ply':
+            # Read only the PLY ASCII header (max 4 KB) and look for RGB property declarations
+            with open(file_path, 'rb') as f:
+                header = b''
+                while len(header) < 4096:
+                    line = f.readline()
+                    if not line:
+                        break
+                    header += line
+                    if b'end_header' in line:
+                        break
+            header_str = header.decode('utf-8', errors='ignore').lower()
+            return any(
+                f'property {dtype} {ch}' in header_str
+                for dtype in ('uchar', 'uint8', 'float', 'float32')
+                for ch in ('red', 'green', 'blue', 'r', 'g', 'b')
+            )
+        elif ext in ('.las', '.laz'):
+            # laspy reads just the header without loading point data
+            try:
+                import laspy
+                las = laspy.read(file_path)
+                fmt_id = int(getattr(las.header.point_format, 'id', 0))
+                return fmt_id in (2, 3, 5, 7, 8, 10)
+            except Exception:
+                return True  # assume colors on failure
+        else:
+            # XYZ / PTS / TXT: read first non-comment data line, check column count >= 6
+            with open(file_path, 'r', errors='ignore') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        return len(line.split()) >= 6  # X Y Z R G B
+            return False
+    except Exception:
+        return True  # safe fallback — show toggle, let user decide
+
+
 def _load_las_laz(file_path: str, warnings: List[str], log: Callable[[str], None]):
+
     import open3d as o3d
     try:
         import laspy
