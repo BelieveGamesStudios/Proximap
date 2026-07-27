@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QFrame, QFileDialog, QTextEdit, QStackedWidget, QComboBox,
     QScrollArea, QTabWidget, QGridLayout, QCheckBox, QSlider,
     QMessageBox, QDialog, QColorDialog, QMenu, QSizePolicy, QInputDialog,
-    QLineEdit, QSpinBox
+    QLineEdit, QSpinBox, QDoubleSpinBox
 )
 
 from vispy import app, scene
