@@ -482,6 +482,9 @@ class ViewerWrapperWidget(QFrame):
                 color: #555555;
             }
         """)
+        self.action_new = self.file_menu.addAction("New Project")
+        self.action_new.setShortcut("Ctrl+N")
+        self.file_menu.addSeparator()
         self.action_save = self.file_menu.addAction("Save Project (.pxm)")
         self.action_load = self.file_menu.addAction("Load Project (.pxm)")
         self.action_recover = self.file_menu.addAction("Recover Last Session")
@@ -1458,6 +1461,7 @@ class MainWindow(QMainWindow):
         # step1_layout.addWidget(self.ref_cloud_container)
         step1_layout.addWidget(self.standalone_cloud_btn)
         step1_layout.addWidget(self.standalone_cloud_container)
+
         scroll_content_layout.addWidget(step1_box)
         
         # STEP 2: Process
@@ -1782,6 +1786,8 @@ class MainWindow(QMainWindow):
         self.viewer_widget.images_dropped.connect(self._on_files_dropped)
         self.viewer_widget.reload_requested.connect(self._reload_viewer)
         self.viewer_widget.camera_changed.connect(self._on_camera_changed)
+        self.viewer_widget.action_new.triggered.connect(self._new_project)
+        self.viewer_widget.btn_new_project.clicked.connect(self._new_project)
         self.viewer_widget.action_save.triggered.connect(self._save_project)
         self.viewer_widget.action_load.triggered.connect(self._load_project)
         self.viewer_widget.action_recover.triggered.connect(self._retrieve_last_session)
@@ -2469,6 +2475,7 @@ class MainWindow(QMainWindow):
         self.extraction_interval = interval
         self.extraction_blur = blur
         self.total_videos_to_extract = len(videos)
+        self.progress_bar.setValue(0)
         
         self.browse_btn.setEnabled(False)
         self.mobile_import_btn.setEnabled(False)
@@ -2496,7 +2503,6 @@ class MainWindow(QMainWindow):
         
         current_idx = self.total_videos_to_extract - len(self.extraction_queue)
         self.status_label.setText(f"Extracting {video_name} ({current_idx}/{self.total_videos_to_extract})...")
-        self.progress_bar.setValue(0)
         
         out_dir = os.path.join(get_reconstruction_out_dir(), "extracted_frames", video_stem)
         os.makedirs(out_dir, exist_ok=True)
@@ -2514,9 +2520,20 @@ class MainWindow(QMainWindow):
         self.extraction_worker.start()
 
     def _on_extraction_progress(self, current, total):
-        if total > 0:
-            pct = int((current / total) * 100)
-            self.progress_bar.setValue(pct)
+        if total > 0 and self.total_videos_to_extract > 0:
+            # 1-indexed video number (e.g. 1 out of 2)
+            current_video_idx = max(self.total_videos_to_extract - len(self.extraction_queue), 1)
+            
+            # Clamp current video percentage to max 1.0 (prevents VFR overflow jumping)
+            video_pct = min(max(current / total, 0.0), 1.0)
+            
+            # Calculate overall progress across all queued videos
+            overall_pct = int(((current_video_idx - 1 + video_pct) / self.total_videos_to_extract) * 100)
+            overall_pct = min(max(overall_pct, 0), 99)
+            
+            # Only allow progress bar to move forward — never backward
+            if overall_pct > self.progress_bar.value():
+                self.progress_bar.setValue(overall_pct)
             
     def _on_video_extraction_finished(self, result):
         import glob
@@ -3449,15 +3466,62 @@ class MainWindow(QMainWindow):
             
         self._update_file_menu_states()
 
+    def _new_project(self):
+        """Resets the current project session: clears loaded photos, standalone cloud, viewer, and UI state."""
+        has_content = bool(self.image_list or self.standalone_cloud_path or self.viewer_widget.current_mvs_dir)
+        if has_content:
+            reply = QMessageBox.question(
+                self,
+                "New Project",
+                "Start a new project? This will clear all loaded photos, standalone point clouds, and current 3D viewer content.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        # 1. Clear standalone point cloud state if active
+        if self.standalone_cloud_path:
+            self.standalone_cloud_path = None
+            self.standalone_cloud_label.setText("")
+            self.standalone_cloud_container.setVisible(False)
+
+        # 2. Reset images and video lists & photos tab
+        self.image_list = []
+        self.extracted_frames = []
+        if hasattr(self, 'photos_tab'):
+            self.photos_tab.set_images([])
+
+        # 3. Terminate & clear 3D viewer
+        self.viewer_widget.current_mvs_dir = None
+        self._terminate_viewer()
+        self.view_scene_btn.setEnabled(False)
+
+        # 4. Re-enable Step 1 buttons and restore photogrammetry settings panel
+        self._exit_standalone_mode()
+        self.bg_remove_btn.setEnabled(False)
+
+        # 5. Reset progress and status bar
+        self._set_process_btn_state("idle")
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Step 1/5: Waiting for images...")
+
+        # 6. Update menu states and log
+        self._update_file_menu_states()
+        self.console_text.append("[PROJECT] Created a new project session. Workspace and viewer cleared.")
+
     def _update_file_menu_states(self):
         # Is reconstruction running?
         is_running = (self.worker is not None and self.worker.isRunning())
         
         if is_running:
+            self.viewer_widget.action_new.setEnabled(False)
             self.viewer_widget.action_save.setEnabled(False)
             self.viewer_widget.action_load.setEnabled(False)
             self.viewer_widget.action_recover.setEnabled(False)
             return
+
+        self.viewer_widget.action_new.setEnabled(True)
             
         # We can save if we have a valid MVS directory containing files
         mvs_dir = self.viewer_widget.current_mvs_dir
@@ -4949,7 +5013,7 @@ class VideoPresetModal(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Video Detected — Choose Frame Extraction Quality")
-        self.setFixedSize(500, 420)
+        self.setMinimumWidth(520)
         self.setModal(True)
         self.setStyleSheet("""
             QDialog {
@@ -5008,7 +5072,7 @@ class VideoPresetModal(QDialog):
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(15)
+        main_layout.setSpacing(12)
         
         info_label = QLabel("Proximap detected one or more video files. Select a frame extraction preset below:", self)
         info_label.setWordWrap(True)
@@ -5049,6 +5113,85 @@ class VideoPresetModal(QDialog):
         self.radio_buttons[1].setChecked(True)
         self.update_card_styles()
 
+        # Advanced Options Collapsible Section
+        self.advanced_toggle_btn = QPushButton("▸ Advanced Options", self)
+        self.advanced_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.advanced_toggle_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #888888;
+                border: none;
+                text-align: left;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 4px 0px;
+            }
+            QPushButton:hover {
+                color: #00E676;
+            }
+        """)
+        self.advanced_toggle_btn.clicked.connect(self._toggle_advanced)
+        main_layout.addWidget(self.advanced_toggle_btn)
+
+        self.advanced_panel = QFrame(self)
+        self.advanced_panel.setVisible(False)
+        self.advanced_panel.setStyleSheet("""
+            QFrame {
+                background-color: #1A1A1A;
+                border: 1px solid #2D2D2D;
+                border-radius: 6px;
+                padding: 8px;
+            }
+            QLabel {
+                color: #aaaaaa;
+                font-size: 11px;
+            }
+            QCheckBox {
+                color: #e0e0e0;
+                font-size: 11px;
+            }
+        """)
+        adv_layout = QVBoxLayout(self.advanced_panel)
+        adv_layout.setSpacing(8)
+
+        self.cb_override_blur = QCheckBox("Override Blur Filter Threshold", self.advanced_panel)
+        self.cb_override_blur.toggled.connect(self._on_override_toggled)
+        adv_layout.addWidget(self.cb_override_blur)
+
+        blur_controls_layout = QHBoxLayout()
+        blur_controls_layout.setContentsMargins(15, 0, 0, 0)
+        
+        lbl_blur_thresh = QLabel("Blur Threshold:", self.advanced_panel)
+        self.sp_blur_thresh = QDoubleSpinBox(self.advanced_panel)
+        self.sp_blur_thresh.setRange(0.0, 500.0)
+        self.sp_blur_thresh.setSingleStep(5.0)
+        self.sp_blur_thresh.setValue(25.0)
+        self.sp_blur_thresh.setEnabled(False)
+        self.sp_blur_thresh.setStyleSheet("""
+            QDoubleSpinBox {
+                background-color: #2D2D2D;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 4px;
+            }
+            QDoubleSpinBox:disabled {
+                background-color: #1A1A1A;
+                color: #555555;
+            }
+        """)
+
+        self.cb_disable_blur = QCheckBox("Disable blur filter entirely", self.advanced_panel)
+        self.cb_disable_blur.setEnabled(False)
+        self.cb_disable_blur.toggled.connect(self._on_disable_blur_toggled)
+
+        blur_controls_layout.addWidget(lbl_blur_thresh)
+        blur_controls_layout.addWidget(self.sp_blur_thresh)
+        blur_controls_layout.addWidget(self.cb_disable_blur)
+        adv_layout.addLayout(blur_controls_layout)
+
+        main_layout.addWidget(self.advanced_panel)
+
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         
@@ -5064,6 +5207,19 @@ class VideoPresetModal(QDialog):
         btn_layout.addWidget(self.start_btn)
         main_layout.addLayout(btn_layout)
 
+    def _toggle_advanced(self):
+        is_visible = not self.advanced_panel.isVisible()
+        self.advanced_panel.setVisible(is_visible)
+        self.advanced_toggle_btn.setText("▾ Advanced Options" if is_visible else "▸ Advanced Options")
+        self.adjustSize()
+
+    def _on_override_toggled(self, checked: bool):
+        self.cb_disable_blur.setEnabled(checked)
+        self.sp_blur_thresh.setEnabled(checked and not self.cb_disable_blur.isChecked())
+
+    def _on_disable_blur_toggled(self, checked: bool):
+        self.sp_blur_thresh.setEnabled(not checked and self.cb_override_blur.isChecked())
+
     def update_card_styles(self):
         for i, rb in enumerate(self.radio_buttons):
             card = self.cards[i]
@@ -5078,7 +5234,15 @@ class VideoPresetModal(QDialog):
         idx = self.btn_group.checkedId()
         if idx == -1:
             idx = 1
-        return self.presets[idx]
+        name, desc, interval, blur = self.presets[idx]
+
+        if self.cb_override_blur.isChecked():
+            if self.cb_disable_blur.isChecked():
+                blur = None
+            else:
+                blur = float(self.sp_blur_thresh.value())
+
+        return (name, desc, interval, blur)
 
 
 class VideoExtractionWorker(QThread):
