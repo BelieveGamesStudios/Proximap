@@ -2570,7 +2570,11 @@ class MainWindow(QMainWindow):
 
         # 1. Instant header-peek for color detection (reads ~4 KB, never blocks)
         import point_cloud_io
-        has_colors = point_cloud_io.peek_has_colors(file_path)
+        if not hasattr(point_cloud_io, "peek_has_colors"):
+            import importlib
+            importlib.reload(point_cloud_io)
+        peek_fn = getattr(point_cloud_io, "peek_has_colors", lambda path: True)
+        has_colors = peek_fn(file_path)
 
         # 2. Update UI immediately — no freeze
         self.standalone_cloud_path = file_path
