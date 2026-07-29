@@ -1,0 +1,8 @@
+PySide6>=6.0.0
+numpy
+pillow
+opencv-python
+trimesh
+vispy
+PyOpenGL
+pyrr

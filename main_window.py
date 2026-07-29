@@ -2,14 +2,26 @@ import os
 import sys
 import subprocess
 import ctypes
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QLabel, QPushButton, QProgressBar, QRadioButton, QButtonGroup,
-    QFrame, QFileDialog, QTextEdit, QStackedWidget, QComboBox,
-    QScrollArea, QTabWidget, QGridLayout, QCheckBox, QSlider,
-    QMessageBox, QDialog, QColorDialog, QMenu, QSizePolicy, QInputDialog,
-    QLineEdit, QSpinBox, QDoubleSpinBox
-)
+try:
+    from PySide6.QtWidgets import (
+        QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
+        QLabel, QPushButton, QProgressBar, QRadioButton, QButtonGroup,
+        QFrame, QFileDialog, QTextEdit, QStackedWidget, QComboBox,
+        QScrollArea, QTabWidget, QGridLayout, QCheckBox, QSlider,
+        QMessageBox, QDialog, QColorDialog, QMenu, QSizePolicy, QInputDialog,
+        QLineEdit, QSpinBox, QDoubleSpinBox
+    )
+except ModuleNotFoundError as e:
+    missing_mod = getattr(e, 'name', 'PySide6')
+    sys.exit(
+        f"\n[ERROR] Missing required dependency: '{missing_mod}'\n\n"
+        "To install all required dependencies, run:\n"
+        "    pip install -r requirements.txt\n\n"
+        "If you are using a virtual environment, activate it first:\n"
+        "    source venv/bin/activate  # (Linux / macOS)\n"
+        "    venv\\Scripts\\activate   # (Windows)\n"
+        "    pip install -r requirements.txt\n"
+    )
 
 from vispy import app, scene
 app.use_app("pyside6")
