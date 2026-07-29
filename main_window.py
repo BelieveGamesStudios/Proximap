@@ -1787,7 +1787,6 @@ class MainWindow(QMainWindow):
         self.viewer_widget.reload_requested.connect(self._reload_viewer)
         self.viewer_widget.camera_changed.connect(self._on_camera_changed)
         self.viewer_widget.action_new.triggered.connect(self._new_project)
-        self.viewer_widget.btn_new_project.clicked.connect(self._new_project)
         self.viewer_widget.action_save.triggered.connect(self._save_project)
         self.viewer_widget.action_load.triggered.connect(self._load_project)
         self.viewer_widget.action_recover.triggered.connect(self._retrieve_last_session)
