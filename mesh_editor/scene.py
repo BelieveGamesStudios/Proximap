@@ -606,11 +606,11 @@ class Scene:
 
 
 def apply_texture_to_meshes(meshes, texture_path):
+    import os
+    from PIL import Image
+
     if not texture_path or not os.path.exists(texture_path):
         return
-    
-    from PIL import Image
-    import os
     
     ext = os.path.splitext(texture_path)[1].lower()
     img_path = texture_path
@@ -811,6 +811,59 @@ def export_scene_to_file(scene, file_path: str):
     export_scene.apply_transform(correction)
         
     # Export to chosen format (Scene supports glb, gltf, obj)
-    export_scene.export(file_path)
+    if file_path.lower().endswith(".usdz"):
+        merged = trimesh.util.concatenate(list(export_scene.geometry.values()))
+        _export_usdz_from_trimesh(merged, file_path)
+    else:
+        export_scene.export(file_path)
+
+
+def _export_usdz_from_trimesh(mesh, file_path: str):
+    """
+    Export a trimesh Trimesh object to a .usdz file using a pure-Python writer.
+    USDZ is a ZIP64 archive containing a USDA (ASCII USD) text file.
+    No openusd/pxr installation required.
+    """
+    import zipfile
+    import io
+    import numpy as np
+
+    # Handle both Trimesh and Scene instances (if concatenated failed or passed directly)
+    if hasattr(mesh, "geometry") and len(mesh.geometry) > 0:
+        import trimesh
+        mesh = trimesh.util.concatenate(list(mesh.geometry.values()))
+
+    vertices = np.asarray(mesh.vertices, dtype=np.float32)
+    faces = np.asarray(mesh.faces, dtype=np.int32)
+    
+    # Format USD arrays
+    pts = ", ".join(f"({v[0]:.6f}, {v[1]:.6f}, {v[2]:.6f})" for v in vertices)
+    cnts = ", ".join(["3"] * len(faces))
+    idxs = ", ".join(str(i) for f in faces for i in f)
+    
+    usda = f"""#usda 1.0
+(
+    defaultPrim = "Root"
+    metersPerUnit = 1
+    upAxis = "Y"
+)
+
+def Xform "Root"
+{{
+    def Mesh "Mesh"
+    {{
+        int[] faceVertexCounts = [{cnts}]
+        int[] faceVertexIndices = [{idxs}]
+        point3f[] points = [{pts}]
+        uniform token subdivisionScheme = "none"
+    }}
+}}
+"""
+    # USDZ specification requires uncompressed files aligned properly inside the zip file
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
+        zf.writestr("model.usda", usda)
+    with open(file_path, "wb") as f:
+        f.write(buf.getvalue())
 
 

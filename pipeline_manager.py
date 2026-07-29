@@ -50,13 +50,18 @@ class PipelineWorker(QThread):
     log_message = Signal(str)
     finished = Signal(bool, str)
 
-    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, parent=None):
+    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, mapper_mode: str = "incremental", ref_cloud_path: str = None, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, parent=None):
         super().__init__(parent)
         self.image_dir = image_dir
         self.output_dir = output_dir
         self.quality_preset = quality_preset
         self.gpu_mode = gpu_mode
         self.has_plain_surfaces = has_plain_surfaces
+        self.mapper_mode = mapper_mode
+        self.ref_cloud_path = ref_cloud_path
+        self.mesh_mode = mesh_mode
+        self.poisson_depth = poisson_depth
+        self.custom_params = custom_params
         self.is_running = True
         self.toolchain_map = self._load_toolchain_map()
         self.last_output_lines = []
@@ -259,6 +264,7 @@ class PipelineWorker(QThread):
 
             if log_handle:
                 # Log-tailing loop for OpenMVS
+                last_log_time = time.time()
                 while True:
                     if not self.is_running:
                         proc.terminate()
@@ -299,11 +305,20 @@ class PipelineWorker(QThread):
                                         self.log_message.emit(clean_line)
                                     self.last_output_lines.append(clean_line)
                             break
+                        # Emit a heartbeat every 30s of silence so the UI doesn't look frozen
+                        silent_secs = time.time() - last_log_time
+                        if silent_secs >= 30.0:
+                            elapsed = int(time.time() - start_time)
+                            self.log_message.emit(
+                                f"[RUNNING] {exe_name} still processing... ({elapsed}s elapsed, pipeline is active)"
+                            )
+                            last_log_time = time.time()
                         time.sleep(0.05)
                         continue
 
                     clean_line = line.strip()
                     if clean_line:
+                        last_log_time = time.time()  # reset silence timer on real output
                         if line_parser:
                             parsed = line_parser(clean_line)
                             if parsed is not None:
@@ -471,6 +486,26 @@ class PipelineWorker(QThread):
             refine_res     = "0"
             texture_res    = "0"
 
+        # Override presets with custom parameters if custom overrides checkbox was checked
+        if self.custom_params:
+            self.log_message.emit("[INFO] Custom parameter overrides enabled. Overriding quality preset configuration.")
+            if "colmap_max_num_features" in self.custom_params:
+                colmap_max_num_features = self.custom_params["colmap_max_num_features"]
+            if "colmap_max_num_matches" in self.custom_params:
+                colmap_max_num_matches = self.custom_params["colmap_max_num_matches"]
+            if "guided_matching" in self.custom_params:
+                guided_matching = self.custom_params["guided_matching"]
+            if "run_bundle_adjuster" in self.custom_params:
+                run_bundle_adjuster = self.custom_params["run_bundle_adjuster"]
+            if "densify_res" in self.custom_params:
+                densify_res = self.custom_params["densify_res"]
+            if "densify_views" in self.custom_params:
+                densify_views = self.custom_params["densify_views"]
+            if "refine_scales" in self.custom_params:
+                refine_scales = self.custom_params["refine_scales"]
+            if "texture_res" in self.custom_params:
+                texture_res = self.custom_params["texture_res"]
+
         # =========================================================================
         # STEP 1/9 — Image Preparation
         # =========================================================================
@@ -559,7 +594,7 @@ class PipelineWorker(QThread):
             cmd_extract_cpu.extend(additional_flags)
         self._feature_counts = []
         if not self._run_with_gpu_fallback(
-            cmd_extract_gpu, cmd_extract_cpu, timeout=3600.0, env=colmap_env,
+            cmd_extract_gpu, cmd_extract_cpu, timeout=7200.0, env=colmap_env,
             line_parser=self._parse_feature_extraction_line
         ):
             return False
@@ -614,7 +649,7 @@ class PipelineWorker(QThread):
         ]
         self._match_counts = []
         if not self._run_with_gpu_fallback(
-            cmd_match_gpu, cmd_match_cpu, timeout=3600.0, env=colmap_env,
+            cmd_match_gpu, cmd_match_cpu, timeout=7200.0, env=colmap_env,
             line_parser=self._parse_matching_line
         ):
             return False
@@ -632,7 +667,7 @@ class PipelineWorker(QThread):
             self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_distance", "0.9")
             self._using_gpu_sift = False
             if not self._run_process_realtime(
-                relaxed_cpu_match, timeout=3600.0, env=colmap_env,
+                relaxed_cpu_match, timeout=7200.0, env=colmap_env,
                 line_parser=self._parse_matching_line
             ):
                 return False
@@ -653,7 +688,8 @@ class PipelineWorker(QThread):
         # =========================================================================
         # STEP 4/9 — Sparse Reconstruction (Mapper)
         # =========================================================================
-        self.status_changed.emit("Step 4/9: Estimating Camera Poses (SfM)...")
+        self._triangulated_points = 0
+        self._registered_count = 0
         sparse_dir = self._to_colmap_path(os.path.join(colmap_out, "sparse"))
         if os.path.exists(sparse_dir):
             try:
@@ -662,7 +698,7 @@ class PipelineWorker(QThread):
                 self.log_message.emit(f"[WARNING] Failed to clean sparse folder: {e}")
         os.makedirs(sparse_dir, exist_ok=True)
 
-        cmd_mapper = [
+        cmd_incremental = [
             colmap_exe, "mapper",
             "--database_path", database_path,
             "--image_path", working_image_dir,
@@ -675,10 +711,34 @@ class PipelineWorker(QThread):
             "--Mapper.abs_pose_min_inlier_ratio", "0.25",
             "--Mapper.num_threads", str(num_threads),
         ]
-        self._triangulated_points = 0
-        self._registered_count = 0
-        if not self._run_process_realtime(cmd_mapper, timeout=3600.0, env=colmap_env, line_parser=self._parse_mapper_line):
-            return False
+
+        if self.mapper_mode == "global":
+            self.status_changed.emit("Step 4/9: Estimating Camera Poses (GLOMAP Global SfM)...")
+            self.log_message.emit("[INFO] SfM Mapper: GLOMAP global_mapper selected.")
+            cmd_global = [
+                colmap_exe, "global_mapper",
+                "--database_path", database_path,
+                "--image_path", working_image_dir,
+                "--output_path", sparse_dir,
+                "--GlobalMapper.min_num_matches", "15",
+                "--GlobalMapper.num_threads", str(num_threads),
+                "--GlobalMapper.ba_num_iterations", str(ba_global_max_refinements),
+            ]
+            ok = self._run_process_realtime(cmd_global, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line)
+            if not ok or not self._select_best_sparse_model(sparse_dir):
+                self.log_message.emit("[WARNING] GLOMAP global_mapper failed or produced no model. Falling back to COLMAP incremental mapper...")
+                if os.path.exists(sparse_dir):
+                    try:
+                        shutil.rmtree(sparse_dir)
+                    except Exception:
+                        pass
+                os.makedirs(sparse_dir, exist_ok=True)
+                if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
+                    return False
+        else:
+            self.status_changed.emit("Step 4/9: Estimating Camera Poses (SfM)...")
+            if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
+                return False
 
         best_model_dir = self._to_colmap_path(self._select_best_sparse_model(sparse_dir)) if self._select_best_sparse_model(sparse_dir) else None
         if not best_model_dir:
@@ -792,8 +852,22 @@ class PipelineWorker(QThread):
         self.progress_changed.emit(80)
 
         # =========================================================================
+        # STEP 6b — Optional Reference Point Cloud Alignment & Fusion
+        # =========================================================================
+        fused_mesh_name = self._run_reference_cloud_fusion(mvs_out)
+
+        # =========================================================================
         # STEP 7/9 — Surface Mesh Reconstruction
         # =========================================================================
+        if self.mesh_mode == "poisson":
+            poisson_ok = self._run_poisson_reconstruction(mvs_out, self.poisson_depth)
+            if poisson_ok:
+                self.log_message.emit("[POISSON] Poisson reconstruction completed successfully. Skipping OpenMVS meshing, refinement, and texturing.")
+                self.progress_changed.emit(99)
+                return True
+            else:
+                self.log_message.emit("[WARNING] Poisson reconstruction failed. Falling back to default OpenMVS Delaunay meshing pipeline...")
+
         self.status_changed.emit("Step 7/9: Reconstructing Surface Mesh...")
         mvs_mesh_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["ReconstructMesh"])
 
@@ -802,22 +876,31 @@ class PipelineWorker(QThread):
         if target_scene == "scene.mvs":
             self.log_message.emit("[WARNING] scene_dense.mvs not found. Meshing from sparse scene.mvs.")
 
-        cmd = [
-            mvs_mesh_exe,
-            target_scene,
-            "--remove-spurious", "20",
-            "--remove-spikes",   "1",
-            "--close-holes",     "30",
-            "--smooth",          "2",
-        ]
-        self._mesh_vertices = 0
-        self._mesh_faces = 0
-        self._spurious_removed = 0
-        self._spikes_removed = 0
-        self._holes_closed = 0
-        if not self._run_process_realtime(cmd, timeout=1800.0, cwd=mvs_out, env=env, line_parser=self._parse_mesh_line):
-            return False
-        self._emit_mesh_summary()
+        if fused_mesh_name and os.path.exists(os.path.join(mvs_out, fused_mesh_name)):
+            self.log_message.emit(f"[INFO] Skipping ReconstructMesh (Delaunay) — using Reference Cloud fused Poisson mesh: {fused_mesh_name}")
+            mesh_input = fused_mesh_name
+        else:
+            cmd = [
+                mvs_mesh_exe,
+                target_scene,
+                "--remove-spurious", "20",
+                "--remove-spikes",   "1",
+                "--close-holes",     "30",
+                "--smooth",          "2",
+            ]
+            self._mesh_vertices = 0
+            self._mesh_faces = 0
+            self._spurious_removed = 0
+            self._spikes_removed = 0
+            self._holes_closed = 0
+            if not self._run_process_realtime(cmd, timeout=1800.0, cwd=mvs_out, env=env, line_parser=self._parse_mesh_line):
+                return False
+            self._emit_mesh_summary()
+            if target_scene == "scene_dense.mvs":
+                mesh_input = "scene_dense_mesh.ply"
+            else:
+                mesh_input = "scene_mesh.ply"
+
         self.progress_changed.emit(88)
 
         # =========================================================================
@@ -826,13 +909,8 @@ class PipelineWorker(QThread):
         self.status_changed.emit("Step 8/9: Refining Mesh Geometry...")
         mvs_refine_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["RefineMesh"])
 
-        if target_scene == "scene_dense.mvs":
-            mesh_input = "scene_dense_mesh.ply"
-        else:
-            mesh_input = "scene_mesh.ply"
-
         if not os.path.exists(os.path.join(mvs_out, mesh_input)):
-            for candidate in ["scene_dense_mesh.ply", "scene_mesh.ply"]:
+            for candidate in ["scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
                 if os.path.exists(os.path.join(mvs_out, candidate)):
                     mesh_input = candidate
                     break
@@ -869,7 +947,7 @@ class PipelineWorker(QThread):
         mvs_texture_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["TextureMesh"])
 
         texture_mesh_ply = None
-        for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+        for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
             if os.path.exists(os.path.join(mvs_out, candidate)):
                 texture_mesh_ply = candidate
                 break
@@ -1098,6 +1176,74 @@ class PipelineWorker(QThread):
                     best_count = size
                     best_dir = model_dir
         return best_dir
+
+    def _run_reference_cloud_fusion(self, mvs_out: str) -> str | None:
+        """
+        Step 6b: Optional reference cloud alignment, gap fusion, and Poisson meshing.
+        Returns the filename of the generated fused mesh PLY, or None if skipped/failed.
+        """
+        if not self.ref_cloud_path or not os.path.exists(self.ref_cloud_path):
+            return None
+
+        self.status_changed.emit("Step 6b: Aligning & Fusing Reference Cloud...")
+        self.log_message.emit(f"[REF_CLOUD] Starting reference cloud alignment and fusion pipeline...")
+
+        dense_ply = os.path.join(mvs_out, "scene_dense.ply")
+        if not os.path.exists(dense_ply):
+            dense_ply = os.path.join(mvs_out, "scene.ply")
+        if not os.path.exists(dense_ply):
+            self.log_message.emit("[WARNING] No dense or sparse PLY cloud found for reference cloud alignment. Skipping fusion.")
+            return None
+
+        try:
+            import point_cloud_io
+            import cloud_aligner
+            import cloud_fusion
+            import open3d as o3d
+
+            # 1. Load point clouds
+            ref_load = point_cloud_io.load_point_cloud(self.ref_cloud_path, self.log_message.emit)
+            if not ref_load.success or ref_load.cloud is None:
+                self.log_message.emit(f"[WARNING] Failed to load reference cloud: {'; '.join(ref_load.warnings)}. Skipping fusion.")
+                return None
+
+            dense_load = point_cloud_io.load_point_cloud(dense_ply, self.log_message.emit)
+            if not dense_load.success or dense_load.cloud is None:
+                self.log_message.emit(f"[WARNING] Failed to load scene point cloud ({dense_ply}). Skipping fusion.")
+                return None
+
+            # 2. Align reference cloud to scene point cloud
+            align_res = cloud_aligner.align_to_dense(ref_load.cloud, dense_load.cloud, self.log_message.emit)
+            if not align_res.success:
+                self.log_message.emit(f"[WARNING] Reference cloud alignment low confidence: {'; '.join(align_res.warnings)}. Continuing without fusion.")
+                return None
+
+            # 3. Transform reference cloud using similarity matrix
+            aligned_ref = ref_load.cloud.transform(align_res.transform)
+
+            # Save aligned reference cloud for diagnostics
+            aligned_ref_path = os.path.join(mvs_out, "scene_refcloud_aligned.ply")
+            point_cloud_io.save_point_cloud(aligned_ref, aligned_ref_path)
+
+            # 4. Merge gap-filling points into dense cloud
+            merged_cloud = cloud_fusion.merge_clouds(dense_load.cloud, aligned_ref, self.log_message.emit, gap_radius_mult=3.0)
+
+            merged_cloud_path = os.path.join(mvs_out, "scene_dense_refcloud.ply")
+            point_cloud_io.save_point_cloud(merged_cloud, merged_cloud_path)
+
+            # 5. Generate Poisson surface mesh
+            fused_mesh = cloud_fusion.generate_mesh(merged_cloud, self.log_message.emit, poisson_depth=9, density_threshold_pct=5.0)
+
+            fused_mesh_name = "scene_dense_mesh_refcloud.ply"
+            fused_mesh_path = os.path.join(mvs_out, fused_mesh_name)
+            o3d.io.write_triangle_mesh(fused_mesh_path, fused_mesh)
+
+            self.log_message.emit(f"[SUCCESS] Reference cloud fusion complete! Fused Poisson mesh saved as {fused_mesh_name}")
+            return fused_mesh_name
+
+        except Exception as e:
+            self.log_message.emit(f"[WARNING] Reference cloud fusion encountered an error: {e}. Falling back to standard pipeline.")
+            return None
 
     def _run_model_analyzer(self, model_dir: str) -> dict:
         """Runs COLMAP model_analyzer and returns parsed stats."""
@@ -1508,6 +1654,86 @@ class PipelineWorker(QThread):
             f"  Holes closed:         {self._holes_closed}\n"
             f"{'='*60}"
         )
+
+    def _run_poisson_reconstruction(self, mvs_out: str, depth: int) -> bool:
+        """
+        Step 7P: Poisson Surface Reconstruction using Open3D and cloud_fusion module.
+        Reads the dense point cloud, reconstructs surface, trims low-density components,
+        and saves PLY, OBJ, and GLB mesh outputs.
+        """
+        self.log_message.emit("[POISSON] Starting Poisson surface reconstruction...")
+        
+        # 1. Find the input dense point cloud PLY file
+        dense_ply = os.path.join(mvs_out, "scene_dense.ply")
+        if not os.path.exists(dense_ply):
+            dense_ply = os.path.join(mvs_out, "scene.ply")
+            
+        if not os.path.exists(dense_ply):
+            self.log_message.emit("[ERROR] No dense or sparse PLY cloud found for Poisson reconstruction.")
+            return False
+
+        try:
+            import open3d as o3d
+            import cloud_fusion
+            import trimesh
+            import numpy as np
+
+            # Load the point cloud
+            self.log_message.emit(f"[POISSON] Loading point cloud: {os.path.basename(dense_ply)}...")
+            pcd = o3d.io.read_point_cloud(dense_ply)
+            if pcd is None or len(pcd.points) == 0:
+                self.log_message.emit("[ERROR] Point cloud is empty or failed to load.")
+                return False
+
+            self.status_changed.emit("Step 7P: Reconstructing Poisson Surface...")
+            self.progress_changed.emit(83)
+
+            # Generate Poisson mesh using the cloud_fusion module's helper
+            # This handles normal estimation, orientation consistency check, density trimming, and cluster fragment cleaning.
+            mesh = cloud_fusion.generate_mesh(
+                pcd, 
+                log_fn=self.log_message.emit, 
+                poisson_depth=depth, 
+                density_threshold_pct=5.0
+            )
+
+            if mesh is None or len(mesh.vertices) == 0:
+                self.log_message.emit("[ERROR] Poisson reconstruction produced an empty mesh.")
+                return False
+
+            self.status_changed.emit("Step 7P: Exporting Mesh Formats...")
+            self.progress_changed.emit(92)
+
+            # Output paths
+            ply_path = os.path.normpath(os.path.join(mvs_out, "scene_dense_mesh_texture.ply"))
+            obj_path = os.path.normpath(os.path.join(mvs_out, "scene_dense_mesh_texture.obj"))
+            glb_path = os.path.normpath(os.path.join(mvs_out, "scene_dense_mesh_texture.glb"))
+
+            # Write PLY using Open3D (includes vertex colors)
+            o3d.io.write_triangle_mesh(ply_path, mesh)
+            self.log_message.emit(f"[POISSON] Successfully saved PLY mesh to: {os.path.basename(ply_path)}")
+
+            # Load with trimesh to convert to OBJ and GLB (keeps vertex colors)
+            self.log_message.emit("[POISSON] Exporting mesh to OBJ and GLB formats...")
+            tri_mesh = trimesh.load(ply_path, force="mesh")
+            tri_mesh.export(obj_path)
+            self.log_message.emit(f"[POISSON] Successfully saved OBJ mesh to: {os.path.basename(obj_path)}")
+
+            tri_mesh.export(glb_path)
+            self.log_message.emit(f"[POISSON] Successfully saved GLB mesh to: {os.path.basename(glb_path)}")
+
+            # Update stats for display in the summary
+            self._mesh_vertices = len(mesh.vertices)
+            self._mesh_faces = len(mesh.triangles)
+
+            self.progress_changed.emit(98)
+            return True
+
+        except Exception as e:
+            self.log_message.emit(f"[WARNING] Poisson reconstruction failed with error: {e}")
+            import traceback
+            self.log_message.emit(traceback.format_exc())
+            return False
 
 
 class BackgroundRemovalWorker(QThread):

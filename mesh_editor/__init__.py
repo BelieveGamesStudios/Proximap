@@ -10,6 +10,10 @@ from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QColor, QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent
 from mesh_editor.viewport import MeshEditorViewport
 from mesh_editor.scene import Object, load_mesh_file, apply_texture_to_meshes
+from mesh_editor.undo import (
+    UndoStack, BaseCommand, TransformCommand, SpinboxTransformCommand,
+    DeleteCommand, AddObjectCommand
+)
 
 class MeshImportWorker(QThread):
     # Signals: finished (success, meshes, error_message)
@@ -100,6 +104,12 @@ class MeshEditorWidget(QWidget):
         super().__init__(parent)
         self.setObjectName("MeshEditorWidget")
         self.setAcceptDrops(True)
+        
+        # Initialize Undo / Redo Stack Engine (Limit 30 items)
+        self.undo_stack = UndoStack(max_size=30)
+        self._last_spinbox_pos = None
+        self._last_spinbox_rot = None
+        self._last_spinbox_scale = None
         
         # Build UI layout
         self._init_ui()
@@ -411,8 +421,19 @@ class MeshEditorWidget(QWidget):
         
         file_menu.addSeparator()
         
-        action_export = file_menu.addAction("Export Scene (.obj, .glb)")
-        action_export.triggered.connect(self._on_export_scene_clicked)
+        # Unified sub-menu for exporting consolidated scene (format-specific sub-actions)
+        export_scene_menu = QMenu("Export Scene", file_menu)
+        export_scene_menu.setStyleSheet(file_menu.styleSheet())
+        
+        self.action_export_glb = export_scene_menu.addAction("GLB (.glb)")
+        self.action_export_obj = export_scene_menu.addAction("OBJ (.obj)")
+        self.action_export_usdz = export_scene_menu.addAction("USDZ (.usdz)")
+        
+        self.action_export_glb.triggered.connect(lambda: self._on_export_scene_clicked(".glb"))
+        self.action_export_obj.triggered.connect(lambda: self._on_export_scene_clicked(".obj"))
+        self.action_export_usdz.triggered.connect(lambda: self._on_export_scene_clicked(".usdz"))
+        
+        file_menu.addMenu(export_scene_menu)
         
         file_menu.addSeparator()
         self.action_upload_proximap = file_menu.addAction("Upload to Proximap")
@@ -421,6 +442,19 @@ class MeshEditorWidget(QWidget):
         
         # 2. Edit Menu
         edit_menu = QMenu("Edit", self.menu_bar)
+        
+        self.action_undo = edit_menu.addAction("Undo")
+        self.action_undo.setShortcut("Ctrl+Z")
+        self.action_undo.setEnabled(False)
+        self.action_undo.triggered.connect(self._perform_undo)
+        
+        self.action_redo = edit_menu.addAction("Redo")
+        self.action_redo.setShortcut("Ctrl+Y")
+        self.action_redo.setEnabled(False)
+        self.action_redo.triggered.connect(self._perform_redo)
+        
+        edit_menu.addSeparator()
+        
         action_delete = edit_menu.addAction("Delete Selected")
         action_delete.triggered.connect(self._delete_selected_object)
         self.menu_bar.addMenu(edit_menu)
@@ -622,19 +656,25 @@ class MeshEditorWidget(QWidget):
     def _wire_events(self):
         # 1. Viewport Selection -> Sync Sidebar
         self.viewport.selection_changed.connect(self._on_viewport_selection_changed)
-        # 2. Viewport Gizmo Edit -> Sync Spinboxes
+        # 2. Viewport Gizmo Edit -> Sync Spinboxes & Commit Undo
         self.viewport.transform_changed.connect(self._on_viewport_transform_changed)
+        self.viewport.transform_committed.connect(self._on_viewport_transform_committed)
+        self.viewport.undo_requested.connect(self._perform_undo)
+        self.viewport.redo_requested.connect(self._perform_redo)
         
         # 3. Sidebar Selection -> Sync Viewport Selection
         self.outliner_list.itemSelectionChanged.connect(self._on_outliner_selection_changed)
         
-        # 4. Spinbox value changes -> Sync Viewport Object Transform
+        # 4. Spinbox value changes -> Sync Viewport Object Transform & Commit Undo
         for sb in [self.sp_pos_x, self.sp_pos_y, self.sp_pos_z]:
             sb.valueChanged.connect(self._on_translation_spinbox_changed)
+            sb.editingFinished.connect(self._on_translation_spinbox_committed)
         for sb in [self.sp_rot_x, self.sp_rot_y, self.sp_rot_z]:
             sb.valueChanged.connect(self._on_rotation_spinbox_changed)
+            sb.editingFinished.connect(self._on_rotation_spinbox_committed)
         for sb in [self.sp_scale_x, self.sp_scale_y, self.sp_scale_z]:
             sb.valueChanged.connect(self._on_scale_spinbox_changed)
+            sb.editingFinished.connect(self._on_scale_spinbox_committed)
             
         # 5. Projection Toggles
         self.btn_projection.clicked.connect(self._on_projection_clicked)
@@ -796,6 +836,41 @@ class MeshEditorWidget(QWidget):
         self._update_outliner_highlights()
         self.viewport.update()
 
+    def push_command(self, cmd: BaseCommand):
+        """Public API for registering custom commands into the Undo/Redo stack (supports addons)."""
+        self.undo_stack.push(cmd)
+        self._update_undo_redo_actions()
+
+    def _perform_undo(self):
+        label = self.undo_stack.undo()
+        if label:
+            self._populate_outliner()
+            active = self.viewport.scene.active_object
+            self._on_viewport_selection_changed(active)
+            self._update_undo_redo_actions()
+            self.viewport.update()
+
+    def _perform_redo(self):
+        label = self.undo_stack.redo()
+        if label:
+            self._populate_outliner()
+            active = self.viewport.scene.active_object
+            self._on_viewport_selection_changed(active)
+            self._update_undo_redo_actions()
+            self.viewport.update()
+
+    def _update_undo_redo_actions(self):
+        if hasattr(self, 'action_undo') and hasattr(self, 'action_redo'):
+            self.action_undo.setEnabled(self.undo_stack.can_undo())
+            self.action_redo.setEnabled(self.undo_stack.can_redo())
+            self.action_undo.setText(f"Undo {self.undo_stack.undo_label()}" if self.undo_stack.can_undo() else "Undo")
+            self.action_redo.setText(f"Redo {self.undo_stack.redo_label()}" if self.undo_stack.can_redo() else "Redo")
+
+    def _on_viewport_transform_committed(self, payload):
+        states, operation = payload
+        cmd = TransformCommand(states, viewport=self.viewport, operation=operation)
+        self.push_command(cmd)
+
     def _sync_properties_from_object(self, obj: Object):
         self._block_properties_signals(True)
         self.sp_pos_x.setValue(obj.position[0])
@@ -810,6 +885,9 @@ class MeshEditorWidget(QWidget):
         self.sp_scale_y.setValue(obj.scale[1])
         self.sp_scale_z.setValue(obj.scale[2])
         self._block_properties_signals(False)
+        self._last_spinbox_pos = np.copy(obj.position)
+        self._last_spinbox_rot = np.copy(obj.rotation)
+        self._last_spinbox_scale = np.copy(obj.scale)
 
     def _on_translation_spinbox_changed(self):
         obj = self.viewport.scene.selected_object
@@ -821,6 +899,15 @@ class MeshEditorWidget(QWidget):
             ], dtype=np.float32)
             self.viewport.update()
 
+    def _on_translation_spinbox_committed(self):
+        obj = self.viewport.scene.selected_object
+        if obj and self._last_spinbox_pos is not None:
+            new_pos = np.array([self.sp_pos_x.value(), self.sp_pos_y.value(), self.sp_pos_z.value()], dtype=np.float32)
+            if not np.array_equal(self._last_spinbox_pos, new_pos):
+                cmd = SpinboxTransformCommand(obj, 'position', self._last_spinbox_pos, new_pos, self.viewport)
+                self.push_command(cmd)
+                self._last_spinbox_pos = np.copy(new_pos)
+
     def _on_rotation_spinbox_changed(self):
         obj = self.viewport.scene.selected_object
         if obj:
@@ -831,6 +918,15 @@ class MeshEditorWidget(QWidget):
             ], dtype=np.float32)
             self.viewport.update()
 
+    def _on_rotation_spinbox_committed(self):
+        obj = self.viewport.scene.selected_object
+        if obj and self._last_spinbox_rot is not None:
+            new_rot = np.array([self.sp_rot_x.value(), self.sp_rot_y.value(), self.sp_rot_z.value()], dtype=np.float32)
+            if not np.array_equal(self._last_spinbox_rot, new_rot):
+                cmd = SpinboxTransformCommand(obj, 'rotation', self._last_spinbox_rot, new_rot, self.viewport)
+                self.push_command(cmd)
+                self._last_spinbox_rot = np.copy(new_rot)
+
     def _on_scale_spinbox_changed(self):
         obj = self.viewport.scene.selected_object
         if obj:
@@ -840,6 +936,15 @@ class MeshEditorWidget(QWidget):
                 self.sp_scale_z.value()
             ], dtype=np.float32)
             self.viewport.update()
+
+    def _on_scale_spinbox_committed(self):
+        obj = self.viewport.scene.selected_object
+        if obj and self._last_spinbox_scale is not None:
+            new_scale = np.array([self.sp_scale_x.value(), self.sp_scale_y.value(), self.sp_scale_z.value()], dtype=np.float32)
+            if not np.array_equal(self._last_spinbox_scale, new_scale):
+                cmd = SpinboxTransformCommand(obj, 'scale', self._last_spinbox_scale, new_scale, self.viewport)
+                self.push_command(cmd)
+                self._last_spinbox_scale = np.copy(new_scale)
 
     def _on_projection_clicked(self):
         cam = self.viewport.camera
@@ -954,13 +1059,16 @@ class MeshEditorWidget(QWidget):
                 QMessageBox.No
             )
             if reply == QMessageBox.Yes:
-                texture_path, _ = QFileDialog.getOpenFileName(
+                selected_paths, _ = QFileDialog.getOpenFileNames(
                     self,
-                    "Select Texture File",
+                    "Select Texture / Material File(s)",
                     os.path.dirname(file_path),
-                    "Texture Files (*.png *.jpg *.jpeg *.bmp *.tga *.mtl)"
+                    "Texture & Material Files (*.png *.jpg *.jpeg *.bmp *.tga *.mtl)"
                 )
-                if texture_path:
+                if selected_paths:
+                    mtl_files = [p for p in selected_paths if p.lower().endswith('.mtl')]
+                    img_files = [p for p in selected_paths if not p.lower().endswith('.mtl')]
+                    texture_path = mtl_files[0] if mtl_files else img_files[0]
                     self._import_mesh_from_path(file_path, texture_path)
                     return
                     
@@ -1107,10 +1215,12 @@ class MeshEditorWidget(QWidget):
             # 3. Refresh outliner list
             self._populate_outliner()
             
-            # 4. Select the last created object (or first)
+            # 4. Select the last created object (or first) and push Undo command
             if created_objects:
                 self.viewport.scene.selected_object = created_objects[-1]
                 self._on_viewport_selection_changed(created_objects[-1])
+                cmd = AddObjectCommand(created_objects, self.viewport, on_scene_changed_cb=self._populate_outliner)
+                self.push_command(cmd)
                 
             # 5. Update rendering
             self.viewport.update()
@@ -1127,35 +1237,37 @@ class MeshEditorWidget(QWidget):
     def _delete_selected_object(self):
         selected_objs = list(self.viewport.scene.selected_objects)
         if selected_objs:
-            # 1. Clean up OpenGL resources for all selected meshes
-            self.viewport.makeCurrent()
-            for obj in selected_objs:
-                obj.mesh.cleanup()
-            self.viewport.doneCurrent()
-            
-            # 2. Remove all selected objects from scene
-            for obj in selected_objs:
-                self.viewport.scene.remove_object(obj)
-            
-            # 3. Clear selected state and sync UI
-            self._on_viewport_selection_changed(None)
-            
-            # 4. Refresh outliner and redraw
-            self._populate_outliner()
-            self.viewport.update()
+            cmd = DeleteCommand(selected_objs, self.viewport, on_scene_changed_cb=self._populate_outliner)
+            cmd.execute()
+            self.push_command(cmd)
 
-    def _on_export_scene_clicked(self):
+    def _on_export_scene_clicked(self, fmt=None):
         if not self.viewport.scene.objects:
             QMessageBox.warning(
                 self, "Export Warning", "There are no objects in the scene to export."
             )
             return
             
+        filter_str = "3D Mesh Files (*.obj *.glb *.usdz)"
+        default_suffix = ""
+        if fmt == ".glb":
+            filter_str = "GLB Files (*.glb)"
+            default_suffix = ".glb"
+        elif fmt == ".obj":
+            filter_str = "OBJ Files (*.obj)"
+            default_suffix = ".obj"
+        elif fmt == ".usdz":
+            filter_str = "USDZ Files (*.usdz)"
+            default_suffix = ".usdz"
+            
         file_path, _ = QFileDialog.getSaveFileName(
-            self, "Export Scene", "", "3D Mesh Files (*.obj *.glb)"
+            self, "Export Scene", "", filter_str
         )
         if not file_path:
             return
+            
+        if default_suffix and not file_path.lower().endswith(default_suffix):
+            file_path += default_suffix
             
         # Create and configure the waiting dialog
         self.export_dialog = QDialog(self, Qt.WindowType.CustomizeWindowHint | Qt.WindowType.WindowTitleHint)
@@ -1367,13 +1479,16 @@ class MeshEditorWidget(QWidget):
                             QMessageBox.No
                         )
                         if reply == QMessageBox.Yes:
-                            texture_path, _ = QFileDialog.getOpenFileName(
+                            selected_paths, _ = QFileDialog.getOpenFileNames(
                                 self,
-                                "Select Texture File",
+                                "Select Texture / Material File(s)",
                                 os.path.dirname(mesh_file),
-                                "Texture Files (*.png *.jpg *.jpeg *.bmp *.tga *.mtl)"
+                                "Texture & Material Files (*.png *.jpg *.jpeg *.bmp *.tga *.mtl)"
                             )
-                            if texture_path:
+                            if selected_paths:
+                                mtl_files = [p for p in selected_paths if p.lower().endswith('.mtl')]
+                                img_files = [p for p in selected_paths if not p.lower().endswith('.mtl')]
+                                texture_path = mtl_files[0] if mtl_files else img_files[0]
                                 self._import_mesh_from_path(mesh_file, texture_path)
                                 continue
                     self._import_mesh_from_path(mesh_file)

@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (
     QLabel, QPushButton, QProgressBar, QRadioButton, QButtonGroup,
     QFrame, QFileDialog, QTextEdit, QStackedWidget, QComboBox,
     QScrollArea, QTabWidget, QGridLayout, QCheckBox, QSlider,
-    QMessageBox, QDialog, QColorDialog, QMenu, QSizePolicy
+    QMessageBox, QDialog, QColorDialog, QMenu, QSizePolicy, QInputDialog,
+    QLineEdit, QSpinBox, QDoubleSpinBox
 )
 
 from vispy import app, scene
@@ -80,7 +81,180 @@ CAMERA_CONTROLS = {
        "• Shift + Mouse Move: Adjust focus area"
 }
 
+
+# ---------------------------------------------------------------------------
+# Background worker: loads a point cloud file off the UI thread on import
+# ---------------------------------------------------------------------------
+class CloudImportWorker(QThread):
+    """Loads a point cloud in the background so the UI stays responsive."""
+    finished = Signal(object, str)   # (LoadResult, file_path)
+    error    = Signal(str)
+
+    def __init__(self, file_path: str, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+
+    def run(self):
+        try:
+            import point_cloud_io
+            res = point_cloud_io.load_point_cloud(self.file_path)
+            self.finished.emit(res, self.file_path)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+# ---------------------------------------------------------------------------
+# Background worker: parses geometry (PLY / Open3D) off the UI thread
+# so _render_in_vispy can receive ready arrays and only do the fast GPU upload
+# ---------------------------------------------------------------------------
+class ViewerLoadWorker(QThread):
+    """Parses point cloud / mesh data in a background thread."""
+    # Emits (points_f32, colors_u8_or_None, faces_or_None, texcoords_or_None, texture_path_or_None)
+    finished = Signal(object, object, object, object, object)
+    error    = Signal(str)
+
+    def __init__(self, file_path: str, mode: int, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+        self.mode = mode
+
+    def run(self):
+        import numpy as np
+        try:
+            file_path = self.file_path
+            mode      = self.mode
+            points = colors = faces = texcoords = texture_path = None
+
+            if mode == 1:
+                # Dense Point Cloud
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext == '.ply':
+                    import struct
+                    points, colors, _ = _read_ply_static(file_path)
+                else:
+                    import point_cloud_io
+                    res = point_cloud_io.load_point_cloud(file_path)
+                    if res.success and res.cloud is not None:
+                        points = np.asarray(res.cloud.points, dtype=np.float32)
+                        colors = (np.asarray(res.cloud.colors) * 255).astype(np.uint8) \
+                                 if res.has_colors else np.full((len(points), 3), 180, np.uint8)
+
+            elif mode == 2:
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext == '.ply':
+                    points, colors, faces = _read_ply_static(file_path)
+                elif ext not in ('.obj', '.ply'):
+                    import point_cloud_io
+                    res = point_cloud_io.load_point_cloud(file_path)
+                    if res.success and res.cloud is not None:
+                        points = np.asarray(res.cloud.points, dtype=np.float32)
+                        colors = (np.asarray(res.cloud.colors) * 255).astype(np.uint8) \
+                                 if res.has_colors else np.full((len(points), 3), 180, np.uint8)
+
+            self.finished.emit(points, colors, faces, texcoords, texture_path)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+def _read_ply_static(path):
+    """Module-level PLY reader used by ViewerLoadWorker (no 'self' needed)."""
+    import numpy as np, struct
+    if not os.path.exists(path):
+        return np.zeros((0,3), np.float32), np.zeros((0,3), np.uint8), None
+    with open(path, 'rb') as f:
+        header_lines = []
+        while True:
+            line = f.readline().decode('utf-8', errors='ignore').strip()
+            header_lines.append(line)
+            if line == 'end_header':
+                break
+        num_vertices = num_faces = 0
+        format_type = None
+        vertex_properties = []
+        element_type = None
+        for line in header_lines:
+            parts = line.split()
+            if not parts: continue
+            if parts[0] == 'format':  format_type = parts[1]
+            elif parts[0] == 'element':
+                element_type = parts[1]
+                if element_type == 'vertex': num_vertices = int(parts[2])
+                elif element_type == 'face': num_faces    = int(parts[2])
+            elif parts[0] == 'property' and element_type == 'vertex':
+                if parts[1] == 'list':
+                    vertex_properties.append((parts[4], 'list', True, parts[2], parts[3]))
+                else:
+                    vertex_properties.append((parts[2], parts[1], False, None, None))
+        type_map = {
+            'char':(np.int8,1),'uchar':(np.uint8,1),'short':(np.int16,2),'ushort':(np.uint16,2),
+            'int':(np.int32,4),'uint':(np.uint32,4),'float':(np.float32,4),'double':(np.float64,8),
+            'int8':(np.int8,1),'uint8':(np.uint8,1),'int16':(np.int16,2),'uint16':(np.uint16,2),
+            'int32':(np.int32,4),'uint32':(np.uint32,4),'float32':(np.float32,4),'float64':(np.float64,8)
+        }
+        has_list = any(p[2] for p in vertex_properties)
+        points = np.zeros((num_vertices, 3), dtype=np.float32)
+        colors = None
+        faces  = None
+        prop_names = [p[0] for p in vertex_properties]
+        has_color  = all(c in prop_names for c in ('red','green','blue'))
+        if has_color:
+            colors = np.zeros((num_vertices, 3), dtype=np.uint8)
+        if 'binary' in (format_type or ''):
+            fixed_props = [p for p in vertex_properties if not p[2]]
+            stride = sum(type_map[p[1]][1] for p in fixed_props if p[1] in type_map)
+            raw = f.read(stride * num_vertices)
+            offset = 0
+            col_offsets = {}
+            for p in fixed_props:
+                if p[1] in type_map:
+                    col_offsets[p[0]] = offset
+                    offset += type_map[p[1]][1]
+            dt_fields = []
+            for p in fixed_props:
+                if p[1] in type_map:
+                    dt_fields.append((p[0], type_map[p[1]][0]))
+            if dt_fields:
+                dt = np.dtype(dt_fields)
+                arr = np.frombuffer(raw, dtype=dt)
+                if 'x' in arr.dtype.names: points[:,0] = arr['x'].astype(np.float32)
+                if 'y' in arr.dtype.names: points[:,1] = arr['y'].astype(np.float32)
+                if 'z' in arr.dtype.names: points[:,2] = arr['z'].astype(np.float32)
+                if has_color and colors is not None:
+                    if 'red'   in arr.dtype.names: colors[:,0] = arr['red']
+                    if 'green' in arr.dtype.names: colors[:,1] = arr['green']
+                    if 'blue'  in arr.dtype.names: colors[:,2] = arr['blue']
+            if num_faces > 0:
+                faces_list = []
+                count_fmt = '>B' if 'big' in (format_type or '') else '<B'
+                idx_fmt   = '>I' if 'big' in (format_type or '') else '<I'
+                for _ in range(num_faces):
+                    cnt = struct.unpack(count_fmt, f.read(1))[0]
+                    idxs = list(struct.unpack(f'<{cnt}I', f.read(4*cnt)))
+                    if len(idxs) == 3: faces_list.append(idxs)
+                if faces_list: faces = np.array(faces_list, dtype=np.int32)
+        else:
+            for i in range(num_vertices):
+                vals = f.readline().decode('utf-8', errors='ignore').split()
+                if len(vals) >= 3:
+                    points[i] = [float(vals[0]), float(vals[1]), float(vals[2])]
+                    if has_color and colors is not None and len(vals) >= 6:
+                        ri = prop_names.index('red')   if 'red'   in prop_names else 3
+                        gi = prop_names.index('green') if 'green' in prop_names else 4
+                        bi = prop_names.index('blue')  if 'blue'  in prop_names else 5
+                        try: colors[i] = [int(vals[ri]), int(vals[gi]), int(vals[bi])]
+                        except: pass
+            if num_faces > 0:
+                faces_list = []
+                for _ in range(num_faces):
+                    vals = f.readline().decode('utf-8', errors='ignore').split()
+                    if vals and int(vals[0]) == 3 and len(vals) >= 4:
+                        faces_list.append([int(vals[1]), int(vals[2]), int(vals[3])])
+                if faces_list: faces = np.array(faces_list, dtype=np.int32)
+    return points, colors, faces
+
+
 class ModelServerHandler(http.server.BaseHTTPRequestHandler):
+
     model_path = ""
     
     def log_message(self, format, *args):
@@ -308,19 +482,37 @@ class ViewerWrapperWidget(QFrame):
                 color: #555555;
             }
         """)
+        self.action_new = self.file_menu.addAction("New Project")
+        self.action_new.setShortcut("Ctrl+N")
+        self.file_menu.addSeparator()
         self.action_save = self.file_menu.addAction("Save Project (.pxm)")
         self.action_load = self.file_menu.addAction("Load Project (.pxm)")
         self.action_recover = self.file_menu.addAction("Recover Last Session")
         self.file_menu.addSeparator()
         self.action_export_dense = self.file_menu.addAction("Export Dense")
         self.action_export_sparse = self.file_menu.addAction("Export Sparse")
-        self.action_export_obj = self.file_menu.addAction("Export OBJ")
+        
+        # Unified sub-menu for exporting consolidated meshes (format-specific sub-actions)
+        self.export_mesh_menu = QMenu("Export Mesh", self.file_menu)
+        self.export_mesh_menu.setStyleSheet(self.file_menu.styleSheet())
+        
+        self.action_export_glb = self.export_mesh_menu.addAction("GLB (.glb)")
+        self.action_export_obj = self.export_mesh_menu.addAction("OBJ (.obj)")
+        self.action_export_usdz = self.export_mesh_menu.addAction("USDZ (.usdz)")
+        
+        self.file_menu.addMenu(self.export_mesh_menu)
+        self.file_menu.addSeparator()
+        self.action_mobile_import = self.file_menu.addAction("Import Images/Videos from Mobile Device")
+        self.action_mobile_export = self.file_menu.addAction("Send 3D Model to Mobile")
         self.file_menu.addSeparator()
         self.action_upload_proximap = self.file_menu.addAction("Upload to Proximap")
         
         self.action_export_dense.setEnabled(False)
         self.action_export_sparse.setEnabled(False)
+        self.action_export_glb.setEnabled(False)
         self.action_export_obj.setEnabled(False)
+        self.action_export_usdz.setEnabled(False)
+        self.action_mobile_export.setEnabled(False)
         self.action_upload_proximap.setEnabled(False)
         
         self.file_menu_btn.setMenu(self.file_menu)
@@ -478,6 +670,14 @@ class ViewerWrapperWidget(QFrame):
         self.current_mvs_dir = mvs_dir
 
     def get_selected_file_path(self) -> str:
+        parent = self.parent()
+        if parent and hasattr(parent, 'standalone_cloud_path') and parent.standalone_cloud_path:
+            mvs_dir = self.current_mvs_dir if self.current_mvs_dir else os.path.join(get_reconstruction_out_dir(), "mvs")
+            has_reconstruction = os.path.exists(os.path.join(mvs_dir, "scene_dense_mesh_refine.ply")) or \
+                                 os.path.exists(os.path.join(mvs_dir, "scene_dense_mesh.ply"))
+            if not has_reconstruction:
+                return parent.standalone_cloud_path
+
         if not self.current_mvs_dir:
             return None
             
@@ -1071,7 +1271,7 @@ class UploadProgressDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Proximap - Photogrammetry Dashboard")
+        self.setWindowTitle("Proximap 1.4.0")
         self.setMinimumSize(1100, 750)
         self.image_list = []
         self.worker = None
@@ -1164,17 +1364,104 @@ class MainWindow(QMainWindow):
         self.browse_btn = QPushButton("Select Images/Videos Directory", step1_box)
         self.browse_btn.clicked.connect(self._open_dir_dialog)
         
+        self.mobile_import_btn = QPushButton("Import from Mobile Device", step1_box)
+        self.mobile_import_btn.clicked.connect(self._on_import_from_mobile_clicked)
+        
         self.bg_remove_btn = QPushButton("Remove Image Background", step1_box)
         self.bg_remove_btn.setObjectName("BgRemoveBtn")
         self.bg_remove_btn.setEnabled(False)
         self.bg_remove_btn.clicked.connect(self._remove_backgrounds_clicked)
+
+        # Reference Cloud Import (Optional)
+        # self.ref_cloud_btn = QPushButton("Import Reference Cloud", step1_box)
+        # self.ref_cloud_btn.setObjectName("RefCloudBtn")
+        # self.ref_cloud_btn.clicked.connect(self._import_reference_cloud_clicked)
+        # 
+        # self.ref_cloud_container = QWidget(step1_box)
+        # ref_cloud_layout = QHBoxLayout(self.ref_cloud_container)
+        # ref_cloud_layout.setContentsMargins(0, 0, 0, 0)
+        # ref_cloud_layout.setSpacing(5)
+        # 
+        # self.ref_cloud_label = QLabel("", self.ref_cloud_container)
+        # self.ref_cloud_label.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold;")
+        # self.ref_cloud_label.setTextFormat(Qt.PlainText)
+        # 
+        # self.ref_cloud_clear_btn = QPushButton("✕", self.ref_cloud_container)
+        # self.ref_cloud_clear_btn.setFixedSize(20, 20)
+        # self.ref_cloud_clear_btn.setToolTip("Clear reference cloud selection")
+        # self.ref_cloud_clear_btn.setStyleSheet("""
+        #     QPushButton {
+        #         background: transparent;
+        #         color: #ff5252;
+        #         border: 1px solid #ff5252;
+        #         border-radius: 10px;
+        #         font-weight: bold;
+        #         font-size: 10px;
+        #     }
+        #     QPushButton:hover {
+        #         background: #ff5252;
+        #         color: #ffffff;
+        #     }
+        # """)
+        # self.ref_cloud_clear_btn.clicked.connect(self._clear_reference_cloud_clicked)
+        # 
+        # ref_cloud_layout.addWidget(self.ref_cloud_label, stretch=1)
+        # ref_cloud_layout.addWidget(self.ref_cloud_clear_btn)
+        # self.ref_cloud_container.setVisible(False)
+        # 
+        # self.ref_cloud_path = None
+        
+        # Standalone Cloud Import (Optional/Mutual Exclusive Mode)
+        self.standalone_cloud_btn = QPushButton("Import Standalone Point Cloud", step1_box)
+        self.standalone_cloud_btn.setObjectName("StandaloneCloudBtn")
+        self.standalone_cloud_btn.clicked.connect(self._import_standalone_cloud_clicked)
+        
+        self.standalone_cloud_container = QWidget(step1_box)
+        standalone_cloud_layout = QHBoxLayout(self.standalone_cloud_container)
+        standalone_cloud_layout.setContentsMargins(0, 0, 0, 0)
+        standalone_cloud_layout.setSpacing(5)
+        
+        self.standalone_cloud_label = QLabel("", self.standalone_cloud_container)
+        self.standalone_cloud_label.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold;")
+        self.standalone_cloud_label.setTextFormat(Qt.PlainText)
+
+        self.standalone_cloud_clear_btn = QPushButton("✕", self.standalone_cloud_container)
+        self.standalone_cloud_clear_btn.setFixedSize(20, 20)
+        self.standalone_cloud_clear_btn.setToolTip("Clear standalone cloud selection")
+        self.standalone_cloud_clear_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #ff5252;
+                border: 1px solid #ff5252;
+                border-radius: 10px;
+                font-weight: bold;
+                font-size: 10px;
+            }
+            QPushButton:hover {
+                background: #ff5252;
+                color: #ffffff;
+            }
+        """)
+        self.standalone_cloud_clear_btn.clicked.connect(self._clear_standalone_cloud_clicked)
+        
+        standalone_cloud_layout.addWidget(self.standalone_cloud_label, stretch=1)
+        standalone_cloud_layout.addWidget(self.standalone_cloud_clear_btn)
+        self.standalone_cloud_container.setVisible(False)
+        
+        self.standalone_cloud_path = None
         
         step1_layout.addWidget(s1_title)
         step1_layout.addWidget(self.img_count_label)
         step1_layout.addWidget(self.camera_label)
         step1_layout.addWidget(self.badge)
         step1_layout.addWidget(self.browse_btn)
+        step1_layout.addWidget(self.mobile_import_btn)
         step1_layout.addWidget(self.bg_remove_btn)
+        # step1_layout.addWidget(self.ref_cloud_btn)
+        # step1_layout.addWidget(self.ref_cloud_container)
+        step1_layout.addWidget(self.standalone_cloud_btn)
+        step1_layout.addWidget(self.standalone_cloud_container)
+
         scroll_content_layout.addWidget(step1_box)
         
         # STEP 2: Process
@@ -1206,6 +1493,228 @@ class MainWindow(QMainWindow):
         self.plain_surfaces_checkbox = QCheckBox("Surface is plain/smooth", step2_box)
         self.plain_surfaces_checkbox.setChecked(False)
         
+        # Advanced Options Collapsible Panel
+        self.advanced_toggle_btn = QPushButton("▸  Advanced Options", step2_box)
+        self.advanced_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.advanced_toggle_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #888888;
+                border: none;
+                text-align: left;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 4px 0px;
+            }
+            QPushButton:hover {
+                color: #00E676;
+            }
+        """)
+        
+        self.advanced_panel = QFrame(step2_box)
+        self.advanced_panel.setStyleSheet("""
+            QFrame {
+                background-color: #1A1A1A;
+                border: 1px solid #2D2D2D;
+                border-radius: 4px;
+                padding: 6px;
+            }
+        """)
+        advanced_layout = QVBoxLayout(self.advanced_panel)
+        advanced_layout.setContentsMargins(6, 6, 6, 6)
+        advanced_layout.setSpacing(4)
+        
+        self.mapper_label = QLabel("SfM Mapper Algorithm:", self.advanced_panel)
+        self.mapper_label.setStyleSheet("font-size: 11px; color: #aaaaaa; border: none; background: transparent;")
+        self.mapper_combo = QComboBox(self.advanced_panel)
+        self.mapper_combo.addItems([
+            "COLMAP  —  Incremental (default, most robust)",
+            "GLOMAP  —  Global (faster on large captures)"
+        ])
+        self.mapper_combo.setCurrentIndex(0)
+        
+        self.mesh_mode_label = QLabel("Mesh Reconstruction Mode:", self.advanced_panel)
+        self.mesh_mode_label.setStyleSheet("font-size: 11px; color: #aaaaaa; border: none; background: transparent;")
+        self.mesh_mode_combo = QComboBox(self.advanced_panel)
+        self.mesh_mode_combo.addItems([
+            "Default  —  OpenMVS (Delaunay + Texture)",
+            "Poisson  —  Open3D (smooth, watertight)"
+        ])
+        self.mesh_mode_combo.setCurrentIndex(0)
+        self.mesh_mode_combo.currentIndexChanged.connect(self._on_mesh_mode_changed)
+
+        self.poisson_widget = QWidget(self.advanced_panel)
+        self.poisson_widget.setStyleSheet("border: none; background: transparent; padding: 0;")
+        poisson_w_layout = QVBoxLayout(self.poisson_widget)
+        poisson_w_layout.setContentsMargins(0, 0, 0, 0)
+        poisson_w_layout.setSpacing(4)
+        
+        self.poisson_depth_label = QLabel("Poisson Depth: 9", self.poisson_widget)
+        self.poisson_depth_label.setStyleSheet("font-size: 11px; color: #aaaaaa; border: none; background: transparent;")
+        self.poisson_depth_slider = QSlider(Qt.Horizontal, self.poisson_widget)
+        self.poisson_depth_slider.setRange(6, 12)
+        self.poisson_depth_slider.setValue(9)
+        self.poisson_depth_slider.valueChanged.connect(self._on_poisson_depth_changed)
+        
+        poisson_w_layout.addWidget(self.poisson_depth_label)
+        poisson_w_layout.addWidget(self.poisson_depth_slider)
+        self.poisson_widget.setVisible(False)
+
+        # Custom Overrides Toggle
+        self.custom_settings_toggle = QCheckBox("Enable Custom Parameter Overrides", self.advanced_panel)
+        self.custom_settings_toggle.setStyleSheet("font-size: 11px; font-weight: bold; color: #aaaaaa;")
+        self.custom_settings_toggle.setChecked(False)
+        self.custom_settings_toggle.toggled.connect(self._on_custom_settings_toggled)
+
+        # Custom Settings Container Widget
+        self.custom_settings_container = QWidget(self.advanced_panel)
+        self.custom_settings_container.setStyleSheet("border: none; background: transparent; padding: 0;")
+        self.custom_settings_container.setEnabled(False)
+        
+        custom_grid = QGridLayout(self.custom_settings_container)
+        custom_grid.setContentsMargins(0, 4, 0, 0)
+        custom_grid.setSpacing(6)
+
+        lbl_style = "font-size: 10px; color: #888888; border: none; background: transparent;"
+
+        # COLMAP section
+        colmap_sec = QLabel("COLMAP Settings", self.custom_settings_container)
+        colmap_sec.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676; margin-top: 4px; border: none; background: transparent;")
+        custom_grid.addWidget(colmap_sec, 0, 0, 1, 2)
+
+        # SIFT Max Features
+        lbl_features = QLabel("SIFT Max Features:", self.custom_settings_container)
+        lbl_features.setStyleSheet(lbl_style)
+        self.custom_features_spin = QSpinBox(self.custom_settings_container)
+        self.custom_features_spin.setRange(1000, 65536)
+        self.custom_features_spin.setSingleStep(1000)
+        self.custom_features_spin.setValue(8000)
+        self.custom_features_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_features, 1, 0)
+        custom_grid.addWidget(self.custom_features_spin, 1, 1)
+
+        # Exhaustive Max Matches
+        lbl_matches = QLabel("Max Num Matches:", self.custom_settings_container)
+        lbl_matches.setStyleSheet(lbl_style)
+        self.custom_matches_spin = QSpinBox(self.custom_settings_container)
+        self.custom_matches_spin.setRange(4096, 262144)
+        self.custom_matches_spin.setSingleStep(4096)
+        self.custom_matches_spin.setValue(16384)
+        self.custom_matches_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_matches, 2, 0)
+        custom_grid.addWidget(self.custom_matches_spin, 2, 1)
+
+        # Guided Matching
+        self.custom_guided_check = QCheckBox("Use Guided Matching", self.custom_settings_container)
+        self.custom_guided_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
+        self.custom_guided_check.setChecked(True)
+        custom_grid.addWidget(self.custom_guided_check, 3, 0, 1, 2)
+
+        # Bundle Adjuster
+        self.custom_ba_check = QCheckBox("Run Extra Bundle Adjuster", self.custom_settings_container)
+        self.custom_ba_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
+        self.custom_ba_check.setChecked(False)
+        custom_grid.addWidget(self.custom_ba_check, 4, 0, 1, 2)
+
+        # OpenMVS section
+        openmvs_sec = QLabel("OpenMVS Settings", self.custom_settings_container)
+        openmvs_sec.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676; margin-top: 4px; border: none; background: transparent;")
+        custom_grid.addWidget(openmvs_sec, 5, 0, 1, 2)
+
+        # Densification Resolution
+        lbl_densify_res = QLabel("Densification Res:", self.custom_settings_container)
+        lbl_densify_res.setStyleSheet(lbl_style)
+        self.custom_densify_res_combo = QComboBox(self.custom_settings_container)
+        self.custom_densify_res_combo.addItems([
+            "0 — Ultra (highest detail, slow)",
+            "1 — High (half resolution)",
+            "2 — Medium (quarter resolution)",
+            "3 — Low (preview resolution)"
+        ])
+        self.custom_densify_res_combo.setCurrentIndex(1)
+        self.custom_densify_res_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_densify_res, 6, 0)
+        custom_grid.addWidget(self.custom_densify_res_combo, 6, 1)
+
+        # Max Views for Densification
+        lbl_densify_views = QLabel("Max Densify Views:", self.custom_settings_container)
+        lbl_densify_views.setStyleSheet(lbl_style)
+        self.custom_densify_views_spin = QSpinBox(self.custom_settings_container)
+        self.custom_densify_views_spin.setRange(1, 16)
+        self.custom_densify_views_spin.setValue(4)
+        self.custom_densify_views_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_densify_views, 7, 0)
+        custom_grid.addWidget(self.custom_densify_views_spin, 7, 1)
+
+        # Mesh Refinement Scales
+        lbl_refine_scales = QLabel("Mesh Refinement Scales:", self.custom_settings_container)
+        lbl_refine_scales.setStyleSheet(lbl_style)
+        self.custom_refine_scales_spin = QSpinBox(self.custom_settings_container)
+        self.custom_refine_scales_spin.setRange(1, 5)
+        self.custom_refine_scales_spin.setValue(2)
+        self.custom_refine_scales_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_refine_scales, 8, 0)
+        custom_grid.addWidget(self.custom_refine_scales_spin, 8, 1)
+
+        # Texturing Resolution
+        lbl_texture_res = QLabel("Texturing Res:", self.custom_settings_container)
+        lbl_texture_res.setStyleSheet(lbl_style)
+        self.custom_texture_res_combo = QComboBox(self.custom_settings_container)
+        self.custom_texture_res_combo.addItems([
+            "0 — Ultra (highest resolution)",
+            "1 — High (half resolution)",
+            "2 — Medium (quarter resolution)",
+            "3 — Low (preview resolution)"
+        ])
+        self.custom_texture_res_combo.setCurrentIndex(1)
+        self.custom_texture_res_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_texture_res, 9, 0)
+        custom_grid.addWidget(self.custom_texture_res_combo, 9, 1)
+        
+        advanced_layout.addWidget(self.custom_settings_toggle)
+        advanced_layout.addWidget(self.mapper_label)
+        advanced_layout.addWidget(self.mapper_combo)
+        advanced_layout.addWidget(self.mesh_mode_label)
+        advanced_layout.addWidget(self.mesh_mode_combo)
+        advanced_layout.addWidget(self.poisson_widget)
+        advanced_layout.addWidget(self.custom_settings_container)
+        self.advanced_panel.setVisible(False)
+        
+        # Initialize enabling states based on the default state of custom settings toggle
+        self._on_custom_settings_toggled(self.custom_settings_toggle.isChecked())
+        
+        self.advanced_toggle_btn.clicked.connect(self._toggle_advanced_options)
+        
+        # Standalone Panel for Step 2 Settings
+        self.standalone_panel = QFrame(step2_box)
+        self.standalone_panel.setStyleSheet("""
+            QFrame {
+                background-color: #1A1A1A;
+                border: 1px solid #2D2D2D;
+                border-radius: 4px;
+                padding: 6px;
+            }
+        """)
+        standalone_layout = QVBoxLayout(self.standalone_panel)
+        standalone_layout.setContentsMargins(6, 6, 6, 6)
+        standalone_layout.setSpacing(6)
+        
+        self.standalone_poisson_label = QLabel("Poisson Depth: 9", self.standalone_panel)
+        self.standalone_poisson_label.setStyleSheet("font-size: 11px; color: #aaaaaa; border: none; background: transparent;")
+        self.standalone_poisson_slider = QSlider(Qt.Horizontal, self.standalone_panel)
+        self.standalone_poisson_slider.setRange(6, 12)
+        self.standalone_poisson_slider.setValue(9)
+        self.standalone_poisson_slider.valueChanged.connect(self._on_standalone_poisson_depth_changed)
+        
+        self.vertex_color_toggle = QCheckBox("Include vertex colors in final mesh", self.standalone_panel)
+        self.vertex_color_toggle.setStyleSheet("font-size: 11px; font-weight: bold; color: #aaaaaa; border: none; background: transparent;")
+        self.vertex_color_toggle.setChecked(True)
+        
+        standalone_layout.addWidget(self.standalone_poisson_label)
+        standalone_layout.addWidget(self.standalone_poisson_slider)
+        standalone_layout.addWidget(self.vertex_color_toggle)
+        self.standalone_panel.setVisible(False)
+        
         self.process_btn = QPushButton("▶  Start Processing", step2_box)
         self.process_btn.setObjectName("ProcessBtn")
         self.process_btn.setEnabled(False)
@@ -1224,6 +1733,9 @@ class MainWindow(QMainWindow):
         step2_layout.addWidget(self.gpu_label)
         step2_layout.addWidget(self.gpu_combo)
         step2_layout.addWidget(self.plain_surfaces_checkbox)
+        step2_layout.addWidget(self.advanced_toggle_btn)
+        step2_layout.addWidget(self.advanced_panel)
+        step2_layout.addWidget(self.standalone_panel)
         step2_layout.addWidget(self.process_btn)
         step2_layout.addWidget(self.progress_bar)
         step2_layout.addWidget(self.status_label)
@@ -1274,12 +1786,17 @@ class MainWindow(QMainWindow):
         self.viewer_widget.images_dropped.connect(self._on_files_dropped)
         self.viewer_widget.reload_requested.connect(self._reload_viewer)
         self.viewer_widget.camera_changed.connect(self._on_camera_changed)
+        self.viewer_widget.action_new.triggered.connect(self._new_project)
         self.viewer_widget.action_save.triggered.connect(self._save_project)
         self.viewer_widget.action_load.triggered.connect(self._load_project)
         self.viewer_widget.action_recover.triggered.connect(self._retrieve_last_session)
         self.viewer_widget.action_export_dense.triggered.connect(lambda: self._export_mesh(".glb"))
         self.viewer_widget.action_export_sparse.triggered.connect(lambda: self._export_mesh(".ply"))
+        self.viewer_widget.action_export_glb.triggered.connect(lambda: self._export_mesh(".glb"))
         self.viewer_widget.action_export_obj.triggered.connect(lambda: self._export_mesh(".obj"))
+        self.viewer_widget.action_export_usdz.triggered.connect(lambda: self._export_mesh(".usdz"))
+        self.viewer_widget.action_mobile_import.triggered.connect(self._on_import_from_mobile_clicked)
+        self.viewer_widget.action_mobile_export.triggered.connect(self._on_send_to_mobile_clicked)
         self.viewer_widget.action_upload_proximap.triggered.connect(self._upload_to_proximap)
         
         # Initialize VisPy Canvas
@@ -1805,6 +2322,8 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(qss)
 
     def _handle_dropped_images(self, files: list):
+        if hasattr(self, 'standalone_cloud_path') and self.standalone_cloud_path:
+            self._clear_standalone_cloud_clicked()
         self.image_list = files
         self.img_count_label.setText(f"Images Loaded: {len(files)}")
         self.photos_tab.set_images(self.image_list)
@@ -1955,8 +2474,10 @@ class MainWindow(QMainWindow):
         self.extraction_interval = interval
         self.extraction_blur = blur
         self.total_videos_to_extract = len(videos)
+        self.progress_bar.setValue(0)
         
         self.browse_btn.setEnabled(False)
+        self.mobile_import_btn.setEnabled(False)
         self.bg_remove_btn.setEnabled(False)
         self.process_btn.setEnabled(False)
         
@@ -1981,7 +2502,6 @@ class MainWindow(QMainWindow):
         
         current_idx = self.total_videos_to_extract - len(self.extraction_queue)
         self.status_label.setText(f"Extracting {video_name} ({current_idx}/{self.total_videos_to_extract})...")
-        self.progress_bar.setValue(0)
         
         out_dir = os.path.join(get_reconstruction_out_dir(), "extracted_frames", video_stem)
         os.makedirs(out_dir, exist_ok=True)
@@ -1999,9 +2519,20 @@ class MainWindow(QMainWindow):
         self.extraction_worker.start()
 
     def _on_extraction_progress(self, current, total):
-        if total > 0:
-            pct = int((current / total) * 100)
-            self.progress_bar.setValue(pct)
+        if total > 0 and self.total_videos_to_extract > 0:
+            # 1-indexed video number (e.g. 1 out of 2)
+            current_video_idx = max(self.total_videos_to_extract - len(self.extraction_queue), 1)
+            
+            # Clamp current video percentage to max 1.0 (prevents VFR overflow jumping)
+            video_pct = min(max(current / total, 0.0), 1.0)
+            
+            # Calculate overall progress across all queued videos
+            overall_pct = int(((current_video_idx - 1 + video_pct) / self.total_videos_to_extract) * 100)
+            overall_pct = min(max(overall_pct, 0), 99)
+            
+            # Only allow progress bar to move forward — never backward
+            if overall_pct > self.progress_bar.value():
+                self.progress_bar.setValue(overall_pct)
             
     def _on_video_extraction_finished(self, result):
         import glob
@@ -2017,6 +2548,142 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Video Extraction Error", f"An error occurred while extracting frames:\n\n{err_msg}")
         self._cleanup_extraction_ui()
 
+    # def _import_reference_cloud_clicked(self):
+    #     file_path, _ = QFileDialog.getOpenFileName(
+    #         self,
+    #         "Import Reference Point Cloud",
+    #         self.last_accessed_dir,
+    #         "Point Cloud Files (*.ply *.las *.laz *.xyz *.pts *.txt)"
+    #     )
+    #     if not file_path:
+    #         return
+    # 
+    #     self.last_accessed_dir = os.path.dirname(file_path)
+    #     self.ref_cloud_path = file_path
+    #     filename = os.path.basename(file_path)
+    # 
+    #     self.ref_cloud_label.setText(f"✓ {filename}")
+    #     self.ref_cloud_container.setVisible(True)
+    #     self.console_text.append(f"[REF_CLOUD] Selected external reference cloud: {file_path}")
+    # 
+    # def _clear_reference_cloud_clicked(self):
+    #     self.ref_cloud_path = None
+    #     self.ref_cloud_label.setText("")
+    #     self.ref_cloud_container.setVisible(False)
+    #     self.console_text.append("[REF_CLOUD] Reference cloud selection cleared.")
+
+    def _import_standalone_cloud_clicked(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Standalone Point Cloud",
+            self.last_accessed_dir,
+            "Point Cloud Files (*.ply *.las *.laz *.xyz *.pts *.txt)"
+        )
+        if not file_path:
+            return
+
+        self.last_accessed_dir = os.path.dirname(file_path)
+
+        # 1. Instant header-peek for color detection (reads ~4 KB, never blocks)
+        import point_cloud_io
+        if not hasattr(point_cloud_io, "peek_has_colors"):
+            import importlib
+            importlib.reload(point_cloud_io)
+        peek_fn = getattr(point_cloud_io, "peek_has_colors", lambda path: True)
+        has_colors = peek_fn(file_path)
+
+        # 2. Update UI immediately — no freeze
+        self.standalone_cloud_path = file_path
+        filename = os.path.basename(file_path)
+        self.standalone_cloud_label.setText(f"✓ {filename}")
+        self.standalone_cloud_container.setVisible(True)
+        self._enter_standalone_mode(has_colors)
+
+        # 3. Kick off viewer preview in background (non-blocking)
+        self.view_scene_btn.setEnabled(True)
+        self.viewer_widget.mode_select.blockSignals(True)
+        self.viewer_widget.mode_select.setCurrentIndex(1)
+        self.viewer_widget.mode_select.blockSignals(False)
+        self._reload_viewer(file_path)
+
+        # 4. Load full point cloud metadata in background (point count, normals, etc.)
+        self.console_text.append(f"[STANDALONE] Loading point cloud metadata in background: {filename}...")
+        self._cloud_import_worker = CloudImportWorker(file_path, parent=self)
+        self._cloud_import_worker.finished.connect(self._on_cloud_import_done)
+        self._cloud_import_worker.error.connect(
+            lambda err: self.console_text.append(f"[WARNING] Background cloud load warning: {err}")
+        )
+        self._cloud_import_worker.start()
+
+    def _clear_standalone_cloud_clicked(self):
+        self.standalone_cloud_path = None
+        self.standalone_cloud_label.setText("")
+        self.standalone_cloud_container.setVisible(False)
+        self.console_text.append("[STANDALONE] Standalone cloud cleared.")
+        self._exit_standalone_mode()
+
+    def _enter_standalone_mode(self, has_colors: bool):
+        # 1. Clear any loaded images
+        self.image_list = []
+        self.extracted_frames = []
+        self.img_count_label.setText("Images Loaded: 0 (Standalone Mode)")
+        self.camera_label.setText("Camera: N/A (Direct point cloud reconstruction)")
+        self.bg_remove_btn.setEnabled(False)
+        
+        # 2. Clear & disable reference cloud fusion
+        # self._clear_reference_cloud_clicked()
+        # self.ref_cloud_btn.setEnabled(False)
+        
+        # 3. Disable images directory browse/mobile import
+        self.browse_btn.setEnabled(False)
+        self.mobile_import_btn.setEnabled(False)
+
+        # 4. Hide photogrammetry options in Step 2
+        self.quality_label.setVisible(False)
+        self.quality_combo.setVisible(False)
+        self.gpu_label.setVisible(False)
+        self.gpu_combo.setVisible(False)
+        self.plain_surfaces_checkbox.setVisible(False)
+        self.advanced_toggle_btn.setVisible(False)
+        self.advanced_panel.setVisible(False)
+
+        # 5. Show standalone options
+        self.standalone_panel.setVisible(True)
+        self.vertex_color_toggle.setVisible(has_colors)
+        self.vertex_color_toggle.setChecked(has_colors)
+        
+        # 6. Enable process button
+        self._set_process_btn_state("ready")
+        self.console_text.append("[STANDALONE] UI transitioned to Standalone Reconstruction mode.")
+
+    def _exit_standalone_mode(self):
+        # 1. Enable main buttons again
+        self.browse_btn.setEnabled(True)
+        self.mobile_import_btn.setEnabled(True)
+        # self.ref_cloud_btn.setEnabled(True)
+        
+        self.img_count_label.setText("Images Loaded: 0")
+        self.camera_label.setText("Camera: Undetected")
+        
+        # 2. Show photogrammetry options
+        self.quality_label.setVisible(True)
+        self.quality_combo.setVisible(True)
+        self.gpu_label.setVisible(True)
+        self.gpu_combo.setVisible(True)
+        self.plain_surfaces_checkbox.setVisible(True)
+        self.advanced_toggle_btn.setVisible(True)
+        self.advanced_panel.setVisible(False)
+
+        # 3. Hide standalone panel
+        self.standalone_panel.setVisible(False)
+        
+        # 4. Reset process button state
+        self._set_process_btn_state("idle")
+        self.console_text.append("[STANDALONE] UI exited Standalone Reconstruction mode.")
+
+    def _on_standalone_poisson_depth_changed(self, value):
+        self.standalone_poisson_label.setText(f"Poisson Depth: {value}")
+
     def _cancel_video_extraction(self):
         self.console_text.append("[VIDEO] Cancelling video extraction...")
         if hasattr(self, 'extraction_worker') and self.extraction_worker:
@@ -2025,6 +2692,7 @@ class MainWindow(QMainWindow):
 
     def _cleanup_extraction_ui(self, cancelled=False):
         self.browse_btn.setEnabled(True)
+        self.mobile_import_btn.setEnabled(True)
         self.bg_remove_btn.setEnabled(len(self.image_list) > 0)
         
         try:
@@ -2042,6 +2710,7 @@ class MainWindow(QMainWindow):
 
     def _on_all_extractions_finished(self):
         self.browse_btn.setEnabled(True)
+        self.mobile_import_btn.setEnabled(True)
         self.bg_remove_btn.setEnabled(True)
         
         try:
@@ -2093,6 +2762,7 @@ class MainWindow(QMainWindow):
         
         # Disable inputs to avoid modification during processing
         self.browse_btn.setEnabled(False)
+        self.mobile_import_btn.setEnabled(False)
         self.bg_remove_btn.setEnabled(False)
         self.process_btn.setEnabled(False)
         self._set_export_actions_enabled(False)
@@ -2142,6 +2812,7 @@ class MainWindow(QMainWindow):
 
     def _on_bg_removal_finished(self, success: bool, updated_list: list, message: str):
         self.browse_btn.setEnabled(True)
+        self.mobile_import_btn.setEnabled(True)
         self.photos_tab.setEnabled(True)
         
         if success:
@@ -2198,8 +2869,70 @@ class MainWindow(QMainWindow):
         self.console_text.append(f"[PREP] Staged {len(staged)} images for reconstruction → {staging_dir}")
         return staging_dir
 
+    def _toggle_advanced_options(self):
+        is_visible = not self.advanced_panel.isVisible()
+        self.advanced_panel.setVisible(is_visible)
+        self.advanced_toggle_btn.setText("▾  Advanced Options" if is_visible else "▸  Advanced Options")
+
+    def _on_mesh_mode_changed(self, index):
+        self.poisson_widget.setVisible(index == 1)
+
+    def _on_poisson_depth_changed(self, value):
+        self.poisson_depth_label.setText(f"Poisson Depth: {value}")
+
+    def _on_custom_settings_toggled(self, checked):
+        self.mapper_label.setEnabled(checked)
+        self.mapper_combo.setEnabled(checked)
+        self.mesh_mode_label.setEnabled(checked)
+        self.mesh_mode_combo.setEnabled(checked)
+        self.poisson_widget.setEnabled(checked)
+        self.custom_settings_container.setEnabled(checked)
+        self.quality_label.setEnabled(not checked)
+        self.quality_combo.setEnabled(not checked)
+        if checked:
+            self._prepopulate_custom_parameters_from_preset()
+
+    def _prepopulate_custom_parameters_from_preset(self):
+        quality_idx = self.quality_combo.currentIndex()
+        if quality_idx == 0:  # Preview
+            self.custom_features_spin.setValue(4096)
+            self.custom_matches_spin.setValue(16384)
+            self.custom_guided_check.setChecked(False)
+            self.custom_ba_check.setChecked(False)
+            self.custom_densify_res_combo.setCurrentIndex(2)
+            self.custom_densify_views_spin.setValue(3)
+            self.custom_refine_scales_spin.setValue(1)
+            self.custom_texture_res_combo.setCurrentIndex(2)
+        elif quality_idx == 1:  # Medium
+            self.custom_features_spin.setValue(8192)
+            self.custom_matches_spin.setValue(16384)
+            self.custom_guided_check.setChecked(self.plain_surfaces_checkbox.isChecked())
+            self.custom_ba_check.setChecked(False)
+            self.custom_densify_res_combo.setCurrentIndex(1)
+            self.custom_densify_views_spin.setValue(4)
+            self.custom_refine_scales_spin.setValue(2)
+            self.custom_texture_res_combo.setCurrentIndex(1)
+        elif quality_idx == 2:  # High
+            self.custom_features_spin.setValue(12288)
+            self.custom_matches_spin.setValue(32768)
+            self.custom_guided_check.setChecked(True)
+            self.custom_ba_check.setChecked(True)
+            self.custom_densify_res_combo.setCurrentIndex(1)
+            self.custom_densify_views_spin.setValue(5)
+            self.custom_refine_scales_spin.setValue(2)
+            self.custom_texture_res_combo.setCurrentIndex(1)
+        elif quality_idx == 3:  # Ultra
+            self.custom_features_spin.setValue(16384)
+            self.custom_matches_spin.setValue(65536)
+            self.custom_guided_check.setChecked(True)
+            self.custom_ba_check.setChecked(True)
+            self.custom_densify_res_combo.setCurrentIndex(0)
+            self.custom_densify_views_spin.setValue(8)
+            self.custom_refine_scales_spin.setValue(3)
+            self.custom_texture_res_combo.setCurrentIndex(0)
+
     def _start_processing(self):
-        if not self.image_list:
+        if not self.standalone_cloud_path and not self.image_list:
             return
             
         # Terminate any active viewer to prevent lock conflict on MVS files during reconstruction
@@ -2207,15 +2940,52 @@ class MainWindow(QMainWindow):
         
         self._set_process_btn_state("progress")
         self.browse_btn.setEnabled(False)
+        self.mobile_import_btn.setEnabled(False)
         self._set_export_actions_enabled(False)
         self.bg_remove_btn.setEnabled(False)
+        # self.ref_cloud_btn.setEnabled(False)
+        # self.ref_cloud_clear_btn.setEnabled(False)
         self.quality_combo.setEnabled(False)
         self.gpu_combo.setEnabled(False)
         self.plain_surfaces_checkbox.setEnabled(False)
+        self.mapper_combo.setEnabled(False)
+        self.mesh_mode_combo.setEnabled(False)
+        self.poisson_depth_slider.setEnabled(False)
+        self.custom_settings_toggle.setEnabled(False)
+        self.custom_settings_container.setEnabled(False)
+        self.advanced_toggle_btn.setEnabled(False)
         
         # Temp output dir inside the workspace or local appdata if not writable
         output_dir = get_reconstruction_out_dir()
         os.makedirs(output_dir, exist_ok=True)
+        
+        if self.standalone_cloud_path:
+            # Standalone reconstruction mode execution path
+            self.standalone_cloud_btn.setEnabled(False)
+            self.standalone_cloud_clear_btn.setEnabled(False)
+            self.standalone_poisson_slider.setEnabled(False)
+            self.vertex_color_toggle.setEnabled(False)
+            
+            from standalone_reconstruction import StandaloneReconstructionWorker
+            include_colors = self.vertex_color_toggle.isChecked()
+            poisson_depth = self.standalone_poisson_slider.value()
+            
+            self.worker = StandaloneReconstructionWorker(
+                self.standalone_cloud_path,
+                output_dir,
+                include_colors=include_colors,
+                poisson_depth=poisson_depth,
+                parent=self
+            )
+            self.worker.progress_changed.connect(self._on_progress_changed)
+            self.worker.status_changed.connect(self.status_label.setText)
+            self.worker.log_message.connect(self._append_log)
+            self.worker.finished.connect(self._on_pipeline_finished)
+            
+            self.console_text.append("[START] Initializing asynchronous standalone point cloud reconstruction task thread...")
+            self.worker.start()
+            self._update_file_menu_states()
+            return
         
         # stage all images into one flat directory
         image_dir = self._stage_images_for_reconstruction()
@@ -2223,18 +2993,40 @@ class MainWindow(QMainWindow):
             self.console_text.append("[ERROR] Could not stage images. Aborting reconstruction.")
             self._set_process_btn_state("ready")
             self.browse_btn.setEnabled(True)
+            self.mobile_import_btn.setEnabled(True)
             self.bg_remove_btn.setEnabled(True)
-            self.quality_combo.setEnabled(True)
+            # self.ref_cloud_btn.setEnabled(True)
+            # self.ref_cloud_clear_btn.setEnabled(True)
             self.gpu_combo.setEnabled(True)
             self.plain_surfaces_checkbox.setEnabled(True)
+            self.custom_settings_toggle.setEnabled(True)
+            self._on_custom_settings_toggled(self.custom_settings_toggle.isChecked())
+            self.advanced_toggle_btn.setEnabled(True)
             return
 
-        # Extract quality and gpu mode
+        # Extract quality, gpu mode, and mapper mode
         quality_presets = ["preview", "medium", "high", "ultra"]
         gpu_modes = ["auto", "force_gpu", "force_cpu"]
+        mapper_modes = ["incremental", "global"]
         quality_preset = quality_presets[self.quality_combo.currentIndex()]
         gpu_mode = gpu_modes[self.gpu_combo.currentIndex()]
+        mapper_mode = mapper_modes[self.mapper_combo.currentIndex()]
         has_plain = self.plain_surfaces_checkbox.isChecked()
+        mesh_mode = "poisson" if self.mesh_mode_combo.currentIndex() == 1 else "default"
+        poisson_depth = self.poisson_depth_slider.value()
+
+        custom_params = None
+        if self.custom_settings_toggle.isChecked():
+            custom_params = {
+                "colmap_max_num_features": self.custom_features_spin.value(),
+                "colmap_max_num_matches": self.custom_matches_spin.value(),
+                "guided_matching": "1" if self.custom_guided_check.isChecked() else "0",
+                "run_bundle_adjuster": self.custom_ba_check.isChecked(),
+                "densify_res": str(self.custom_densify_res_combo.currentIndex()),
+                "densify_views": str(self.custom_densify_views_spin.value()),
+                "refine_scales": str(self.custom_refine_scales_spin.value()),
+                "texture_res": str(self.custom_texture_res_combo.currentIndex())
+            }
 
         from pipeline_manager import PipelineWorker
         self.worker = PipelineWorker(
@@ -2243,6 +3035,11 @@ class MainWindow(QMainWindow):
             quality_preset=quality_preset, 
             gpu_mode=gpu_mode, 
             has_plain_surfaces=has_plain,
+            mapper_mode=mapper_mode,
+            ref_cloud_path=None,
+            mesh_mode=mesh_mode,
+            poisson_depth=poisson_depth,
+            custom_params=custom_params,
             parent=self
         )
         self.worker.progress_changed.connect(self._on_progress_changed)
@@ -2275,11 +3072,44 @@ class MainWindow(QMainWindow):
                 self.view_scene_btn.setEnabled(True)
 
     def _on_pipeline_finished(self, success: bool, msg: str):
+        if hasattr(self, 'standalone_cloud_path') and self.standalone_cloud_path:
+            # Standalone reconstruction mode finished cleanup
+            self.view_scene_btn.setEnabled(True)
+            self.standalone_cloud_btn.setEnabled(True)
+            self.standalone_cloud_clear_btn.setEnabled(True)
+            self.standalone_poisson_slider.setEnabled(True)
+            self.vertex_color_toggle.setEnabled(True)
+            
+            if success:
+                self._set_process_btn_state("ready")
+                self.console_text.append(f"[FINISHED] {msg}")
+                self._update_upload_button_state()
+                
+                mvs_dir = os.path.join(get_reconstruction_out_dir(), "mvs")
+                self.viewer_widget.set_mvs_directory(mvs_dir)
+                self.viewer_widget.mode_select.blockSignals(True)
+                self.viewer_widget.mode_select.setCurrentIndex(2) # Default to mesh mode (index 2)
+                self.viewer_widget.mode_select.blockSignals(False)
+                
+                mesh_path = self.viewer_widget.get_selected_file_path()
+                if mesh_path:
+                    self._reload_viewer(mesh_path)
+            else:
+                self._set_process_btn_state("failed")
+                self.console_text.append(f"[FAILED] Reconstruction failed: {msg}")
+            self._update_file_menu_states()
+            return
+
         self.browse_btn.setEnabled(True)
+        self.mobile_import_btn.setEnabled(True)
         self.view_scene_btn.setEnabled(True)
-        self.quality_combo.setEnabled(True)
         self.gpu_combo.setEnabled(True)
         self.plain_surfaces_checkbox.setEnabled(True)
+        self.custom_settings_toggle.setEnabled(True)
+        self._on_custom_settings_toggled(self.custom_settings_toggle.isChecked())
+        self.advanced_toggle_btn.setEnabled(True)
+        # self.ref_cloud_btn.setEnabled(True)
+        # self.ref_cloud_clear_btn.setEnabled(True)
         self.bg_remove_btn.setEnabled(len(self.image_list) > 0)
         
         if success:
@@ -2293,7 +3123,7 @@ class MainWindow(QMainWindow):
             
             # Pick best available viewer mode
             mesh_exists = False
-            for candidate in ["scene_dense_mesh_texture.ply", "scene_dense_mesh_texture.obj", "scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+            for candidate in ["scene_dense_mesh_texture.ply", "scene_dense_mesh_texture.obj", "scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
                 if os.path.exists(os.path.join(mvs_dir, candidate)):
                     mesh_exists = True
                     break
@@ -2328,6 +3158,45 @@ class MainWindow(QMainWindow):
             
         mvs_out = self._get_active_mvs_dir()
         
+        if hasattr(self, 'standalone_cloud_path') and self.standalone_cloud_path:
+            # Standalone reconstruction export logic
+            src_ply = None
+            for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh.ply"]:
+                path = os.path.join(mvs_out, candidate)
+                if os.path.exists(path):
+                    src_ply = path
+                    break
+            
+            if not src_ply:
+                self.console_text.append(f"[ERROR] Could not find reconstructed standalone PLY file in {mvs_out}")
+                QMessageBox.critical(self, "Export Error", f"Could not find reconstructed PLY file in {mvs_out}")
+                return
+
+            try:
+                import shutil
+                if fmt == ".ply":
+                    shutil.copy2(src_ply, file_path)
+                    self.console_text.append(f"[EXPORT] Standalone PLY mesh successfully written to {file_path}")
+                elif fmt in [".obj", ".glb"]:
+                    import trimesh
+                    self.console_text.append(f"[INFO] Converting and exporting standalone mesh as {fmt.upper()}...")
+                    mesh = trimesh.load(src_ply, force="mesh")
+                    mesh.export(file_path, file_type=fmt[1:])
+                    self.console_text.append(f"[EXPORT] Standalone {fmt.upper()} mesh successfully written to {file_path}")
+                elif fmt == ".usdz":
+                    import trimesh
+                    from mesh_editor.scene import _export_usdz_from_trimesh
+                    self.console_text.append("[INFO] Converting and exporting standalone mesh as USDZ...")
+                    mesh = trimesh.load(src_ply, force="mesh")
+                    _export_usdz_from_trimesh(mesh, file_path)
+                    self.console_text.append(f"[EXPORT] Standalone USDZ mesh successfully written to {file_path}")
+                else:
+                    self.console_text.append(f"[ERROR] Unsupported export format: {fmt}")
+            except Exception as e:
+                self.console_text.append(f"[ERROR] Failed to export standalone mesh: {e}")
+                QMessageBox.critical(self, "Export Error", f"Failed to export mesh:\n\n{e}")
+            return
+
         import shutil
         try:
             if fmt == ".ply":
@@ -2392,6 +3261,34 @@ class MainWindow(QMainWindow):
                         self.console_text.append(f"[ERROR] Failed to convert to GLB. Ensure Node.js and obj2gltf are installed: {e}")
                 else:
                     self.console_text.append(f"[ERROR] Could not find reconstructed GLB or OBJ file at {mvs_out}")
+            elif fmt == ".usdz":
+                src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+                src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
+                
+                source_path = None
+                if os.path.exists(src_glb):
+                    source_path = src_glb
+                elif os.path.exists(src_obj):
+                    source_path = src_obj
+                else:
+                    for candidate in ["scene_dense_mesh_texture.ply", "scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+                        path = os.path.join(mvs_out, candidate)
+                        if os.path.exists(path):
+                            source_path = path
+                            break
+
+                if source_path:
+                    self.console_text.append("[INFO] Loading source mesh to export as USDZ...")
+                    try:
+                        import trimesh
+                        from mesh_editor.scene import _export_usdz_from_trimesh
+                        mesh = trimesh.load(source_path, force="mesh")
+                        _export_usdz_from_trimesh(mesh, file_path)
+                        self.console_text.append(f"[EXPORT] USDZ mesh successfully written to {file_path}")
+                    except Exception as e:
+                        self.console_text.append(f"[ERROR] Failed to export to USDZ: {e}")
+                else:
+                    self.console_text.append(f"[ERROR] Could not find any reconstructed source mesh files in {mvs_out} to export as USDZ.")
         except Exception as e:
             self.console_text.append(f"[ERROR] Failed to export mesh: {e}")
 
@@ -2405,14 +3302,21 @@ class MainWindow(QMainWindow):
     def _set_export_actions_enabled(self, enabled: bool):
         self.viewer_widget.action_export_dense.setEnabled(enabled)
         self.viewer_widget.action_export_sparse.setEnabled(enabled)
+        self.viewer_widget.action_export_glb.setEnabled(enabled)
         self.viewer_widget.action_export_obj.setEnabled(enabled)
+        self.viewer_widget.action_export_usdz.setEnabled(enabled)
+        self.viewer_widget.action_mobile_export.setEnabled(enabled)
         self.viewer_widget.action_upload_proximap.setEnabled(enabled)
 
     def _update_upload_button_state(self):
         mvs_out = self._get_active_mvs_dir()
-        src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
-        src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
-        has_model = os.path.exists(src_glb) or os.path.exists(src_obj)
+        if hasattr(self, 'standalone_cloud_path') and self.standalone_cloud_path:
+            has_model = os.path.exists(os.path.join(mvs_out, "scene_dense_mesh_refine.ply")) or \
+                        os.path.exists(os.path.join(mvs_out, "scene_dense_mesh.ply"))
+        else:
+            src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
+            src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+            has_model = os.path.exists(src_glb) or os.path.exists(src_obj)
         self._set_export_actions_enabled(has_model)
 
     def _check_existing_scene(self):
@@ -2561,15 +3465,62 @@ class MainWindow(QMainWindow):
             
         self._update_file_menu_states()
 
+    def _new_project(self):
+        """Resets the current project session: clears loaded photos, standalone cloud, viewer, and UI state."""
+        has_content = bool(self.image_list or self.standalone_cloud_path or self.viewer_widget.current_mvs_dir)
+        if has_content:
+            reply = QMessageBox.question(
+                self,
+                "New Project",
+                "Start a new project? This will clear all loaded photos, standalone point clouds, and current 3D viewer content.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        # 1. Clear standalone point cloud state if active
+        if self.standalone_cloud_path:
+            self.standalone_cloud_path = None
+            self.standalone_cloud_label.setText("")
+            self.standalone_cloud_container.setVisible(False)
+
+        # 2. Reset images and video lists & photos tab
+        self.image_list = []
+        self.extracted_frames = []
+        if hasattr(self, 'photos_tab'):
+            self.photos_tab.set_images([])
+
+        # 3. Terminate & clear 3D viewer
+        self.viewer_widget.current_mvs_dir = None
+        self._terminate_viewer()
+        self.view_scene_btn.setEnabled(False)
+
+        # 4. Re-enable Step 1 buttons and restore photogrammetry settings panel
+        self._exit_standalone_mode()
+        self.bg_remove_btn.setEnabled(False)
+
+        # 5. Reset progress and status bar
+        self._set_process_btn_state("idle")
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Step 1/5: Waiting for images...")
+
+        # 6. Update menu states and log
+        self._update_file_menu_states()
+        self.console_text.append("[PROJECT] Created a new project session. Workspace and viewer cleared.")
+
     def _update_file_menu_states(self):
         # Is reconstruction running?
         is_running = (self.worker is not None and self.worker.isRunning())
         
         if is_running:
+            self.viewer_widget.action_new.setEnabled(False)
             self.viewer_widget.action_save.setEnabled(False)
             self.viewer_widget.action_load.setEnabled(False)
             self.viewer_widget.action_recover.setEnabled(False)
             return
+
+        self.viewer_widget.action_new.setEnabled(True)
             
         # We can save if we have a valid MVS directory containing files
         mvs_dir = self.viewer_widget.current_mvs_dir
@@ -3085,6 +4036,61 @@ class MainWindow(QMainWindow):
             )
             self.cameras_visual.parent = self.view.scene
 
+    def _render_in_vispy_from_data(self, points, colors, faces, texcoords, texture_path, mode):
+        """Upload pre-parsed geometry arrays to the VisPy scene (UI thread only).
+        Called by _on_viewer_data_ready after ViewerLoadWorker finishes background parsing.
+        """
+        import numpy as np
+        from PIL import Image
+        self._clear_visuals()
+
+        if points is None or len(points) == 0:
+            self.canvas.native.hide()
+            self.viewer_widget.fallback_label.setText("No valid 3D points or faces could be parsed.")
+            self.viewer_widget.fallback_label.show()
+            return
+
+        if mode == 2 and faces is not None and len(faces) > 0:
+            mesh_colors = None
+            if colors is not None and len(colors) > 0:
+                mesh_colors = colors.astype(np.float32) / 255.0
+            self.mesh_visual = scene.visuals.Mesh(
+                vertices=points, faces=faces,
+                vertex_colors=mesh_colors, color='white',
+                parent=self.view.scene
+            )
+            if texture_path and texcoords is not None and len(texcoords) > 0:
+                try:
+                    texture_image = np.array(Image.open(texture_path))
+                    from vispy.visuals.filters import TextureFilter
+                    self.mesh_visual.attach(TextureFilter(texture_image, texcoords))
+                except Exception as tex_err:
+                    self.console_text.append(f"[WARNING] Could not apply texture filter: {tex_err}")
+        else:
+            marker_colors = 'white'
+            if colors is not None and len(colors) > 0:
+                mc = colors.astype(np.float32) / 255.0
+                if mc.shape[1] == 3:
+                    mc = np.hstack([mc, np.ones((mc.shape[0], 1), dtype=np.float32)])
+                marker_colors = mc
+            self.markers_visual = scene.visuals.Markers(parent=self.view.scene)
+            self.markers_visual.set_data(pos=points, face_color=marker_colors, size=2, edge_width=0)
+
+        self._last_points = points
+        self.canvas.native.show()
+        self.viewer_widget.fallback_label.hide()
+
+        bbox_min = np.min(points, axis=0)
+        bbox_max = np.max(points, axis=0)
+        center = (bbox_min + bbox_max) / 2.0
+        scale  = np.max(bbox_max - bbox_min)
+        self.view.camera.center   = center
+        self.view.camera.distance = max(0.1, scale * 1.5)
+        if self.viewer_widget.cam_select.currentIndex() == 1:
+            self.view.camera.elevation = 30
+            self.view.camera.azimuth   = 45
+        self.canvas.update()
+
     def _render_in_vispy(self, file_path, mode):
         import numpy as np
         from PIL import Image
@@ -3126,7 +4132,21 @@ class MainWindow(QMainWindow):
             if not os.path.exists(ply_path):
                 ply_path = file_path
             if os.path.exists(ply_path):
-                points, colors, _ = self._read_ply(ply_path)
+                ext = os.path.splitext(ply_path)[1].lower()
+                if ext == ".ply":
+                    points, colors, _ = self._read_ply(ply_path)
+                else:
+                    try:
+                        import point_cloud_io
+                        res = point_cloud_io.load_point_cloud(ply_path)
+                        if res.success and res.cloud is not None:
+                            points = np.asarray(res.cloud.points, dtype=np.float32)
+                            if res.has_colors:
+                                colors = (np.asarray(res.cloud.colors) * 255.0).astype(np.uint8)
+                            else:
+                                colors = np.ones((len(points), 3), dtype=np.uint8) * 180
+                    except Exception as e:
+                        self.console_text.append(f"[WARNING] Vispy fallback loader failed: {e}")
                 
         elif mode == 2:
             # Textured Mesh
@@ -3136,17 +4156,31 @@ class MainWindow(QMainWindow):
             elif file_path.lower().endswith(".ply"):
                 points, colors, faces = self._read_ply(file_path)
             else:
-                dirname = os.path.dirname(file_path)
-                cand_obj = os.path.join(dirname, "scene_dense_mesh_texture.obj")
-                obj_cand = file_path.replace(".ply", ".obj").replace(".mvs", ".obj")
-                if os.path.exists(cand_obj):
-                    vertices, texcoords, faces, texture_path = self._read_obj(cand_obj)
-                    points = vertices
-                elif os.path.exists(obj_cand):
-                    vertices, texcoords, faces, texture_path = self._read_obj(obj_cand)
-                    points = vertices
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext not in [".obj", ".ply"]:
+                    try:
+                        import point_cloud_io
+                        res = point_cloud_io.load_point_cloud(file_path)
+                        if res.success and res.cloud is not None:
+                            points = np.asarray(res.cloud.points, dtype=np.float32)
+                            if res.has_colors:
+                                colors = (np.asarray(res.cloud.colors) * 255.0).astype(np.uint8)
+                            else:
+                                colors = np.ones((len(points), 3), dtype=np.uint8) * 180
+                    except Exception as e:
+                        self.console_text.append(f"[WARNING] Vispy fallback loader failed: {e}")
                 else:
-                    points, colors, faces = self._read_ply(file_path)
+                    dirname = os.path.dirname(file_path)
+                    cand_obj = os.path.join(dirname, "scene_dense_mesh_texture.obj")
+                    obj_cand = file_path.replace(".ply", ".obj").replace(".mvs", ".obj")
+                    if os.path.exists(cand_obj):
+                        vertices, texcoords, faces, texture_path = self._read_obj(cand_obj)
+                        points = vertices
+                    elif os.path.exists(obj_cand):
+                        vertices, texcoords, faces, texture_path = self._read_obj(obj_cand)
+                        points = vertices
+                    else:
+                        points, colors, faces = self._read_ply(file_path)
                     
         if mode == 2 and faces is not None and len(faces) > 0:
             mesh_colors = None
@@ -3215,27 +4249,72 @@ class MainWindow(QMainWindow):
             
         self.canvas.update()
 
+    def _on_cloud_import_done(self, res, file_path):
+        """Called on the UI thread when background cloud import finishes."""
+        if res.success:
+            self.console_text.append(
+                f"[STANDALONE] Point cloud ready. Points: {res.point_count:,} | "
+                f"Colors: {res.has_colors} | BBox diag: {res.bbox_diagonal:.2f}"
+            )
+            # Refine vertex color toggle now that we have the definitive answer
+            self.vertex_color_toggle.setChecked(res.has_colors)
+            self.vertex_color_toggle.setVisible(res.has_colors)
+        else:
+            warnings_str = ', '.join(res.warnings) if res.warnings else 'unknown error'
+            self.console_text.append(f"[WARNING] Point cloud load issues: {warnings_str}")
+
     def _reload_viewer(self, file_path):
         if not os.path.exists(file_path):
-            self.viewer_widget.fallback_label.setText(f"File not found: {os.path.basename(file_path)}\nRun reconstruction to generate this file first.")
+            self.viewer_widget.fallback_label.setText(
+                f"File not found: {os.path.basename(file_path)}\nRun reconstruction to generate this file first."
+            )
             self.viewer_widget.fallback_label.show()
             self.console_text.append(f"[WARNING] 3D file not found: {file_path}")
             return
-            
+
         mode = self.viewer_widget.mode_select.currentIndex()
         mode_names = ["Sparse Point Cloud", "Dense Point Cloud", "Textured Mesh"]
         mode_name = mode_names[mode] if mode < len(mode_names) else "3D Scene"
-        
-        self.viewer_widget.fallback_label.setText(f"Loading {mode_name}...\n(This may take a few seconds for large models)")
+
+        self.viewer_widget.fallback_label.setText(f"Loading {mode_name}...\n(Parsing geometry in background…)")
         self.viewer_widget.fallback_label.show()
         if self.canvas and self.canvas.native:
             self.canvas.native.hide()
-            
-        # Force Qt event loop to repaint UI before we enter the heavy OBJ/PLY parsing
         QApplication.processEvents()
-        
+
+        # For mode 0 (sparse), keep existing sync path (reads COLMAP binary, fast)
+        # For OBJ files (mode 2), keep sync path (OBJ reader is already needed on UI thread)
+        ext = os.path.splitext(file_path)[1].lower()
+        use_background = mode in (1, 2) and ext != '.obj'
+
+        if use_background:
+            # Spawn background parser — UI stays responsive
+            self._viewer_load_worker = ViewerLoadWorker(file_path, mode, parent=self)
+            self._viewer_load_worker.finished.connect(
+                lambda pts, cols, fcs, tcs, tex: self._on_viewer_data_ready(pts, cols, fcs, tcs, tex, file_path, mode)
+            )
+            self._viewer_load_worker.error.connect(lambda err: (
+                self.console_text.append(f"[ERROR] VisPy background load failed: {err}"),
+                self.viewer_widget.fallback_label.setText(f"Rendering failed:\n{err}"),
+                self.viewer_widget.fallback_label.show()
+            ))
+            self._viewer_load_worker.start()
+        else:
+            # Sync path for sparse (mode 0) and OBJ (mode 2)
+            try:
+                self._render_in_vispy(file_path, mode)
+                self.console_text.append(f"[INFO] Successfully rendered {os.path.basename(file_path)} in VisPy canvas.")
+            except Exception as e:
+                self.console_text.append(f"[ERROR] VisPy rendering failed: {e}")
+                self.viewer_widget.fallback_label.setText(f"Rendering failed:\n{e}")
+                self.viewer_widget.fallback_label.show()
+                if self.canvas and self.canvas.native:
+                    self.canvas.native.hide()
+
+    def _on_viewer_data_ready(self, points, colors, faces, texcoords, texture_path, file_path, mode):
+        """Called on the UI thread once ViewerLoadWorker has finished parsing."""
         try:
-            self._render_in_vispy(file_path, mode)
+            self._render_in_vispy_from_data(points, colors, faces, texcoords, texture_path, mode)
             self.console_text.append(f"[INFO] Successfully rendered {os.path.basename(file_path)} in VisPy canvas.")
         except Exception as e:
             self.console_text.append(f"[ERROR] VisPy rendering failed: {e}")
@@ -3449,12 +4528,491 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    # =========================================================================
+    # MOBILE DEVICE BRIDGE (IMPORT & EXPORT OVER LOCAL NETWORK)
+    # =========================================================================
+    def _on_import_from_mobile_clicked(self):
+        default_save_path = os.path.join(get_reconstruction_out_dir(), "mobile_imports")
+        os.makedirs(default_save_path, exist_ok=True)
+
+        setup_dialog = MobileImportSetupDialog(default_path=default_save_path, parent=self)
+        if setup_dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        save_dir = setup_dialog.get_save_dir()
+        if not save_dir:
+            return
+        os.makedirs(save_dir, exist_ok=True)
+
+        from mobile_bridge_server import MobileBridgeServer
+        self.received_mobile_files = []
+        self.mobile_server = MobileBridgeServer(save_dir=save_dir, mode="import", parent=self)
+        
+        self.mobile_server.file_received.connect(self._on_mobile_file_received)
+        self.mobile_server.all_files_received.connect(self._on_mobile_all_files_received)
+        self.mobile_server.error.connect(self._on_mobile_server_error)
+        
+        self.mobile_server.start()
+        
+        # Remove the 150ms sleep — port is now bound in __init__, no race condition
+        urls = self.mobile_server.get_urls()
+        
+        self.console_text.append(f"[MOBILE BRIDGE] Server listening at: {', '.join(urls)}")
+        
+        self.mobile_qr_dialog = MobileQRDialog(urls=urls, mode="import", parent=self)
+        
+        if self.mobile_qr_dialog.exec() == QDialog.DialogCode.Rejected:
+            if hasattr(self, 'mobile_server') and self.mobile_server:
+                self.mobile_server.stop()
+                self.mobile_server = None
+            self.console_text.append("[MOBILE BRIDGE] Mobile import session cancelled.")
+
+    def _on_mobile_file_received(self, file_path: str):
+        self.console_text.append(f"[MOBILE BRIDGE] Received file: {os.path.basename(file_path)}")
+        if not hasattr(self, 'received_mobile_files'):
+            self.received_mobile_files = []
+        self.received_mobile_files.append(file_path)
+        
+        if hasattr(self, 'mobile_qr_dialog') and self.mobile_qr_dialog:
+            self.mobile_qr_dialog.status_lbl.setText(f"Receiving files... ({len(self.received_mobile_files)} uploaded)")
+
+    def _on_mobile_all_files_received(self, files: list):
+        self.console_text.append(f"[MOBILE BRIDGE] Transfer complete! Received {len(files)} media file(s).")
+        
+        if hasattr(self, 'mobile_qr_dialog') and self.mobile_qr_dialog:
+            self.mobile_qr_dialog.accept()
+            self.mobile_qr_dialog = None
+
+        if hasattr(self, 'mobile_server') and self.mobile_server:
+            self.mobile_server.stop()
+            self.mobile_server = None
+            
+        if files:
+            images = []
+            videos = []
+            for f in files:
+                normalized = os.path.normpath(f)
+                ext = os.path.splitext(normalized)[1].lower()
+                if ext in IMAGE_EXTS:
+                    images.append(normalized)
+                elif ext in VIDEO_EXTS:
+                    videos.append(normalized)
+            
+            self._route_import(images, videos, append_to_existing=True)
+
+    def _on_mobile_server_error(self, err_msg: str):
+        self.console_text.append(f"[MOBILE BRIDGE ERROR] {err_msg}")
+        QMessageBox.critical(self, "Mobile Bridge Error", f"Mobile bridge server error:\n{err_msg}")
+
+    def _on_send_to_mobile_clicked(self):
+        formats = [".glb", ".obj", ".usdz"]
+        items = ["GLB (.glb)", "OBJ (.obj)", "USDZ (.usdz)"]
+        item, ok = QInputDialog.getItem(self, "Send 3D Model to Mobile", "Select 3D Model Format:", items, 0, False)
+        if not ok or not item:
+            return
+            
+        fmt = formats[items.index(item)]
+        mvs_out = self._get_active_mvs_dir()
+        
+        target_file = None
+        if fmt == ".glb":
+            target_file = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
+            if not os.path.exists(target_file):
+                target_file = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+        elif fmt == ".obj":
+            target_file = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+        elif fmt == ".usdz":
+            candidate = os.path.join(mvs_out, "scene_dense_mesh_texture.usdz")
+            if os.path.exists(candidate):
+                target_file = candidate
+            else:
+                src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+                src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
+                src = src_glb if os.path.exists(src_glb) else (src_obj if os.path.exists(src_obj) else None)
+                if src:
+                    try:
+                        import trimesh
+                        from mesh_editor.scene import _export_usdz_from_trimesh
+                        mesh = trimesh.load(src, force="mesh")
+                        _export_usdz_from_trimesh(mesh, candidate)
+                        target_file = candidate
+                    except Exception as e:
+                        self.console_text.append(f"[ERROR] Failed to prepare USDZ for mobile: {e}")
+                        
+        if not target_file or not os.path.exists(target_file):
+            QMessageBox.warning(self, "No Model Found", f"Could not find or generate a {fmt.upper()} model file for mobile export.")
+            return
+
+        from mobile_bridge_server import MobileBridgeServer
+        self.mobile_server = MobileBridgeServer(mode="export", serve_file=target_file, parent=self)
+        self.mobile_server.start()
+        
+        QThread.msleep(150)
+        urls = self.mobile_server.get_urls()
+        
+        self.console_text.append(f"[MOBILE BRIDGE] Mobile model server running at: {', '.join(urls)}")
+        
+        dialog = MobileQRDialog(urls=urls, mode="export", parent=self)
+        dialog.exec()
+        
+        if hasattr(self, 'mobile_server') and self.mobile_server:
+            self.mobile_server.stop()
+            self.mobile_server = None
+            self.console_text.append("[MOBILE BRIDGE] Mobile model download session closed.")
+
+
+class MobileQRDialog(QDialog):
+    def __init__(self, urls: list, mode: str = "import", parent=None):
+        super().__init__(parent)
+        self.mode = mode
+        self.setWindowTitle("Mobile Device Bridge — " + ("Import Media" if mode == "import" else "Download 3D Model"))
+        self.setFixedSize(420, 520)
+        self.setModal(True)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #121212;
+                color: #e0e0e0;
+                border: 1px solid #2B2B2B;
+            }
+            QLabel {
+                color: #e0e0e0;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        title = QLabel("📱 Scan with your Mobile Phone", self)
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #00E676;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        # Get active network Wi-Fi SSID if possible
+        wifi_ssid = None
+        if os.name == "nt":
+            try:
+                import subprocess
+                res = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", "(Get-NetConnectionProfile).Name"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                if res.returncode == 0:
+                    lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
+                    if lines:
+                        wifi_ssid = lines[0]
+            except Exception:
+                pass
+
+        if wifi_ssid:
+            network_msg = f"\nMake sure your phone is connected to the same Wi-Fi: '{wifi_ssid}'"
+        else:
+            network_msg = "\nMake sure your phone is on the same network (Wi-Fi or Hotspot)."
+
+        desc_text = (
+            "Open your phone's camera app to scan the QR code below." + network_msg
+            if mode == "import" else
+            "Scan the QR code below on your mobile device\nto download the generated 3D model." + network_msg
+        )
+        desc = QLabel(desc_text, self)
+        desc.setStyleSheet("font-size: 12px; color: #aaaaaa;")
+        desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(desc)
+
+        # QR Code Image Label
+        self.qr_label = QLabel(self)
+        self.qr_label.setFixedSize(240, 240)
+        self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.qr_label.setStyleSheet("background-color: #ffffff; border-radius: 8px; padding: 10px;")
+        
+        primary_url = urls[0] if urls else "http://127.0.0.1"
+        self._set_qr_url(primary_url)
+
+        qr_container = QHBoxLayout()
+        qr_container.addStretch()
+        qr_container.addWidget(self.qr_label)
+        qr_container.addStretch()
+        layout.addLayout(qr_container)
+
+        # URL Text Box for manual typing
+        url_box = QFrame(self)
+        url_box.setStyleSheet("background-color: #1E1E1E; border: 1px solid #333333; border-radius: 6px; padding: 8px;")
+        url_layout = QVBoxLayout(url_box)
+        url_layout.setContentsMargins(8, 4, 8, 4)
+        
+        lbl_type = QLabel("Or type this URL into your phone browser:", url_box)
+        lbl_type.setStyleSheet("font-size: 11px; color: #888888;")
+        lbl_url = QLabel(primary_url, url_box)
+        lbl_url.setStyleSheet("font-size: 13px; font-weight: bold; color: #00E676;")
+        lbl_url.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        
+        url_layout.addWidget(lbl_type)
+        url_layout.addWidget(lbl_url)
+        layout.addWidget(url_box)
+
+        # Status text
+        self.status_lbl = QLabel("Waiting for phone connection...", self)
+        self.status_lbl.setStyleSheet("font-size: 12px; font-style: italic; color: #888888;")
+        self.status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.status_lbl)
+
+        # Cancel/Close button
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_text = "Cancel" if mode == "import" else "Done / Close"
+        self.cancel_btn = QPushButton(btn_text, self)
+        self.cancel_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #292929;
+                color: #e0e0e0;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 8px 24px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #333333; border-color: #00E676; }
+        """)
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self.cancel_btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+    def _set_qr_url(self, url: str):
+        try:
+            import qrcode
+            from io import BytesIO
+            from PySide6.QtGui import QImage, QPixmap
+            
+            qr = qrcode.QRCode(
+                version=1,
+                error_correction=qrcode.constants.ERROR_CORRECT_L,
+                box_size=6,
+                border=2,
+            )
+            qr.add_data(url)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white").convert('RGB')
+
+            buffer = BytesIO()
+            img.save(buffer, format="PNG")
+            qimg = QImage.fromData(buffer.getvalue(), "PNG")
+            self.qr_label.setPixmap(QPixmap.fromImage(qimg))
+        except Exception as e:
+            self.qr_label.setText(f"QR Error:\n{e}")
+
+
+class MobileImportSetupDialog(QDialog):
+    def __init__(self, default_path: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Mobile Import Setup")
+        self.setFixedSize(450, 310)
+        self.setModal(True)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #121212;
+                color: #e0e0e0;
+                border: 1px solid #2B2B2B;
+            }
+            QLabel { color: #e0e0e0; }
+            QLineEdit {
+                background-color: #1E1E1E;
+                color: #ffffff;
+                border: 1px solid #333333;
+                border-radius: 4px;
+                padding: 6px;
+            }
+            QPushButton {
+                background-color: #292929;
+                color: #e0e0e0;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 6px 12px;
+            }
+            QPushButton:hover { background-color: #333333; border-color: #00E676; }
+            QPushButton#StartBtn {
+                background-color: #00E676;
+                color: #121212;
+                border: none;
+                font-weight: bold;
+            }
+            QPushButton#StartBtn:hover { background-color: #00c860; }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        lbl = QLabel("Choose where to save imported images/videos on your PC:", self)
+        lbl.setStyleSheet("font-size: 12px; font-weight: bold;")
+        layout.addWidget(lbl)
+
+        # Path input row
+        row = QHBoxLayout()
+        self.path_edit = QLineEdit(self)
+        self.path_edit.setText(default_path)
+        row.addWidget(self.path_edit)
+
+        self.choose_btn = QPushButton("Choose...", self)
+        self.choose_btn.clicked.connect(self._on_choose_clicked)
+        row.addWidget(self.choose_btn)
+        layout.addLayout(row)
+
+        # Network Status Info Frame
+        self.network_status_frame = QFrame(self)
+        self.network_status_frame.setStyleSheet("""
+            QFrame {
+                background-color: #1E1E1E;
+                border: 1px solid #2B2B2B;
+                border-radius: 6px;
+                padding: 10px;
+            }
+        """)
+        net_layout = QVBoxLayout(self.network_status_frame)
+        net_layout.setContentsMargins(8, 8, 8, 8)
+        net_layout.setSpacing(6)
+        
+        net_header = QHBoxLayout()
+        net_header.setContentsMargins(0, 0, 0, 0)
+        
+        self.net_title_label = QLabel("📶 Local Network Check:", self.network_status_frame)
+        self.net_title_label.setStyleSheet("font-weight: bold; font-size: 11px; color: #00E676; border: none; background: transparent; padding: 0;")
+        net_header.addWidget(self.net_title_label, stretch=1)
+        
+        self.net_refresh_btn = QPushButton("Refresh", self.network_status_frame)
+        self.net_refresh_btn.setCursor(Qt.PointingHandCursor)
+        self.net_refresh_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #00E676;
+                border: 1px solid #00E676;
+                border-radius: 3px;
+                font-size: 10px;
+                padding: 2px 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: rgba(0, 230, 118, 0.1);
+            }
+        """)
+        self.net_refresh_btn.clicked.connect(self.check_network)
+        net_header.addWidget(self.net_refresh_btn)
+        
+        net_layout.addLayout(net_header)
+        
+        self.net_details_label = QLabel("Checking network connection...", self.network_status_frame)
+        self.net_details_label.setStyleSheet("font-size: 11px; color: #aaaaaa; border: none; background: transparent; padding: 0;")
+        self.net_details_label.setWordWrap(True)
+        net_layout.addWidget(self.net_details_label)
+        
+        layout.addWidget(self.network_status_frame)
+
+        layout.addStretch()
+
+        # Action Buttons
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        
+        self.cancel_btn = QPushButton("Cancel", self)
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self.cancel_btn)
+        
+        self.start_btn = QPushButton("Start Server", self)
+        self.start_btn.setObjectName("StartBtn")
+        self.start_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(self.start_btn)
+        
+        layout.addLayout(btn_layout)
+
+        # Trigger network check
+        self.check_network()
+
+    def check_network(self):
+        import psutil
+        import socket
+        import subprocess
+        
+        # 1. Get active network connections from psutil
+        stats = psutil.net_if_stats()
+        addrs = psutil.net_if_addrs()
+        active_nets = []
+        
+        for name, stat in stats.items():
+            if stat.isup and name in addrs:
+                for addr in addrs[name]:
+                    if addr.family == socket.AF_INET:
+                        ip = addr.address
+                        if ip and ip != "127.0.0.1" and not ip.startswith("169.254"):
+                            name_lower = name.lower()
+                            if any(x in name_lower for x in ["wi-fi", "wifi", "wlan", "wireless", "802.11"]):
+                                conn_type = "Wi-Fi"
+                            elif any(x in name_lower for x in ["local area connection*", "direct"]):
+                                conn_type = "Wi-Fi Hotspot"
+                            elif any(x in name_lower for x in ["ethernet", "lan"]):
+                                conn_type = "Ethernet"
+                            else:
+                                conn_type = "LAN"
+                            active_nets.append((name, ip, conn_type))
+                            
+        # 2. Try to get Wi-Fi network name / SSID (Windows)
+        wifi_ssid = None
+        if os.name == "nt":
+            try:
+                res = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", "(Get-NetConnectionProfile).Name"],
+                    capture_output=True,
+                    text=True,
+                    timeout=2
+                )
+                if res.returncode == 0:
+                    lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
+                    if lines:
+                        wifi_ssid = lines[0]
+            except Exception:
+                pass
+                
+        # 3. Format description message
+        if not active_nets:
+            self.net_title_label.setText("📶 Local Network Check: Disconnected")
+            self.net_title_label.setStyleSheet("font-weight: bold; font-size: 11px; color: #ff5252; border: none; background: transparent; padding: 0;")
+            self.net_details_label.setText(
+                "⚠️ No active network detected! Please connect your PC to a Wi-Fi network or enable a mobile hotspot. "
+                "Both your PC and phone MUST be on the same network to transfer files."
+            )
+            self.start_btn.setEnabled(False)
+            self.start_btn.setToolTip("Please connect to a network first")
+        else:
+            self.net_title_label.setText("📶 Local Network Check: Connected")
+            self.net_title_label.setStyleSheet("font-weight: bold; font-size: 11px; color: #00E676; border: none; background: transparent; padding: 0;")
+            self.start_btn.setEnabled(True)
+            self.start_btn.setToolTip("")
+            
+            lines = []
+            for name, ip, conn_type in active_nets:
+                net_name_str = f"'{wifi_ssid}'" if (wifi_ssid and conn_type in ["Wi-Fi", "Wi-Fi Hotspot"]) else f"({name})"
+                lines.append(f"• {conn_type}: {net_name_str} — IP: <b>{ip}</b>")
+                
+            connections_str = "<br>".join(lines)
+            self.net_details_label.setText(
+                f"Your PC is connected to the following local network(s):<br>{connections_str}<br>"
+                "⚠️ <b>Important:</b> Your mobile device <b>MUST</b> be connected to the exact same Wi-Fi/Hotspot network to upload."
+            )
+
+    def _on_choose_clicked(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Save Directory", self.path_edit.text())
+        if folder:
+            self.path_edit.setText(os.path.normpath(folder))
+
+    def get_save_dir(self) -> str:
+        return self.path_edit.text()
+
 
 class VideoPresetModal(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Video Detected — Choose Frame Extraction Quality")
-        self.setFixedSize(500, 420)
+        self.setMinimumWidth(520)
         self.setModal(True)
         self.setStyleSheet("""
             QDialog {
@@ -3513,7 +5071,7 @@ class VideoPresetModal(QDialog):
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(15)
+        main_layout.setSpacing(12)
         
         info_label = QLabel("Proximap detected one or more video files. Select a frame extraction preset below:", self)
         info_label.setWordWrap(True)
@@ -3554,6 +5112,85 @@ class VideoPresetModal(QDialog):
         self.radio_buttons[1].setChecked(True)
         self.update_card_styles()
 
+        # Advanced Options Collapsible Section
+        self.advanced_toggle_btn = QPushButton("▸ Advanced Options", self)
+        self.advanced_toggle_btn.setCursor(Qt.PointingHandCursor)
+        self.advanced_toggle_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #888888;
+                border: none;
+                text-align: left;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 4px 0px;
+            }
+            QPushButton:hover {
+                color: #00E676;
+            }
+        """)
+        self.advanced_toggle_btn.clicked.connect(self._toggle_advanced)
+        main_layout.addWidget(self.advanced_toggle_btn)
+
+        self.advanced_panel = QFrame(self)
+        self.advanced_panel.setVisible(False)
+        self.advanced_panel.setStyleSheet("""
+            QFrame {
+                background-color: #1A1A1A;
+                border: 1px solid #2D2D2D;
+                border-radius: 6px;
+                padding: 8px;
+            }
+            QLabel {
+                color: #aaaaaa;
+                font-size: 11px;
+            }
+            QCheckBox {
+                color: #e0e0e0;
+                font-size: 11px;
+            }
+        """)
+        adv_layout = QVBoxLayout(self.advanced_panel)
+        adv_layout.setSpacing(8)
+
+        self.cb_override_blur = QCheckBox("Override Blur Filter Threshold", self.advanced_panel)
+        self.cb_override_blur.toggled.connect(self._on_override_toggled)
+        adv_layout.addWidget(self.cb_override_blur)
+
+        blur_controls_layout = QHBoxLayout()
+        blur_controls_layout.setContentsMargins(15, 0, 0, 0)
+        
+        lbl_blur_thresh = QLabel("Blur Threshold:", self.advanced_panel)
+        self.sp_blur_thresh = QDoubleSpinBox(self.advanced_panel)
+        self.sp_blur_thresh.setRange(0.0, 500.0)
+        self.sp_blur_thresh.setSingleStep(5.0)
+        self.sp_blur_thresh.setValue(25.0)
+        self.sp_blur_thresh.setEnabled(False)
+        self.sp_blur_thresh.setStyleSheet("""
+            QDoubleSpinBox {
+                background-color: #2D2D2D;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 4px;
+            }
+            QDoubleSpinBox:disabled {
+                background-color: #1A1A1A;
+                color: #555555;
+            }
+        """)
+
+        self.cb_disable_blur = QCheckBox("Disable blur filter entirely", self.advanced_panel)
+        self.cb_disable_blur.setEnabled(False)
+        self.cb_disable_blur.toggled.connect(self._on_disable_blur_toggled)
+
+        blur_controls_layout.addWidget(lbl_blur_thresh)
+        blur_controls_layout.addWidget(self.sp_blur_thresh)
+        blur_controls_layout.addWidget(self.cb_disable_blur)
+        adv_layout.addLayout(blur_controls_layout)
+
+        main_layout.addWidget(self.advanced_panel)
+
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         
@@ -3569,6 +5206,19 @@ class VideoPresetModal(QDialog):
         btn_layout.addWidget(self.start_btn)
         main_layout.addLayout(btn_layout)
 
+    def _toggle_advanced(self):
+        is_visible = not self.advanced_panel.isVisible()
+        self.advanced_panel.setVisible(is_visible)
+        self.advanced_toggle_btn.setText("▾ Advanced Options" if is_visible else "▸ Advanced Options")
+        self.adjustSize()
+
+    def _on_override_toggled(self, checked: bool):
+        self.cb_disable_blur.setEnabled(checked)
+        self.sp_blur_thresh.setEnabled(checked and not self.cb_disable_blur.isChecked())
+
+    def _on_disable_blur_toggled(self, checked: bool):
+        self.sp_blur_thresh.setEnabled(not checked and self.cb_override_blur.isChecked())
+
     def update_card_styles(self):
         for i, rb in enumerate(self.radio_buttons):
             card = self.cards[i]
@@ -3583,7 +5233,15 @@ class VideoPresetModal(QDialog):
         idx = self.btn_group.checkedId()
         if idx == -1:
             idx = 1
-        return self.presets[idx]
+        name, desc, interval, blur = self.presets[idx]
+
+        if self.cb_override_blur.isChecked():
+            if self.cb_disable_blur.isChecked():
+                blur = None
+            else:
+                blur = float(self.sp_blur_thresh.value())
+
+        return (name, desc, interval, blur)
 
 
 class VideoExtractionWorker(QThread):
