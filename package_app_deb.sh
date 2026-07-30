@@ -6,7 +6,7 @@ set -e
 
 APP_NAME="proximap"
 DISPLAY_NAME="Proximap"
-VERSION="1.0.0"
+VERSION="1.4.0"
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 MAINTAINER="Believe Games Studios <support@believegamesstudios.com>"
 DESCRIPTION="Intuitive desktop 3D photogrammetry pipeline GUI dashboard."
@@ -33,7 +33,8 @@ echo "[2/6] Freezing Python application with PyInstaller..."
 python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all PySide6 --collect-all vispy --collect-all numpy \
     --collect-all pillow --collect-all cv2 --collect-all trimesh \
-    --collect-all pyrr --collect-all OpenGL \
+    --collect-all pyrr --collect-all OpenGL --collect-all scipy \
+    --collect-all skimage --collect-all open3d \
     --add-data "mesh_editor/shaders:mesh_editor/shaders" \
     main_window.py
 
@@ -111,7 +112,7 @@ Architecture: ${ARCH}
 Maintainer: ${MAINTAINER}
 Section: graphics
 Priority: optional
-Depends: libc6, libgl1-mesa-glx | libgl1, libegl1, libxcb-xinerama0
+Depends: libc6, libgl1-mesa-glx | libgl1, libegl1, libxcb-xinerama0, python3-open3d | python3-scipy
 Description: ${DESCRIPTION}
  Proximap is an intuitive desktop 3D photogrammetry GUI dashboard.
  Automates COLMAP and OpenMVS pipelines for 3D reconstruction.
