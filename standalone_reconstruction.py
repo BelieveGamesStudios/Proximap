@@ -3,14 +3,21 @@ import sys
 import time
 import json
 import numpy as np
-import open3d as o3d
 from PySide6.QtCore import QThread, Signal
 import point_cloud_io
+
+HAS_OPEN3D = False
+try:
+    import open3d as o3d
+    HAS_OPEN3D = True
+except ImportError:
+    o3d = None
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
 
 class StandaloneReconstructionWorker(QThread):
     progress_changed = Signal(int)
@@ -38,6 +45,7 @@ class StandaloneReconstructionWorker(QThread):
         return {}
 
     def _normalize_toolchain_map(self, toolchain_map: dict) -> dict:
+        import shutil
         if sys.platform == "win32":
             return toolchain_map
         normalized = {}
@@ -47,9 +55,17 @@ class StandaloneReconstructionWorker(QThread):
                 continue
             normalized[group] = {}
             for name, rel_path in binaries.items():
-                mac_rel_path = rel_path[:-4] if rel_path.lower().endswith(".exe") else rel_path
-                mac_abs_path = os.path.join(get_base_dir(), mac_rel_path)
-                normalized[group][name] = mac_rel_path if os.path.exists(mac_abs_path) else rel_path
+                clean_rel_path = rel_path[:-4] if rel_path.lower().endswith(".exe") else rel_path
+                clean_abs_path = os.path.join(get_base_dir(), clean_rel_path)
+
+                if os.path.exists(clean_abs_path):
+                    normalized[group][name] = clean_rel_path
+                elif shutil.which(name):
+                    normalized[group][name] = shutil.which(name)
+                elif shutil.which(os.path.basename(clean_rel_path)):
+                    normalized[group][name] = shutil.which(os.path.basename(clean_rel_path))
+                else:
+                    normalized[group][name] = clean_rel_path
         return normalized
 
     def cancel(self):
@@ -72,96 +88,184 @@ class StandaloneReconstructionWorker(QThread):
             if not self.is_running:
                 raise InterruptedError("Canceled by user.")
 
-            # 2. Preprocess (Outlier Removal & Normals)
-            self.status_changed.emit("Step 2/5: Preprocessing (Outlier Removal & Normals)...")
-            self.log_message.emit("[STANDALONE] Removing statistical outliers (nb_neighbors=20, std_ratio=2.0)...")
-            
-            # Statistical outlier removal
-            cl, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
-            pcd_cleaned = pcd.select_by_index(ind)
-            removed = len(pcd.points) - len(pcd_cleaned.points)
-            self.log_message.emit(f"[STANDALONE] Outlier removal complete. Removed {removed:,} outlier points.")
-            
-            if not self.is_running:
-                raise InterruptedError("Canceled by user.")
-
-            # Normal estimation
-            self.log_message.emit("[STANDALONE] Estimating normal vectors...")
-            # Compute median spacing for dynamic scale
-            pts = np.asarray(pcd_cleaned.points)
-            if len(pts) == 0:
-                raise RuntimeError("Cleaned point cloud has 0 points.")
-                
-            # Compute nearest neighbor distance median
-            pcd_cleaned_sample = pcd_cleaned
-            if len(pts) > 5000:
-                indices = np.random.choice(len(pts), 5000, replace=False)
-                sample_pts = pts[indices]
-                pcd_cleaned_sample = o3d.geometry.PointCloud()
-                pcd_cleaned_sample.points = o3d.utility.Vector3dVector(sample_pts)
-                
-            kdtree = o3d.geometry.KDTreeFlann(pcd_cleaned_sample)
-            distances = []
-            for i in range(len(pcd_cleaned_sample.points)):
-                [k, idx, dist_sq] = kdtree.search_knn_vector_3d(pcd_cleaned_sample.points[i], 2)
-                if k >= 2 and dist_sq[1] > 0:
-                    distances.append(np.sqrt(dist_sq[1]))
-            d_spacing = float(np.median(distances)) if distances else 0.01
-
-            radius_normal = d_spacing * 3.5
-            pcd_cleaned.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30))
-            pcd_cleaned.orient_normals_consistent_tangent_plane(k=15)
-            self.log_message.emit("[STANDALONE] Normals estimated and oriented consistently.")
-            self.progress_changed.emit(50)
-
-            if not self.is_running:
-                raise InterruptedError("Canceled by user.")
-
-            # 3. Poisson reconstruction
-            self.status_changed.emit("Step 3/5: Generating Poisson Surface Mesh...")
-            self.log_message.emit(f"[STANDALONE] Running Poisson Surface Reconstruction (depth={self.poisson_depth})...")
-            
-            with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Error):
-                mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-                    pcd_cleaned, depth=self.poisson_depth, linear_fit=True
-                )
-            self.log_message.emit(f"[STANDALONE] Raw mesh: {len(mesh.vertices):,} vertices, {len(mesh.triangles):,} faces.")
-
-            # Trimming low-evidence vertices
-            densities_np = np.asarray(densities)
-            if len(densities_np) > 0:
-                cutoff_density = np.percentile(densities_np, 5.0)
-                vertices_to_remove = densities_np < cutoff_density
-                mesh.remove_vertices_by_mask(vertices_to_remove)
-                self.log_message.emit(f"[STANDALONE] Trimmed lower 5% low-evidence vertices (< {cutoff_density:.2f}).")
-
-            # Clean small disconnected components
-            with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Error):
-                triangle_clusters, cluster_n_triangles, _ = mesh.cluster_connected_triangles()
-            cluster_n_triangles = np.asarray(cluster_n_triangles)
-            if len(cluster_n_triangles) > 1:
-                total_faces = len(mesh.triangles)
-                min_cluster_size = max(50, int(total_faces * 0.005))
-                triangles_to_remove = cluster_n_triangles[np.asarray(triangle_clusters)] < min_cluster_size
-                mesh.remove_triangles_by_mask(triangles_to_remove)
-                mesh.remove_unreferenced_vertices()
-                self.log_message.emit(f"[STANDALONE] Removed small floating fragments (< {min_cluster_size} faces).")
-
-            mesh.compute_vertex_normals()
-            
-            # Carry over colors if toggle enabled, otherwise strip/clear
-            if self.include_colors and load_result.has_colors:
-                self.log_message.emit("[STANDALONE] Vertex colors preserved in the reconstructed mesh.")
-            else:
-                mesh.vertex_colors = o3d.utility.Vector3dVector([])
-                self.log_message.emit("[STANDALONE] Exporting bare geometry (vertex colors stripped).")
-
-            # Write intermediate Poisson mesh to scene_dense_mesh.ply
             mvs_dir = os.path.join(self.output_dir, "mvs")
             os.makedirs(mvs_dir, exist_ok=True)
             poisson_mesh_path = os.path.join(mvs_dir, "scene_dense_mesh.ply")
-            o3d.io.write_triangle_mesh(poisson_mesh_path, mesh)
-            self.log_message.emit(f"[STANDALONE] Saved Poisson mesh to {poisson_mesh_path}")
+
+            if HAS_OPEN3D and isinstance(pcd, o3d.geometry.PointCloud):
+                # Open3D pipeline path
+                self.status_changed.emit("Step 2/5: Preprocessing (Outlier Removal & Normals)...")
+                self.log_message.emit("[STANDALONE] Removing statistical outliers (nb_neighbors=20, std_ratio=2.0)...")
+                cl, ind = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+                pcd_cleaned = pcd.select_by_index(ind)
+                removed = len(pcd.points) - len(pcd_cleaned.points)
+                self.log_message.emit(f"[STANDALONE] Outlier removal complete. Removed {removed:,} outlier points.")
+                
+                if not self.is_running:
+                    raise InterruptedError("Canceled by user.")
+
+                self.log_message.emit("[STANDALONE] Estimating normal vectors...")
+                pts = np.asarray(pcd_cleaned.points)
+                if len(pts) == 0:
+                    raise RuntimeError("Cleaned point cloud has 0 points.")
+                    
+                pcd_cleaned_sample = pcd_cleaned
+                if len(pts) > 5000:
+                    indices = np.random.choice(len(pts), 5000, replace=False)
+                    sample_pts = pts[indices]
+                    pcd_cleaned_sample = o3d.geometry.PointCloud()
+                    pcd_cleaned_sample.points = o3d.utility.Vector3dVector(sample_pts)
+                    
+                kdtree = o3d.geometry.KDTreeFlann(pcd_cleaned_sample)
+                distances = []
+                for i in range(len(pcd_cleaned_sample.points)):
+                    [k, idx, dist_sq] = kdtree.search_knn_vector_3d(pcd_cleaned_sample.points[i], 2)
+                    if k >= 2 and dist_sq[1] > 0:
+                        distances.append(np.sqrt(dist_sq[1]))
+                d_spacing = float(np.median(distances)) if distances else 0.01
+
+                radius_normal = d_spacing * 3.5
+                pcd_cleaned.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30))
+                pcd_cleaned.orient_normals_consistent_tangent_plane(k=15)
+                self.log_message.emit("[STANDALONE] Normals estimated and oriented consistently.")
+                self.progress_changed.emit(50)
+
+                if not self.is_running:
+                    raise InterruptedError("Canceled by user.")
+
+                self.status_changed.emit("Step 3/5: Generating Surface Mesh...")
+                self.log_message.emit(f"[STANDALONE] Running Poisson Surface Reconstruction (depth={self.poisson_depth})...")
+                
+                with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Error):
+                    mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                        pcd_cleaned, depth=self.poisson_depth, linear_fit=True
+                    )
+                self.log_message.emit(f"[STANDALONE] Raw mesh: {len(mesh.vertices):,} vertices, {len(mesh.triangles):,} faces.")
+
+                densities_np = np.asarray(densities)
+                if len(densities_np) > 0:
+                    cutoff_density = np.percentile(densities_np, 5.0)
+                    vertices_to_remove = densities_np < cutoff_density
+                    mesh.remove_vertices_by_mask(vertices_to_remove)
+                    self.log_message.emit(f"[STANDALONE] Trimmed lower 5% low-evidence vertices (< {cutoff_density:.2f}).")
+
+                with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Error):
+                    triangle_clusters, cluster_n_triangles, _ = mesh.cluster_connected_triangles()
+                cluster_n_triangles = np.asarray(cluster_n_triangles)
+                if len(cluster_n_triangles) > 1:
+                    total_faces = len(mesh.triangles)
+                    min_cluster_size = max(50, int(total_faces * 0.005))
+                    triangles_to_remove = cluster_n_triangles[np.asarray(triangle_clusters)] < min_cluster_size
+                    mesh.remove_triangles_by_mask(triangles_to_remove)
+                    mesh.remove_unreferenced_vertices()
+                    self.log_message.emit(f"[STANDALONE] Removed small floating fragments (< {min_cluster_size} faces).")
+
+                mesh.compute_vertex_normals()
+                
+                if self.include_colors and load_result.has_colors:
+                    self.log_message.emit("[STANDALONE] Vertex colors preserved in the reconstructed mesh.")
+                else:
+                    mesh.vertex_colors = o3d.utility.Vector3dVector([])
+                    self.log_message.emit("[STANDALONE] Exporting bare geometry (vertex colors stripped).")
+
+                o3d.io.write_triangle_mesh(poisson_mesh_path, mesh)
+            else:
+                # SciPy + NumPy + Trimesh fallback pipeline
+                self.status_changed.emit("Step 2/5: Preprocessing (Outlier Removal & Normals via SciPy)...")
+                self.log_message.emit("[STANDALONE] Running SciPy statistical outlier removal...")
+                
+                pts = np.asarray(pcd.points, dtype=np.float32)
+                colors = np.asarray(pcd.colors) if hasattr(pcd, 'colors') and pcd.colors is not None else None
+                normals = np.asarray(pcd.normals) if hasattr(pcd, 'normals') and pcd.normals is not None else None
+
+                import scipy.spatial
+                tree = scipy.spatial.cKDTree(pts)
+                dists, _ = tree.query(pts, k=min(21, len(pts)), workers=-1)
+                if dists.ndim == 2 and dists.shape[1] > 1:
+                    mean_dists = dists[:, 1:].mean(axis=1)
+                    g_mean, g_std = float(mean_dists.mean()), float(mean_dists.std())
+                    inliers = mean_dists < (g_mean + 2.0 * g_std)
+                    removed = len(pts) - int(np.sum(inliers))
+                    pts = pts[inliers]
+                    if colors is not None and len(colors) == len(inliers): colors = colors[inliers]
+                    if normals is not None and len(normals) == len(inliers): normals = normals[inliers]
+                    self.log_message.emit(f"[STANDALONE] Outlier removal complete. Removed {removed:,} outlier points.")
+
+                if not self.is_running:
+                    raise InterruptedError("Canceled by user.")
+
+                tree = scipy.spatial.cKDTree(pts)
+                if normals is None or len(normals) != len(pts):
+                    self.log_message.emit("[STANDALONE] Estimating normal vectors via SciPy cKDTree SVD...")
+                    k_nn = min(20, len(pts))
+                    _, idxs = tree.query(pts, k=k_nn, workers=-1)
+                    neighbors = pts[idxs] - pts[:, np.newaxis, :]
+                    covs = np.einsum('nki,nkj->nij', neighbors, neighbors) / float(k_nn)
+                    evals, evecs = np.linalg.eigh(covs)
+                    normals = evecs[:, :, 0]
+                    centroid = pts.mean(axis=0)
+                    dots = np.einsum('ni,ni->n', normals, pts - centroid)
+                    normals[dots < 0] *= -1.0
+                    self.log_message.emit("[STANDALONE] Normals estimated successfully.")
+
+                self.progress_changed.emit(40)
+
+                if not self.is_running:
+                    raise InterruptedError("Canceled by user.")
+
+                self.status_changed.emit("Step 3/5: Generating Surface Mesh (SDF + Marching Cubes)...")
+                self.log_message.emit(f"[STANDALONE] Computing Signed Distance Field grid (depth={self.poisson_depth})...")
+                
+                min_b = pts.min(axis=0) - 0.05
+                max_b = pts.max(axis=0) + 0.05
+                res_map = {5: 64, 6: 96, 7: 128, 8: 160, 9: 192, 10: 224}
+                res = res_map.get(self.poisson_depth, 140)
+
+                x_pts = np.linspace(min_b[0], max_b[0], res)
+                y_pts = np.linspace(min_b[1], max_b[1], res)
+                z_pts = np.linspace(min_b[2], max_b[2], res)
+                
+                sdf_grid = np.zeros((res, res, res), dtype=np.float32)
+                num_slices = 8
+                slice_size = res // num_slices
+                
+                for s in range(num_slices):
+                    if not self.is_running:
+                        raise InterruptedError("Canceled by user.")
+                    z_start = s * slice_size
+                    z_end = (s + 1) * slice_size if s < num_slices - 1 else res
+                    z_sub = z_pts[z_start:z_end]
+                    
+                    gx, gy, gz = np.meshgrid(x_pts, y_pts, z_sub, indexing='ij')
+                    sub_pts = np.vstack([gx.ravel(), gy.ravel(), gz.ravel()]).T
+                    
+                    dists, idxs = tree.query(sub_pts, k=1, workers=-1)
+                    vecs = sub_pts - pts[idxs]
+                    sdfs = np.einsum('ij,ij->i', vecs, normals[idxs])
+                    sdf_grid[:, :, z_start:z_end] = sdfs.reshape((res, res, len(z_sub)))
+                    
+                    prog = 40 + int((s + 1) / num_slices * 30)
+                    self.progress_changed.emit(prog)
+
+                self.log_message.emit("[STANDALONE] Extracting isosurface mesh via Marching Cubes...")
+                import trimesh
+                pitch = (max_b - min_b) / (res - 1)
+                mesh = trimesh.voxel.ops.matrix_to_marching_cubes(sdf_grid, pitch=pitch)
+                mesh.vertices += min_b
+
+                if self.include_colors and colors is not None and len(colors) > 0:
+                    _, v_idxs = tree.query(mesh.vertices, k=1, workers=-1)
+                    v_colors = colors[v_idxs]
+                    if v_colors.ndim == 2 and v_colors.shape[1] == 3:
+                        v_colors = np.column_stack([v_colors, np.full(len(v_colors), 255, dtype=np.uint8)])
+                    mesh.visual.vertex_colors = v_colors
+                    self.log_message.emit("[STANDALONE] Vertex colors preserved in final mesh.")
+                else:
+                    self.log_message.emit("[STANDALONE] Exporting mesh geometry.")
+
+                mesh.export(poisson_mesh_path)
+
+            self.log_message.emit(f"[STANDALONE] Saved surface mesh to {poisson_mesh_path}")
             self.progress_changed.emit(75)
 
             if not self.is_running:
@@ -221,18 +325,17 @@ class StandaloneReconstructionWorker(QThread):
                     else:
                         time.sleep(0.05)
                 
-                # Read any remaining output
                 for line in proc.stdout.readlines():
                     self.log_message.emit(f"[RefineMesh] {line.strip()}")
                 
                 if proc.returncode == 0 and os.path.exists(refined_mesh_path):
                     self.log_message.emit(f"[STANDALONE] RefineMesh completed successfully → {refined_mesh_path}")
                 else:
-                    self.log_message.emit(f"[WARNING] RefineMesh exited with code {proc.returncode} or produced no output. Falling back to Poisson mesh.")
+                    self.log_message.emit(f"[WARNING] RefineMesh exited with code {proc.returncode} or produced no output. Falling back to base mesh.")
                     import shutil
                     shutil.copy2(poisson_mesh_path, refined_mesh_path)
             else:
-                self.log_message.emit("[WARNING] RefineMesh binary not found. Bypassing refinement. Falling back to Poisson mesh.")
+                self.log_message.emit("[WARNING] RefineMesh binary not found. Bypassing refinement. Falling back to base surface mesh.")
                 refined_mesh_path = os.path.join(mvs_dir, "scene_dense_mesh_refine.ply")
                 import shutil
                 shutil.copy2(poisson_mesh_path, refined_mesh_path)

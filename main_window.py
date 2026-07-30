@@ -514,6 +514,7 @@ class ViewerWrapperWidget(QFrame):
         
         self.file_menu.addMenu(self.export_mesh_menu)
         self.file_menu.addSeparator()
+        self.action_import_standalone = self.file_menu.addAction("Import Standalone Point Cloud")
         self.action_mobile_import = self.file_menu.addAction("Import Images/Videos from Mobile Device")
         self.action_mobile_export = self.file_menu.addAction("Send 3D Model to Mobile")
         self.file_menu.addSeparator()
@@ -1423,11 +1424,7 @@ class MainWindow(QMainWindow):
         # 
         # self.ref_cloud_path = None
         
-        # Standalone Cloud Import (Optional/Mutual Exclusive Mode)
-        self.standalone_cloud_btn = QPushButton("Import Standalone Point Cloud", step1_box)
-        self.standalone_cloud_btn.setObjectName("StandaloneCloudBtn")
-        self.standalone_cloud_btn.clicked.connect(self._import_standalone_cloud_clicked)
-        
+        # Standalone Cloud Import Container (Populated when importing via File Menu)
         self.standalone_cloud_container = QWidget(step1_box)
         standalone_cloud_layout = QHBoxLayout(self.standalone_cloud_container)
         standalone_cloud_layout.setContentsMargins(0, 0, 0, 0)
@@ -1471,7 +1468,6 @@ class MainWindow(QMainWindow):
         step1_layout.addWidget(self.bg_remove_btn)
         # step1_layout.addWidget(self.ref_cloud_btn)
         # step1_layout.addWidget(self.ref_cloud_container)
-        step1_layout.addWidget(self.standalone_cloud_btn)
         step1_layout.addWidget(self.standalone_cloud_container)
 
         scroll_content_layout.addWidget(step1_box)
@@ -1502,8 +1498,17 @@ class MainWindow(QMainWindow):
             "Force CPU Fallback"
         ])
         
-        self.plain_surfaces_checkbox = QCheckBox("Surface is plain/smooth", step2_box)
+        self.plain_surfaces_checkbox = QCheckBox("Plain/smooth surfaces  (Neural matching)", step2_box)
         self.plain_surfaces_checkbox.setChecked(False)
+        self.plain_surfaces_checkbox.setToolTip(
+            "Enables SuperPoint + LightGlue neural feature detection and matching\n"
+            "for plain, reflective, or textureless surfaces where standard SIFT fails.\n\n"
+            "Replaces both feature extraction and matching with a learned detector\n"
+            "that finds keypoints SIFT cannot detect on low-contrast regions.\n\n"
+            "GPU (CUDA) strongly recommended — CPU-only mode is significantly slower.\n"
+            "Not available at Preview quality (SIFT fallback is used instead).\n"
+            "Guided matching is disabled in this mode (SIFT-only concept)."
+        )
         
         # Advanced Options Collapsible Panel
         self.advanced_toggle_btn = QPushButton("▸  Advanced Options", step2_box)
@@ -1696,6 +1701,7 @@ class MainWindow(QMainWindow):
         self._on_custom_settings_toggled(self.custom_settings_toggle.isChecked())
         
         self.advanced_toggle_btn.clicked.connect(self._toggle_advanced_options)
+        self.plain_surfaces_checkbox.stateChanged.connect(self._on_plain_surfaces_toggled)
         
         # Standalone Panel for Step 2 Settings
         self.standalone_panel = QFrame(step2_box)
@@ -1808,6 +1814,7 @@ class MainWindow(QMainWindow):
         self.viewer_widget.action_export_obj.triggered.connect(lambda: self._export_mesh(".obj"))
         self.viewer_widget.action_export_usdz.triggered.connect(lambda: self._export_mesh(".usdz"))
         self.viewer_widget.action_mobile_import.triggered.connect(self._on_import_from_mobile_clicked)
+        self.viewer_widget.action_import_standalone.triggered.connect(self._import_standalone_cloud_clicked)
         self.viewer_widget.action_mobile_export.triggered.connect(self._on_send_to_mobile_clicked)
         self.viewer_widget.action_upload_proximap.triggered.connect(self._upload_to_proximap)
         
@@ -2886,6 +2893,24 @@ class MainWindow(QMainWindow):
         self.advanced_panel.setVisible(is_visible)
         self.advanced_toggle_btn.setText("▾  Advanced Options" if is_visible else "▸  Advanced Options")
 
+    def _on_plain_surfaces_toggled(self, state):
+        """
+        When neural matching (SP+LG) is active, guided matching is a SIFT-only concept
+        and has no effect. Grey out the custom guided matching checkbox so it is visibly
+        inactive rather than silently ignored.
+        """
+        neural_active = bool(state)
+        if hasattr(self, "custom_guided_check"):
+            self.custom_guided_check.setEnabled(not neural_active)
+            if neural_active:
+                self.custom_guided_check.setToolTip(
+                    "Guided matching is a SIFT-only option and is disabled\n"
+                    "when 'Plain/smooth surfaces (Neural matching)' is active."
+                )
+            else:
+                self.custom_guided_check.setToolTip("")
+
+
     def _on_mesh_mode_changed(self, index):
         self.poisson_widget.setVisible(index == 1)
 
@@ -2973,30 +2998,38 @@ class MainWindow(QMainWindow):
         
         if self.standalone_cloud_path:
             # Standalone reconstruction mode execution path
-            self.standalone_cloud_btn.setEnabled(False)
+            self.viewer_widget.action_import_standalone.setEnabled(False)
             self.standalone_cloud_clear_btn.setEnabled(False)
             self.standalone_poisson_slider.setEnabled(False)
             self.vertex_color_toggle.setEnabled(False)
             
-            from standalone_reconstruction import StandaloneReconstructionWorker
-            include_colors = self.vertex_color_toggle.isChecked()
-            poisson_depth = self.standalone_poisson_slider.value()
-            
-            self.worker = StandaloneReconstructionWorker(
-                self.standalone_cloud_path,
-                output_dir,
-                include_colors=include_colors,
-                poisson_depth=poisson_depth,
-                parent=self
-            )
-            self.worker.progress_changed.connect(self._on_progress_changed)
-            self.worker.status_changed.connect(self.status_label.setText)
-            self.worker.log_message.connect(self._append_log)
-            self.worker.finished.connect(self._on_pipeline_finished)
-            
-            self.console_text.append("[START] Initializing asynchronous standalone point cloud reconstruction task thread...")
-            self.worker.start()
-            self._update_file_menu_states()
+            try:
+                from standalone_reconstruction import StandaloneReconstructionWorker
+                include_colors = self.vertex_color_toggle.isChecked()
+                poisson_depth = self.standalone_poisson_slider.value()
+                
+                self.worker = StandaloneReconstructionWorker(
+                    self.standalone_cloud_path,
+                    output_dir,
+                    include_colors=include_colors,
+                    poisson_depth=poisson_depth,
+                    parent=self
+                )
+                self.worker.progress_changed.connect(self._on_progress_changed)
+                self.worker.status_changed.connect(self.status_label.setText)
+                self.worker.log_message.connect(self._append_log)
+                self.worker.finished.connect(self._on_pipeline_finished)
+                
+                self.console_text.append("[START] Initializing asynchronous standalone point cloud reconstruction task thread...")
+                self.worker.start()
+                self._update_file_menu_states()
+            except Exception as e:
+                self.console_text.append(f"[ERROR] Failed to start standalone reconstruction: {e}")
+                self._set_process_btn_state("ready")
+                self.viewer_widget.action_import_standalone.setEnabled(True)
+                self.standalone_cloud_clear_btn.setEnabled(True)
+                self.standalone_poisson_slider.setEnabled(True)
+                self.vertex_color_toggle.setEnabled(True)
             return
         
         # stage all images into one flat directory
@@ -3087,7 +3120,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'standalone_cloud_path') and self.standalone_cloud_path:
             # Standalone reconstruction mode finished cleanup
             self.view_scene_btn.setEnabled(True)
-            self.standalone_cloud_btn.setEnabled(True)
+            self.viewer_widget.action_import_standalone.setEnabled(True)
             self.standalone_cloud_clear_btn.setEnabled(True)
             self.standalone_poisson_slider.setEnabled(True)
             self.vertex_color_toggle.setEnabled(True)
@@ -3530,9 +3563,11 @@ class MainWindow(QMainWindow):
             self.viewer_widget.action_save.setEnabled(False)
             self.viewer_widget.action_load.setEnabled(False)
             self.viewer_widget.action_recover.setEnabled(False)
+            self.viewer_widget.action_import_standalone.setEnabled(False)
             return
 
         self.viewer_widget.action_new.setEnabled(True)
+        self.viewer_widget.action_import_standalone.setEnabled(True)
             
         # We can save if we have a valid MVS directory containing files
         mvs_dir = self.viewer_widget.current_mvs_dir

@@ -6,3 +6,4 @@ trimesh
 vispy
 PyOpenGL
 pyrr
+lightglue

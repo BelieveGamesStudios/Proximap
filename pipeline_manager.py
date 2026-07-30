@@ -120,7 +120,8 @@ class PipelineWorker(QThread):
         return {}
 
     def _normalize_toolchain_map(self, toolchain_map: dict) -> dict:
-        """Resolve Windows .exe mappings to extensionless macOS binaries when present."""
+        """Resolve binary paths appropriately for host platform (Windows vs Linux/macOS)."""
+        import shutil
         if sys.platform == "win32":
             return toolchain_map
 
@@ -132,9 +133,17 @@ class PipelineWorker(QThread):
 
             normalized[group] = {}
             for name, rel_path in binaries.items():
-                mac_rel_path = rel_path[:-4] if rel_path.lower().endswith(".exe") else rel_path
-                mac_abs_path = os.path.join(get_base_dir(), mac_rel_path)
-                normalized[group][name] = mac_rel_path if os.path.exists(mac_abs_path) else rel_path
+                clean_rel_path = rel_path[:-4] if rel_path.lower().endswith(".exe") else rel_path
+                clean_abs_path = os.path.join(get_base_dir(), clean_rel_path)
+
+                if os.path.exists(clean_abs_path):
+                    normalized[group][name] = clean_rel_path
+                elif shutil.which(name):
+                    normalized[group][name] = shutil.which(name)
+                elif shutil.which(os.path.basename(clean_rel_path)):
+                    normalized[group][name] = shutil.which(os.path.basename(clean_rel_path))
+                else:
+                    normalized[group][name] = clean_rel_path
         return normalized
 
     def run(self):
@@ -167,21 +176,25 @@ class PipelineWorker(QThread):
             self.finished.emit(False, str(e))
 
     def _verify_binaries(self) -> bool:
-        """Checks if all required binaries in toolchain_map.json exist."""
+        """Checks if all required binaries in toolchain_map.json exist locally or in system PATH."""
+        import shutil
         if not self.toolchain_map:
             return False
 
         colmap_map = self.toolchain_map.get("colmap", {})
         for name, rel_path in colmap_map.items():
-            abs_path = os.path.join(get_base_dir(), rel_path)
-            if not os.path.exists(abs_path):
-                self.log_message.emit(f"Missing COLMAP binary: {name} ({rel_path})")
+            abs_path = os.path.join(get_base_dir(), rel_path) if not os.path.isabs(rel_path) else rel_path
+            if not os.path.exists(abs_path) and not shutil.which(rel_path) and not shutil.which(name):
+                self.log_message.emit(
+                    f"Missing COLMAP binary for {sys.platform}: '{rel_path}'. "
+                    "Place Linux binary at backend_bin/colmap/colmap or install system package."
+                )
                 return False
 
         mvs_map = self.toolchain_map.get("openMVS", {})
         for name, rel_path in mvs_map.items():
-            abs_path = os.path.join(get_base_dir(), rel_path)
-            if not os.path.exists(abs_path):
+            abs_path = os.path.join(get_base_dir(), rel_path) if not os.path.isabs(rel_path) else rel_path
+            if not os.path.exists(abs_path) and not shutil.which(rel_path) and not shutil.which(name):
                 self.log_message.emit(f"Missing OpenMVS binary: {name} ({rel_path})")
                 return False
 
@@ -220,14 +233,23 @@ class PipelineWorker(QThread):
 
         self.log_message.emit(f"[RUN] {' '.join(cmd)}")
 
-        creationflags = 0
-        if sys.platform == 'win32':
-            creationflags = subprocess.CREATE_NO_WINDOW
-
         # Identify log file if it's an OpenMVS command
         exe_name = os.path.splitext(os.path.basename(cmd[0]))[0]
         # OpenMVS tools: InterfaceCOLMAP, DensifyPointCloud, ReconstructMesh, RefineMesh, TextureMesh
         is_openmvs = exe_name in ["InterfaceCOLMAP", "DensifyPointCloud", "ReconstructMesh", "RefineMesh", "TextureMesh"]
+
+        # Auto-grant execution permissions on Linux/macOS for local binary files
+        if sys.platform != 'win32' and os.path.isfile(cmd[0]):
+            try:
+                st = os.stat(cmd[0])
+                if not (st.st_mode & 0o111):
+                    os.chmod(cmd[0], st.st_mode | 0o111)
+            except Exception as e:
+                self.log_message.emit(f"[WARNING] Could not set +x permissions on {cmd[0]}: {e}")
+
+        creationflags = 0
+        if sys.platform == 'win32':
+            creationflags = subprocess.CREATE_NO_WINDOW
 
         try:
             proc = subprocess.Popen(
@@ -373,6 +395,12 @@ class PipelineWorker(QThread):
 
         except Exception as e:
             self.log_message.emit(f"[ERROR] Failed to run subprocess: {e}")
+            if sys.platform != 'win32' and cmd[0].endswith('.exe'):
+                self.log_message.emit(
+                    "[DIAGNOSTIC] Attempted to run a Windows executable (.exe) on Linux.\n"
+                    "  Please ensure native Linux binaries (or system package e.g. 'sudo apt install colmap')\n"
+                    "  are available."
+                )
             return False
 
     def _run_real_pipeline(self) -> bool:
@@ -535,10 +563,19 @@ class PipelineWorker(QThread):
 
         # =========================================================================
         # STEP 2/9 — Feature Extraction
+        # STEP 3/9 — Feature Matching
+        #
+        # When has_plain_surfaces is True AND quality_preset != "preview", replace
+        # both COLMAP CLI steps with the SuperPoint + LightGlue neural pipeline.
+        # The neural path writes keypoints and matches directly into database.db
+        # using the same schema the mapper expects, so Steps 4-9 are unchanged.
+        #
+        # At Preview quality, neural matching is skipped (users optimise for speed;
+        # CPU-bound torch inference directly fights that goal).
         # =========================================================================
-        self.status_changed.emit("Step 2/9: Extracting SIFT Features...")
-        
-        # Determine camera model options based on image dimensions
+        use_neural = self.has_plain_surfaces and self.quality_preset != "preview"
+
+        # Determine camera-model multiplicity (used by both branches)
         single_camera_val = "1"
         try:
             from PIL import Image
@@ -546,8 +583,7 @@ class PipelineWorker(QThread):
             image_extensions = ('.jpg', '.jpeg', '.png', '.tif', '.tiff')
             for filename in os.listdir(working_image_dir):
                 if filename.lower().endswith(image_extensions):
-                    img_path = os.path.join(working_image_dir, filename)
-                    with Image.open(img_path) as img:
+                    with Image.open(os.path.join(working_image_dir, filename)) as img:
                         unique_sizes.add(img.size)
             if len(unique_sizes) > 1:
                 single_camera_val = "0"
@@ -560,130 +596,168 @@ class PipelineWorker(QThread):
         except Exception as e:
             self.log_message.emit(f"[WARNING] Could not check image dimensions: {e}. Defaulting to single camera model.")
 
-        cmd_extract_gpu = [
-            colmap_exe, "feature_extractor",
-            "--database_path", database_path,
-            "--image_path", working_image_dir,
-            "--ImageReader.camera_model", "PINHOLE",
-            "--ImageReader.single_camera", single_camera_val,
-            "--FeatureExtraction.use_gpu", "1",
-            "--FeatureExtraction.max_image_size", str(colmap_max_image_size),
-            "--SiftExtraction.max_num_features", str(colmap_max_num_features),
-            "--SiftExtraction.first_octave", str(colmap_first_octave),
-            "--FeatureExtraction.num_threads", str(num_threads),
-        ]
-        cmd_extract_cpu = [
-            colmap_exe, "feature_extractor",
-            "--database_path", database_path,
-            "--image_path", working_image_dir,
-            "--ImageReader.camera_model", "PINHOLE",
-            "--ImageReader.single_camera", single_camera_val,
-            "--FeatureExtraction.use_gpu", "0",
-            "--FeatureExtraction.max_image_size", str(colmap_max_image_size),
-            "--SiftExtraction.max_num_features", str(colmap_max_num_features),
-            "--SiftExtraction.first_octave", str(colmap_first_octave),
-            "--FeatureExtraction.num_threads", str(num_threads),
-        ]
-        if self.has_plain_surfaces:
-            # Tune SIFT thresholds to detect low-contrast/weak features on smooth surfaces
-            additional_flags = [
-                "--SiftExtraction.peak_threshold", "0.002",
-                "--SiftExtraction.edge_threshold", "15"
+        if use_neural:
+            # -----------------------------------------------------------------
+            # Neural path: SuperPoint detection + LightGlue matching
+            # Replaces feature_extractor AND exhaustive_matcher entirely.
+            # -----------------------------------------------------------------
+            self.log_message.emit(
+                "[INFO] Plain/smooth surfaces: activating SuperPoint + LightGlue neural pipeline."
+            )
+            self._feature_counts = []
+            self._match_counts = []
+            if not self._run_sp_lg_pipeline(
+                database_path, working_image_dir,
+                colmap_max_num_features, single_camera_val
+            ):
+                return False
+
+            # Summaries — tracking vars are populated inside _run_sp_lg_pipeline
+            self._emit_feature_summary()
+            db_stats = self._query_colmap_database_stats(database_path)
+            num_registered = db_stats["num_images"]
+            if num_registered < 2:
+                self.log_message.emit(
+                    f"[ERROR] Only {num_registered} image(s) registered. "
+                    "Reconstruction requires at least 2. Aborting."
+                )
+                return False
+            self.progress_changed.emit(25)
+
+            self._image_names_map = self._get_image_names_from_db(database_path)
+            if db_stats["num_images"] > 0:
+                self._pairs_tested = (db_stats["num_images"] * (db_stats["num_images"] - 1)) // 2
+            else:
+                self._pairs_tested = (self._total_images * (self._total_images - 1)) // 2 if self._total_images > 1 else 0
+            self._pairs_matched = db_stats["num_pairs"]
+            if db_stats["match_counts"]:
+                self._match_counts = db_stats["match_counts"]
+            self._emit_matching_summary(database_path)
+            self.progress_changed.emit(40)
+
+        else:
+            # -----------------------------------------------------------------
+            # SIFT path: existing COLMAP feature_extractor + exhaustive_matcher
+            # -----------------------------------------------------------------
+            self.status_changed.emit("Step 2/9: Extracting SIFT Features...")
+
+            cmd_extract_gpu = [
+                colmap_exe, "feature_extractor",
+                "--database_path", database_path,
+                "--image_path", working_image_dir,
+                "--ImageReader.camera_model", "PINHOLE",
+                "--ImageReader.single_camera", single_camera_val,
+                "--FeatureExtraction.use_gpu", "1",
+                "--FeatureExtraction.max_image_size", str(colmap_max_image_size),
+                "--SiftExtraction.max_num_features", str(colmap_max_num_features),
+                "--SiftExtraction.first_octave", str(colmap_first_octave),
+                "--FeatureExtraction.num_threads", str(num_threads),
             ]
-            cmd_extract_gpu.extend(additional_flags)
-            cmd_extract_cpu.extend(additional_flags)
-        self._feature_counts = []
-        if not self._run_with_gpu_fallback(
-            cmd_extract_gpu, cmd_extract_cpu, timeout=7200.0, env=colmap_env,
-            line_parser=self._parse_feature_extraction_line
-        ):
-            return False
-        
-        # Query database for exact feature counts
-        db_stats = self._query_colmap_database_stats(database_path)
-        if db_stats["feature_counts"]:
-            self._feature_counts = db_stats["feature_counts"]
-        self._emit_feature_summary()
+            cmd_extract_cpu = [
+                colmap_exe, "feature_extractor",
+                "--database_path", database_path,
+                "--image_path", working_image_dir,
+                "--ImageReader.camera_model", "PINHOLE",
+                "--ImageReader.single_camera", single_camera_val,
+                "--FeatureExtraction.use_gpu", "0",
+                "--FeatureExtraction.max_image_size", str(colmap_max_image_size),
+                "--SiftExtraction.max_num_features", str(colmap_max_num_features),
+                "--SiftExtraction.first_octave", str(colmap_first_octave),
+                "--FeatureExtraction.num_threads", str(num_threads),
+            ]
+            if self.has_plain_surfaces:
+                # Preview quality: lower SIFT thresholds as a best-effort fallback
+                additional_flags = [
+                    "--SiftExtraction.peak_threshold", "0.002",
+                    "--SiftExtraction.edge_threshold", "15"
+                ]
+                cmd_extract_gpu.extend(additional_flags)
+                cmd_extract_cpu.extend(additional_flags)
+            self._feature_counts = []
+            if not self._run_with_gpu_fallback(
+                cmd_extract_gpu, cmd_extract_cpu, timeout=7200.0, env=colmap_env,
+                line_parser=self._parse_feature_extraction_line
+            ):
+                return False
 
-        # Sanity check: Ensure at least 2 images are registered and have features
-        num_registered = db_stats["num_images"]
-        if num_registered < 2:
-            self.log_message.emit(
-                f"[ERROR] Only {num_registered} image(s) successfully registered in the database. "
-                "Reconstruction requires at least 2 registered images. Aborting."
-            )
-            return False
-        elif num_registered < self._total_images:
-            self.log_message.emit(
-                f"[WARNING] Only {num_registered} out of {self._total_images} images successfully registered. "
-                "Some images may be skipped or corrupt."
-            )
+            db_stats = self._query_colmap_database_stats(database_path)
+            if db_stats["feature_counts"]:
+                self._feature_counts = db_stats["feature_counts"]
+            self._emit_feature_summary()
 
-        self.progress_changed.emit(25)
+            num_registered = db_stats["num_images"]
+            if num_registered < 2:
+                self.log_message.emit(
+                    f"[ERROR] Only {num_registered} image(s) successfully registered in the database. "
+                    "Reconstruction requires at least 2 registered images. Aborting."
+                )
+                return False
+            elif num_registered < self._total_images:
+                self.log_message.emit(
+                    f"[WARNING] Only {num_registered} out of {self._total_images} images successfully registered. "
+                    "Some images may be skipped or corrupt."
+                )
 
-        # =========================================================================
-        # STEP 3/9 — Feature Matching
-        # =========================================================================
-        self.status_changed.emit("Step 3/9: Matching SIFT Features...")
-        
-        # Load image names mapping for enhanced log output
-        self._image_names_map = self._get_image_names_from_db(database_path)
-        
-        cmd_match_gpu = [
-            colmap_exe, "exhaustive_matcher",
-            "--database_path", database_path,
-            "--FeatureMatching.use_gpu", "1",
-            "--FeatureMatching.guided_matching", guided_matching,
-            "--SiftMatching.max_ratio", nndr_ratio,
-            "--FeatureMatching.max_num_matches", str(colmap_max_num_matches),
-            "--FeatureMatching.num_threads", str(num_threads),
-        ]
-        cmd_match_cpu = [
-            colmap_exe, "exhaustive_matcher",
-            "--database_path", database_path,
-            "--FeatureMatching.use_gpu", "0",
-            "--FeatureMatching.guided_matching", guided_matching,
-            "--SiftMatching.max_ratio", nndr_ratio,
-            "--FeatureMatching.max_num_matches", str(colmap_max_num_matches),
-            "--FeatureMatching.num_threads", str(num_threads),
-        ]
-        self._match_counts = []
-        if not self._run_with_gpu_fallback(
-            cmd_match_gpu, cmd_match_cpu, timeout=7200.0, env=colmap_env,
-            line_parser=self._parse_matching_line
-        ):
-            return False
+            self.progress_changed.emit(25)
 
-        db_stats = self._query_colmap_database_stats(database_path)
-        if self._total_images > 1 and db_stats["num_pairs"] == 0:
-            self.log_message.emit(
-                "[WARNING] Feature matching produced 0 verified pairs. "
-                "Retrying with CPU matcher and relaxed matching thresholds..."
-            )
-            self._clear_colmap_match_tables(database_path)
-            relaxed_cpu_match = list(cmd_match_cpu)
-            self._set_colmap_option(relaxed_cpu_match, "--FeatureMatching.guided_matching", "1")
-            self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_ratio", "0.95")
-            self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_distance", "0.9")
-            self._using_gpu_sift = False
-            if not self._run_process_realtime(
-                relaxed_cpu_match, timeout=7200.0, env=colmap_env,
+            # Step 3: SIFT matching
+            self.status_changed.emit("Step 3/9: Matching SIFT Features...")
+            self._image_names_map = self._get_image_names_from_db(database_path)
+
+            cmd_match_gpu = [
+                colmap_exe, "exhaustive_matcher",
+                "--database_path", database_path,
+                "--FeatureMatching.use_gpu", "1",
+                "--FeatureMatching.guided_matching", guided_matching,
+                "--SiftMatching.max_ratio", nndr_ratio,
+                "--FeatureMatching.max_num_matches", str(colmap_max_num_matches),
+                "--FeatureMatching.num_threads", str(num_threads),
+            ]
+            cmd_match_cpu = [
+                colmap_exe, "exhaustive_matcher",
+                "--database_path", database_path,
+                "--FeatureMatching.use_gpu", "0",
+                "--FeatureMatching.guided_matching", guided_matching,
+                "--SiftMatching.max_ratio", nndr_ratio,
+                "--FeatureMatching.max_num_matches", str(colmap_max_num_matches),
+                "--FeatureMatching.num_threads", str(num_threads),
+            ]
+            self._match_counts = []
+            if not self._run_with_gpu_fallback(
+                cmd_match_gpu, cmd_match_cpu, timeout=7200.0, env=colmap_env,
                 line_parser=self._parse_matching_line
             ):
                 return False
-            
-        # Query database for exact matching stats
-        db_stats = self._query_colmap_database_stats(database_path)
-        if db_stats["num_images"] > 0:
-            self._pairs_tested = (db_stats["num_images"] * (db_stats["num_images"] - 1)) // 2
-        else:
-            self._pairs_tested = (self._total_images * (self._total_images - 1)) // 2 if self._total_images > 1 else 0
-        self._pairs_matched = db_stats["num_pairs"]
-        if db_stats["match_counts"]:
-            self._match_counts = db_stats["match_counts"]
-            
-        self._emit_matching_summary(database_path)
-        self.progress_changed.emit(40)
+
+            db_stats = self._query_colmap_database_stats(database_path)
+            if self._total_images > 1 and db_stats["num_pairs"] == 0:
+                self.log_message.emit(
+                    "[WARNING] Feature matching produced 0 verified pairs. "
+                    "Retrying with CPU matcher and relaxed matching thresholds..."
+                )
+                self._clear_colmap_match_tables(database_path)
+                relaxed_cpu_match = list(cmd_match_cpu)
+                self._set_colmap_option(relaxed_cpu_match, "--FeatureMatching.guided_matching", "1")
+                self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_ratio", "0.95")
+                self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_distance", "0.9")
+                self._using_gpu_sift = False
+                if not self._run_process_realtime(
+                    relaxed_cpu_match, timeout=7200.0, env=colmap_env,
+                    line_parser=self._parse_matching_line
+                ):
+                    return False
+
+            db_stats = self._query_colmap_database_stats(database_path)
+            if db_stats["num_images"] > 0:
+                self._pairs_tested = (db_stats["num_images"] * (db_stats["num_images"] - 1)) // 2
+            else:
+                self._pairs_tested = (self._total_images * (self._total_images - 1)) // 2 if self._total_images > 1 else 0
+            self._pairs_matched = db_stats["num_pairs"]
+            if db_stats["match_counts"]:
+                self._match_counts = db_stats["match_counts"]
+            self._emit_matching_summary(database_path)
+            self.progress_changed.emit(40)
+
 
         # =========================================================================
         # STEP 4/9 — Sparse Reconstruction (Mapper)
@@ -990,6 +1064,335 @@ class PipelineWorker(QThread):
             self.log_message.emit("[WARNING] TextureMesh PLY pass failed. Skipping OBJ export pass.")
 
         self.progress_changed.emit(99)
+        return True
+
+    def _run_sp_lg_pipeline(
+        self,
+        database_path: str,
+        image_dir: str,
+        max_num_keypoints: int,
+        single_camera_val: str,
+    ) -> bool:
+        """
+        SuperPoint + LightGlue neural feature detection and exhaustive matching.
+        Writes results into COLMAP's SQLite database.db so mapper proceeds unmodified.
+
+        Schema references (COLMAP source / docs, 2026-07-29):
+          keypoints.data  : float32[N, 4] row-major — [x, y, scale, orientation]
+                            Similarity format (cols=4). scale=1.0, orientation=0.0;
+                            mapper uses only columns 0/1 (x, y).
+          matches.data    : uint32[M, 2] — [kp_idx_img1, kp_idx_img2]
+          two_view_geometries.config:
+                            UNCALIBRATED = 3  (fundamental matrix)
+                            Correct for general interior scenes that are not globally
+                            planar. PLANAR=4 (homography) would be wrong here.
+                            Source: colmap/src/colmap/scene/two_view_geometry.h
+          pair_id formula : 2147483647 * min(id1, id2) + max(id1, id2)
+                            Source: colmap/src/colmap/scene/database.h
+        """
+        import sqlite3
+        import numpy as np
+        import cv2
+        from PIL import Image as PILImage
+
+        # ------------------------------------------------------------------
+        # TwoViewGeometry::ConfigurationType (two_view_geometry.h, main branch)
+        # UNCALIBRATED = 3: fundamental matrix — correct for general interior
+        # scenes where the scene is not globally planar (a room, not a wall).
+        # ------------------------------------------------------------------
+        COLMAP_UNCALIBRATED = 3
+
+        def _pair_id(id1: int, id2: int) -> int:
+            """Encode two image IDs per COLMAP database.h."""
+            if id1 > id2:
+                id1, id2 = id2, id1
+            return 2147483647 * id1 + id2
+
+        # --- Device selection (mirrors existing gpu_mode semantics) -------
+        try:
+            import torch
+        except ImportError:
+            self.log_message.emit("[ERROR] SP+LG: PyTorch not installed. Install lightglue (pip install lightglue).")
+            return False
+
+        if self.gpu_mode == "force_cpu":
+            device = torch.device("cpu")
+            self.log_message.emit("[SP+LG] CPU-only mode selected.")
+        elif self.gpu_mode == "force_gpu":
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+                self.log_message.emit("[SP+LG] Forced GPU: CUDA available.")
+            else:
+                device = torch.device("cpu")
+                self.log_message.emit("[SP+LG] WARNING: GPU forced but CUDA unavailable — CPU fallback.")
+        else:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            dev_label = "CUDA GPU" if device.type == "cuda" else "CPU (note: may be slow on large image sets)"
+            self.log_message.emit(f"[SP+LG] Auto-detected device: {dev_label}.")
+        self._using_gpu_sift = (device.type == "cuda")
+
+        # --- Pre-bundled weights / TORCH_HOME redirect -----------------------
+        # Always redirect torch.hub to our bundled weights directory.
+        # If the weights are already present (offline), they load instantly.
+        # If absent on first run, torch.hub downloads them here once.
+        # Must happen BEFORE importing lightglue (its __init__ calls
+        # torch.hub.load_state_dict_from_url unconditionally at import time).
+        weights_dir = os.path.join(get_base_dir(), "backend_bin", "sp_lg_weights")
+        os.makedirs(weights_dir, exist_ok=True)
+        os.environ["TORCH_HOME"] = weights_dir
+        self.log_message.emit(f"[SP+LG] Using model weight cache: {weights_dir}")
+
+        # --- Load models ---------------------------------------------------
+        try:
+            from lightglue import SuperPoint, LightGlue
+            from lightglue.utils import load_image as lg_load_image
+        except ImportError as e:
+            self.log_message.emit(f"[ERROR] SP+LG: lightglue not found: {e}. Install: pip install lightglue")
+            return False
+
+        self.log_message.emit("[SP+LG] Loading SuperPoint + LightGlue models...")
+        try:
+            extractor = SuperPoint(max_num_keypoints=max_num_keypoints).eval().to(device)
+            matcher = LightGlue(features="superpoint").eval().to(device)
+        except Exception as e:
+            err_str = str(e).lower()
+            if "urlopen" in err_str or "name resolution" in err_str or "connection" in err_str or "gaierror" in err_str:
+                self.log_message.emit(
+                    "[ERROR] SP+LG: Cannot download model weights (no internet access / DNS resolution failed).\n"
+                    "  To resolve offline operation, run the following command while connected to internet:\n"
+                    "  curl -L https://github.com/cvg/LightGlue/releases/download/v0.1_arxiv/superpoint_v1.pth "
+                    "-o backend_bin/sp_lg_weights/hub/checkpoints/superpoint_v1.pth && \\\n"
+                    "  curl -L https://github.com/cvg/LightGlue/releases/download/v0.1_arxiv/superpoint_lightglue.pth "
+                    "-o backend_bin/sp_lg_weights/hub/checkpoints/superpoint_lightglue_v0-1_arxiv.pth"
+                )
+            else:
+                self.log_message.emit(f"[ERROR] SP+LG model loading failed: {e}")
+            return False
+        self.log_message.emit("[SP+LG] Models ready.")
+
+        # --- Enumerate images ----------------------------------------------
+        image_extensions = ('.jpg', '.jpeg', '.png', '.tif', '.tiff')
+        image_files = sorted([
+            f for f in os.listdir(image_dir)
+            if f.lower().endswith(image_extensions)
+        ])
+        if not image_files:
+            self.log_message.emit("[ERROR] SP+LG: No images found in working directory.")
+            return False
+        total_images = len(image_files)
+
+        # --- Create DB schema via colmap database_creator ------------------
+        base_dir = get_base_dir()
+        colmap_exe = os.path.join(base_dir, self.toolchain_map["colmap"]["colmap"])
+        colmap_env = self._get_colmap_env()
+        self.log_message.emit("[SP+LG] Initialising COLMAP database schema...")
+        ok = self._run_process_realtime(
+            [colmap_exe, "database_creator", "--database_path", database_path],
+            timeout=30.0, env=colmap_env
+        )
+        if not ok:
+            self.log_message.emit("[ERROR] SP+LG: colmap database_creator failed.")
+            return False
+
+        # --- Measure image dimensions and register cameras + images --------
+        size_map = {}  # filename -> (w, h)
+        for fname in image_files:
+            try:
+                with PILImage.open(os.path.join(image_dir, fname)) as img:
+                    size_map[fname] = img.size  # PIL: (width, height)
+            except Exception:
+                size_map[fname] = (1920, 1080)
+
+        nan = float("nan")
+        conn = sqlite3.connect(database_path)
+        cur = conn.cursor()
+        try:
+            use_single_camera = (single_camera_val == "1")
+            if use_single_camera:
+                w, h = list(size_map.values())[0]
+                fx = max(w, h) * 1.2
+                params = np.array([fx, fx, w / 2.0, h / 2.0], dtype=np.float64)
+                cur.execute(
+                    "INSERT INTO cameras (model, width, height, params, prior_focal_length)"
+                    " VALUES (?,?,?,?,?)",
+                    (1, w, h, params.tobytes(), 0)
+                )
+                size_to_cam = {(w, h): cur.lastrowid}
+            else:
+                size_to_cam = {}
+                for fname in image_files:
+                    sz = size_map[fname]
+                    if sz not in size_to_cam:
+                        w, h = sz
+                        fx = max(w, h) * 1.2
+                        params = np.array([fx, fx, w / 2.0, h / 2.0], dtype=np.float64)
+                        cur.execute(
+                            "INSERT INTO cameras (model, width, height, params, prior_focal_length)"
+                            " VALUES (?,?,?,?,?)",
+                            (1, w, h, params.tobytes(), 0)
+                        )
+                        size_to_cam[sz] = cur.lastrowid
+
+            # images rows — unknown prior pose stored as NaN per COLMAP convention
+            image_id_map = {}
+            for fname in image_files:
+                cam_id = size_to_cam[size_map[fname]]
+                cur.execute(
+                    "INSERT INTO images (name, camera_id) VALUES (?,?)",
+                    (fname, cam_id)
+                )
+                image_id_map[fname] = cur.lastrowid
+            conn.commit()
+        except Exception as e:
+            self.log_message.emit(f"[ERROR] SP+LG: Failed to register cameras/images: {e}")
+            conn.close()
+            return False
+
+        # --- SuperPoint extraction per image --------------------------------
+        self.status_changed.emit("Step 2/9: Extracting Neural Features (SuperPoint)...")
+        self._feature_counts = []
+        features_by_id = {}  # image_id -> lightglue feature dict (on CPU for storage)
+        dev_tag = "GPU" if device.type == "cuda" else "CPU"
+
+        for i, fname in enumerate(image_files):
+            if not self.is_running:
+                conn.close()
+                return False
+
+            image_id = image_id_map[fname]
+            self.status_changed.emit(f"Step 2/9: SP Keypoints ({i + 1}/{total_images})...")
+            self.progress_changed.emit(10 + int(15 * i / total_images))
+
+            try:
+                img_tensor = lg_load_image(os.path.join(image_dir, fname)).to(device)
+                with torch.inference_mode():
+                    feats = extractor.extract(img_tensor)
+
+                # keypoints: [1, N, 2] pixel coords
+                kps = feats["keypoints"][0].cpu().numpy()  # [N, 2]
+                n_kp = len(kps)
+
+                # COLMAP similarity keypoint blob: float32[N, 4] — [x, y, scale, orientation]
+                # Columns 2 (scale) and 3 (orientation) are zeroed; mapper uses only 0/1.
+                # cols=4 is the "similarity" format per COLMAP database.html.
+                kp_blob = np.zeros((n_kp, 4), dtype=np.float32)
+                kp_blob[:, 0] = kps[:, 0]  # x
+                kp_blob[:, 1] = kps[:, 1]  # y
+
+                cur.execute(
+                    "INSERT INTO keypoints (image_id, rows, cols, data) VALUES (?,?,?,?)",
+                    (image_id, n_kp, 4, kp_blob.tobytes())
+                )
+
+                # Move feature dict to CPU and store for matching pass
+                features_by_id[image_id] = {
+                    k: v.cpu() for k, v in feats.items()
+                }
+                self._feature_counts.append(n_kp)
+                self.log_message.emit(
+                    f"[SP/{dev_tag}] {fname}: {n_kp:,} keypoints ({i + 1}/{total_images})"
+                )
+            except Exception as e:
+                self.log_message.emit(f"[ERROR] SP+LG: SuperPoint failed on {fname}: {e}")
+                conn.close()
+                return False
+
+        conn.commit()
+
+        # Sanity check
+        if len(features_by_id) < 2:
+            self.log_message.emit("[ERROR] SP+LG: Fewer than 2 images successfully processed.")
+            conn.close()
+            return False
+
+        # --- LightGlue exhaustive matching + RANSAC geometric verification --
+        self.status_changed.emit("Step 3/9: Matching Neural Features (LightGlue)...")
+        image_ids = list(image_id_map.values())
+        all_pairs = [
+            (image_ids[a], image_ids[b])
+            for a in range(len(image_ids))
+            for b in range(a + 1, len(image_ids))
+        ]
+        num_pairs = len(all_pairs)
+        self._match_counts = []
+
+        # F matrix as float64[3,3] row-major zero blob (written when RANSAC fails to
+        # find inliers; a valid F will overwrite it when inliers are found).
+        zero_f = np.zeros((3, 3), dtype=np.float64).tobytes()
+
+        for pair_idx, (id1, id2) in enumerate(all_pairs):
+            if not self.is_running:
+                conn.close()
+                return False
+
+            self.progress_changed.emit(25 + int(15 * pair_idx / max(num_pairs, 1)))
+
+            feats0 = {k: v.to(device) for k, v in features_by_id[id1].items()}
+            feats1 = {k: v.to(device) for k, v in features_by_id[id2].items()}
+
+            try:
+                with torch.inference_mode():
+                    result = matcher({"image0": feats0, "image1": feats1})
+            except Exception as e:
+                self.log_message.emit(f"[WARNING] SP+LG: LightGlue failed for pair ({id1},{id2}): {e}")
+                continue
+
+            match_indices = result["matches"][0].cpu().numpy()  # [M, 2]
+            if len(match_indices) == 0:
+                continue
+
+            pid = _pair_id(id1, id2)
+            matches_blob = match_indices.astype(np.uint32).tobytes()
+            cur.execute(
+                "INSERT INTO matches (pair_id, rows, cols, data) VALUES (?,?,?,?)",
+                (pid, len(match_indices), 2, matches_blob)
+            )
+
+            # Geometric verification via RANSAC on fundamental matrix.
+            # UNCALIBRATED (config=3) is semantically correct for a general interior
+            # scene (a room is not globally planar; PLANAR/homography would be wrong).
+            kps0 = features_by_id[id1]["keypoints"][0].numpy()  # [N0, 2]
+            kps1 = features_by_id[id2]["keypoints"][0].numpy()  # [N1, 2]
+            pts0 = kps0[match_indices[:, 0]].astype(np.float64)
+            pts1 = kps1[match_indices[:, 1]].astype(np.float64)
+
+            inlier_indices = match_indices  # fallback: all LG matches as inliers
+            f_blob = zero_f
+            if len(pts0) >= 8:
+                try:
+                    F, mask = cv2.findFundamentalMat(pts0, pts1, cv2.FM_RANSAC, 3.0, 0.999)
+                    if F is not None and mask is not None:
+                        inlier_mask = mask.ravel().astype(bool)
+                        inlier_indices = match_indices[inlier_mask]
+                        f_blob = F.astype(np.float64).tobytes()
+                except Exception:
+                    pass  # keep fallback values
+
+            n_inliers = len(inlier_indices)
+            if n_inliers < 4:
+                continue  # not enough inliers for mapper initialisation
+
+            inliers_blob = inlier_indices.astype(np.uint32).tobytes()
+            cur.execute(
+                "INSERT INTO two_view_geometries"
+                " (pair_id, rows, cols, data, config, F, E, H)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (pid, n_inliers, 2, inliers_blob,
+                 COLMAP_UNCALIBRATED, f_blob, zero_f, zero_f)
+            )
+            self._match_counts.append(n_inliers)
+            self.log_message.emit(
+                f"[LG/{dev_tag}] Pair ({id1},{id2}): {len(match_indices)} matches → {n_inliers} inliers"
+                f" ({pair_idx + 1}/{num_pairs})"
+            )
+
+        conn.commit()
+        conn.close()
+
+        n_verified = len(self._match_counts)
+        self.log_message.emit(
+            f"[SP+LG] Complete: {n_verified}/{num_pairs} pairs have verified matches."
+        )
         return True
 
     def _run_simulated_pipeline(self) -> bool:
@@ -1537,6 +1940,12 @@ class PipelineWorker(QThread):
         avg = sum(self._feature_counts) / total
         min_f = min(self._feature_counts)
         max_f = max(self._feature_counts)
+
+        use_neural = self.has_plain_surfaces and self.quality_preset != "preview"
+        if use_neural:
+            compute_label = f"Neural (SuperPoint / {'GPU' if self._using_gpu_sift else 'CPU'})"
+        else:
+            compute_label = "iGPU (OpenGL)" if self._using_gpu_sift else "CPU (VLFeat)"
         
         self.log_message.emit(
             f"\n{'='*60}\n"
@@ -1545,11 +1954,10 @@ class PipelineWorker(QThread):
             f"  Images processed:     {total}\n"
             f"  Features per image:   {avg:,.0f} avg  |  {min_f:,} min  |  {max_f:,} max\n"
             f"  Total features:       {sum(self._feature_counts):,}\n"
-            f"  Compute device:       {'iGPU (OpenGL)' if self._using_gpu_sift else 'CPU (VLFeat)'}\n"
+            f"  Compute device:       {compute_label}\n"
             f"{'='*60}"
         )
         
-        # DIAGNOSTIC: Warn if features are too low
         if avg < 3000:
             self.log_message.emit(
                 "[⚠ DIAGNOSTIC] Average features per image is LOW (<3000). "
