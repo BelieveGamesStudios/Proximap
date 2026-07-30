@@ -109,22 +109,11 @@ class StandaloneReconstructionWorker(QThread):
                 if len(pts) == 0:
                     raise RuntimeError("Cleaned point cloud has 0 points.")
                     
-                pcd_cleaned_sample = pcd_cleaned
-                if len(pts) > 5000:
-                    indices = np.random.choice(len(pts), 5000, replace=False)
-                    sample_pts = pts[indices]
-                    pcd_cleaned_sample = o3d.geometry.PointCloud()
-                    pcd_cleaned_sample.points = o3d.utility.Vector3dVector(sample_pts)
-                    
-                kdtree = o3d.geometry.KDTreeFlann(pcd_cleaned_sample)
-                distances = []
-                for i in range(len(pcd_cleaned_sample.points)):
-                    [k, idx, dist_sq] = kdtree.search_knn_vector_3d(pcd_cleaned_sample.points[i], 2)
-                    if k >= 2 and dist_sq[1] > 0:
-                        distances.append(np.sqrt(dist_sq[1]))
-                d_spacing = float(np.median(distances)) if distances else 0.01
-
-                radius_normal = d_spacing * 3.5
+                bbox = pcd_cleaned.get_axis_aligned_bounding_box()
+                extent = np.asarray(bbox.get_extent())
+                radius_normal = float(np.max(extent)) * 0.015
+                if radius_normal <= 0:
+                    radius_normal = 0.05
                 pcd_cleaned.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30))
                 pcd_cleaned.orient_normals_consistent_tangent_plane(k=15)
                 self.log_message.emit("[STANDALONE] Normals estimated and oriented consistently.")
@@ -201,8 +190,13 @@ class StandaloneReconstructionWorker(QThread):
                     _, idxs = tree.query(pts, k=k_nn, workers=-1)
                     neighbors = pts[idxs] - pts[:, np.newaxis, :]
                     covs = np.einsum('nki,nkj->nij', neighbors, neighbors) / float(k_nn)
-                    evals, evecs = np.linalg.eigh(covs)
-                    normals = evecs[:, :, 0]
+                    normals = np.zeros_like(pts, dtype=np.float32)
+                    chunk_sz = 10000
+                    for c_start in range(0, len(pts), chunk_sz):
+                        c_end = min(c_start + chunk_sz, len(pts))
+                        _, evecs = np.linalg.eigh(covs[c_start:c_end])
+                        normals[c_start:c_end] = evecs[:, :, 0]
+                        time.sleep(0)  # Yield GIL to Qt event loop
                     centroid = pts.mean(axis=0)
                     dots = np.einsum('ni,ni->n', normals, pts - centroid)
                     normals[dots < 0] *= -1.0

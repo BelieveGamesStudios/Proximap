@@ -514,7 +514,7 @@ class ViewerWrapperWidget(QFrame):
         
         self.file_menu.addMenu(self.export_mesh_menu)
         self.file_menu.addSeparator()
-        self.action_import_standalone = self.file_menu.addAction("Import Standalone Point Cloud")
+        self.action_import_standalone = self.file_menu.addAction("Import Point Cloud")
         self.action_mobile_import = self.file_menu.addAction("Import Images/Videos from Mobile Device")
         self.action_mobile_export = self.file_menu.addAction("Send 3D Model to Mobile")
         self.file_menu.addSeparator()
@@ -2594,7 +2594,7 @@ class MainWindow(QMainWindow):
     def _import_standalone_cloud_clicked(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Import Standalone Point Cloud",
+            "Import Point Cloud",
             self.last_accessed_dir,
             "Point Cloud Files (*.ply *.las *.laz *.xyz *.pts *.txt)"
         )
@@ -3021,6 +3021,9 @@ class MainWindow(QMainWindow):
                 self.worker.finished.connect(self._on_pipeline_finished)
                 
                 self.console_text.append("[START] Initializing asynchronous standalone point cloud reconstruction task thread...")
+                self._reconstruction_heartbeat = QTimer(self)
+                self._reconstruction_heartbeat.timeout.connect(lambda: QApplication.processEvents())
+                self._reconstruction_heartbeat.start(200)
                 self.worker.start()
                 self._update_file_menu_states()
             except Exception as e:
@@ -3117,6 +3120,10 @@ class MainWindow(QMainWindow):
                 self.view_scene_btn.setEnabled(True)
 
     def _on_pipeline_finished(self, success: bool, msg: str):
+        if hasattr(self, '_reconstruction_heartbeat') and self._reconstruction_heartbeat is not None:
+            self._reconstruction_heartbeat.stop()
+            self._reconstruction_heartbeat.deleteLater()
+            self._reconstruction_heartbeat = None
         if hasattr(self, 'standalone_cloud_path') and self.standalone_cloud_path:
             # Standalone reconstruction mode finished cleanup
             self.view_scene_btn.setEnabled(True)
