@@ -7,3 +7,4 @@ vispy
 PyOpenGL
 pyrr
 lightglue
+qrcode

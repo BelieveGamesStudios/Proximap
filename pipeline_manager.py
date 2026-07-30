@@ -647,11 +647,11 @@ class PipelineWorker(QThread):
                 "--image_path", working_image_dir,
                 "--ImageReader.camera_model", "PINHOLE",
                 "--ImageReader.single_camera", single_camera_val,
-                "--FeatureExtraction.use_gpu", "1",
-                "--FeatureExtraction.max_image_size", str(colmap_max_image_size),
+                "--SiftExtraction.use_gpu", "1",
+                "--SiftExtraction.max_image_size", str(colmap_max_image_size),
                 "--SiftExtraction.max_num_features", str(colmap_max_num_features),
                 "--SiftExtraction.first_octave", str(colmap_first_octave),
-                "--FeatureExtraction.num_threads", str(num_threads),
+                "--SiftExtraction.num_threads", str(num_threads),
             ]
             cmd_extract_cpu = [
                 colmap_exe, "feature_extractor",
@@ -659,11 +659,11 @@ class PipelineWorker(QThread):
                 "--image_path", working_image_dir,
                 "--ImageReader.camera_model", "PINHOLE",
                 "--ImageReader.single_camera", single_camera_val,
-                "--FeatureExtraction.use_gpu", "0",
-                "--FeatureExtraction.max_image_size", str(colmap_max_image_size),
+                "--SiftExtraction.use_gpu", "0",
+                "--SiftExtraction.max_image_size", str(colmap_max_image_size),
                 "--SiftExtraction.max_num_features", str(colmap_max_num_features),
                 "--SiftExtraction.first_octave", str(colmap_first_octave),
-                "--FeatureExtraction.num_threads", str(num_threads),
+                "--SiftExtraction.num_threads", str(num_threads),
             ]
             if self.has_plain_surfaces:
                 # Preview quality: lower SIFT thresholds as a best-effort fallback
@@ -707,20 +707,20 @@ class PipelineWorker(QThread):
             cmd_match_gpu = [
                 colmap_exe, "exhaustive_matcher",
                 "--database_path", database_path,
-                "--FeatureMatching.use_gpu", "1",
-                "--FeatureMatching.guided_matching", guided_matching,
+                "--SiftMatching.use_gpu", "1",
+                "--SiftMatching.guided_matching", guided_matching,
                 "--SiftMatching.max_ratio", nndr_ratio,
-                "--FeatureMatching.max_num_matches", str(colmap_max_num_matches),
-                "--FeatureMatching.num_threads", str(num_threads),
+                "--SiftMatching.max_num_matches", str(colmap_max_num_matches),
+                "--SiftMatching.num_threads", str(num_threads),
             ]
             cmd_match_cpu = [
                 colmap_exe, "exhaustive_matcher",
                 "--database_path", database_path,
-                "--FeatureMatching.use_gpu", "0",
-                "--FeatureMatching.guided_matching", guided_matching,
+                "--SiftMatching.use_gpu", "0",
+                "--SiftMatching.guided_matching", guided_matching,
                 "--SiftMatching.max_ratio", nndr_ratio,
-                "--FeatureMatching.max_num_matches", str(colmap_max_num_matches),
-                "--FeatureMatching.num_threads", str(num_threads),
+                "--SiftMatching.max_num_matches", str(colmap_max_num_matches),
+                "--SiftMatching.num_threads", str(num_threads),
             ]
             self._match_counts = []
             if not self._run_with_gpu_fallback(
@@ -737,7 +737,7 @@ class PipelineWorker(QThread):
                 )
                 self._clear_colmap_match_tables(database_path)
                 relaxed_cpu_match = list(cmd_match_cpu)
-                self._set_colmap_option(relaxed_cpu_match, "--FeatureMatching.guided_matching", "1")
+                self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.guided_matching", "1")
                 self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_ratio", "0.95")
                 self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_distance", "0.9")
                 self._using_gpu_sift = False

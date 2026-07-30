@@ -809,18 +809,16 @@ class LoadWorker(QThread):
             with zipfile.ZipFile(self.file_path, 'r') as zipf:
                 zipf.extractall(mvs_dir)
                 
-            # Verify if it extracted scene.mvs
-            scene_mvs = os.path.join(mvs_dir, "scene.mvs")
-            if not os.path.exists(scene_mvs):
-                found_scene = None
-                for root, _, files in os.walk(mvs_dir):
-                    if "scene.mvs" in files:
-                        found_scene = os.path.join(root, "scene.mvs")
-                        mvs_dir = root
-                        break
-                if not found_scene:
-                    self.finished.emit(False, "", "Invalid project file: 'scene.mvs' not found in archive.")
-                    return
+            # Verify if it extracted any valid reconstruction assets (scene.mvs, .ply, .obj, .glb, .gltf)
+            found_asset = False
+            for root, _, files in os.walk(mvs_dir):
+                if any(f.endswith((".mvs", ".ply", ".obj", ".glb", ".gltf")) for f in files):
+                    found_asset = True
+                    mvs_dir = root
+                    break
+            if not found_asset:
+                self.finished.emit(False, "", "Invalid project file: No 3D model or reconstruction assets found in archive.")
+                return
             
             self.finished.emit(True, mvs_dir, "Project loaded successfully.")
         except Exception as e:
@@ -1304,9 +1302,25 @@ class MainWindow(QMainWindow):
         self.last_accessed_dir = os.path.expanduser("~")
         self.viewport_bg_color = '#0C0C0C'
         
+        self._clear_reconstruction_out()
         self._init_ui()
         self._apply_styling()
         QTimer.singleShot(0, self._check_existing_scene)
+
+    def _clear_reconstruction_out(self):
+        """Clears all temporary files and folders in reconstruction_out directory on application startup."""
+        import shutil
+        out_dir = get_reconstruction_out_dir()
+        if os.path.exists(out_dir):
+            for item in os.listdir(out_dir):
+                item_path = os.path.join(out_dir, item)
+                try:
+                    if os.path.isfile(item_path) or os.path.islink(item_path):
+                        os.unlink(item_path)
+                    elif os.path.isdir(item_path):
+                        shutil.rmtree(item_path, ignore_errors=True)
+                except Exception as e:
+                    print(f"[WARNING] Could not clear {item_path} on startup: {e}")
 
     def _init_ui(self):
         # Main Tabbed Interface
@@ -3375,8 +3389,10 @@ class MainWindow(QMainWindow):
         """Checks if a previous reconstruction scene exists and updates recover action state."""
         output_dir = get_reconstruction_out_dir()
         mvs_dir = os.path.join(output_dir, "mvs")
-        scene_mvs = os.path.join(mvs_dir, "scene.mvs")
-        if os.path.exists(scene_mvs):
+        has_scene = os.path.exists(os.path.join(mvs_dir, "scene.mvs")) or \
+                    os.path.exists(os.path.join(mvs_dir, "scene_dense_mesh_refine.ply")) or \
+                    os.path.exists(os.path.join(mvs_dir, "scene_dense_mesh.ply"))
+        if has_scene:
             self.viewer_widget.set_mvs_directory(mvs_dir)
             self.console_text.append("[INFO] Detected previous reconstruction. Go to File Menu -> Recover Last Session to load it.")
         self._update_file_menu_states()
@@ -3417,6 +3433,8 @@ class MainWindow(QMainWindow):
 
     def _save_project(self):
         mvs_dir = self.viewer_widget.current_mvs_dir
+        if not mvs_dir:
+            mvs_dir = self._get_active_mvs_dir()
         if not mvs_dir or not os.path.exists(mvs_dir):
             self.console_text.append("[ERROR] No active 3D reconstruction session to save.")
             return
@@ -3576,12 +3594,17 @@ class MainWindow(QMainWindow):
         self.viewer_widget.action_new.setEnabled(True)
         self.viewer_widget.action_import_standalone.setEnabled(True)
             
-        # We can save if we have a valid MVS directory containing files
+        # We can save if we have a valid MVS directory containing reconstruction files/models
         mvs_dir = self.viewer_widget.current_mvs_dir
+        if not mvs_dir:
+            mvs_dir = self._get_active_mvs_dir()
+            
         has_assets = False
         if mvs_dir and os.path.exists(mvs_dir):
-            if os.path.exists(os.path.join(mvs_dir, "scene.mvs")):
-                has_assets = True
+            for root, _, files in os.walk(mvs_dir):
+                if any(f.endswith((".mvs", ".ply", ".obj", ".glb", ".gltf")) for f in files):
+                    has_assets = True
+                    break
         self.viewer_widget.action_save.setEnabled(has_assets)
         
         # We can load at any time when not running
@@ -3589,8 +3612,11 @@ class MainWindow(QMainWindow):
         
         # We can recover if there's an existing scene in the base reconstruction directory
         output_dir = get_reconstruction_out_dir()
-        scene_mvs = os.path.join(output_dir, "mvs", "scene.mvs")
-        self.viewer_widget.action_recover.setEnabled(os.path.exists(scene_mvs))
+        mvs_out = os.path.join(output_dir, "mvs")
+        has_recoverable = os.path.exists(os.path.join(mvs_out, "scene.mvs")) or \
+                          os.path.exists(os.path.join(mvs_out, "scene_dense_mesh_refine.ply")) or \
+                          os.path.exists(os.path.join(mvs_out, "scene_dense_mesh.ply"))
+        self.viewer_widget.action_recover.setEnabled(has_recoverable)
 
     def _toggle_viewer_mode(self):
         """Reloads the embedded 3D viewer."""
