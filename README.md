@@ -55,7 +55,7 @@ Optimized for Apple Silicon (M1/M2/M3) and compatible with Intel Macs on macOS 1
  ### 2. Installation
  Clone the repository and install dependencies:
  ```bash
- git clone https://github.com/ProximaXR/Proximap.git
+git clone https://github.com/BelieveGamesStudios/Proximap.git
 cd Proximap
 pip install -r requirements.txt
 ```
