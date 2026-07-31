@@ -91,17 +91,23 @@ class PipelineWorker(QThread):
         """Retrieves image IDs to names mapping from COLMAP database."""
         import sqlite3
         image_map = {}
-        if not os.path.exists(db_path):
+        abs_db_path = os.path.abspath(db_path)
+        if not os.path.exists(abs_db_path):
             return image_map
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT image_id, name FROM images ORDER BY image_id")
-            for row in cursor.fetchall():
-                image_map[row[0]] = row[1]
-            conn.close()
-        except Exception as e:
-            self.log_message.emit(f"[WARNING] Could not read COLMAP database for image names: {e}")
+        for attempt in range(3):
+            try:
+                conn = sqlite3.connect(abs_db_path, timeout=10.0)
+                cursor = conn.cursor()
+                cursor.execute("SELECT image_id, name FROM images ORDER BY image_id")
+                for row in cursor.fetchall():
+                    image_map[row[0]] = row[1]
+                conn.close()
+                break
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.3)
+                else:
+                    self.log_message.emit(f"[WARNING] Could not read COLMAP database for image names: {e}")
         return image_map
 
     def _to_colmap_path(self, p: str) -> str:
@@ -638,6 +644,11 @@ class PipelineWorker(QThread):
             db_stats = self._query_colmap_database_stats(database_path)
             num_registered = db_stats["num_images"]
             if num_registered < 2:
+                if len(self._feature_counts) >= 2:
+                    num_registered = len(self._feature_counts)
+                elif self._total_images >= 2:
+                    num_registered = self._total_images
+            if num_registered < 2:
                 self.log_message.emit(
                     f"[ERROR] Only {num_registered} image(s) registered. "
                     "Reconstruction requires at least 2. Aborting."
@@ -707,6 +718,11 @@ class PipelineWorker(QThread):
             self._emit_feature_summary()
 
             num_registered = db_stats["num_images"]
+            if num_registered < 2:
+                if len(self._feature_counts) >= 2:
+                    num_registered = len(self._feature_counts)
+                elif self._total_images >= 2:
+                    num_registered = self._total_images
             if num_registered < 2:
                 self.log_message.emit(
                     f"[ERROR] Only {num_registered} image(s) successfully registered in the database. "
@@ -2015,28 +2031,38 @@ class PipelineWorker(QThread):
             "match_counts": [],
         }
         
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            # Count images
-            cursor.execute("SELECT COUNT(*) FROM images")
-            stats["num_images"] = cursor.fetchone()[0]
-            
-            # Feature counts per image
-            cursor.execute("SELECT image_id, rows FROM keypoints")
-            for row in cursor.fetchall():
-                stats["feature_counts"].append(row[1])
-            
-            # Match counts per pair (from two_view_geometries, which has verified matches)
-            cursor.execute("SELECT pair_id, rows FROM two_view_geometries WHERE rows > 0")
-            for row in cursor.fetchall():
-                stats["num_pairs"] += 1
-                stats["match_counts"].append(row[1])
-            
-            conn.close()
-        except Exception as e:
-            self.log_message.emit(f"[WARNING] Could not read COLMAP database: {e}")
+        abs_db_path = os.path.abspath(db_path)
+        if not os.path.exists(abs_db_path):
+            self.log_message.emit(f"[WARNING] COLMAP database file does not exist: {abs_db_path}")
+            return stats
+
+        for attempt in range(3):
+            try:
+                conn = sqlite3.connect(abs_db_path, timeout=10.0)
+                cursor = conn.cursor()
+                
+                # Count images
+                cursor.execute("SELECT COUNT(*) FROM images")
+                stats["num_images"] = cursor.fetchone()[0]
+                
+                # Feature counts per image
+                cursor.execute("SELECT image_id, rows FROM keypoints")
+                for row in cursor.fetchall():
+                    stats["feature_counts"].append(row[1])
+                
+                # Match counts per pair (from two_view_geometries, which has verified matches)
+                cursor.execute("SELECT pair_id, rows FROM two_view_geometries WHERE rows > 0")
+                for row in cursor.fetchall():
+                    stats["num_pairs"] += 1
+                    stats["match_counts"].append(row[1])
+                
+                conn.close()
+                break
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.3)
+                else:
+                    self.log_message.emit(f"[WARNING] Could not read COLMAP database ({abs_db_path}): {e}")
         
         return stats
 
