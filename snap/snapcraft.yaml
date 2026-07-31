@@ -1,0 +1,32 @@
+name: proximap
+base: core22
+version: '1.4.0'
+summary: 3D Scene Reconstruction & Photogrammetry Desktop Dashboard
+description: |
+  Proximap is an intuitive, high-performance desktop application for photogrammetry 
+  and 3D point cloud reconstruction. Automates COLMAP and OpenMVS pipelines for 
+  transforming 2D images and standalone point clouds into textured 3D meshes.
+
+grade: stable
+confinement: strict
+
+apps:
+  proximap:
+    command: Proximap/Proximap
+    desktop: usr/share/applications/proximap.desktop
+    plugs:
+      - home
+      - desktop
+      - desktop-legacy
+      - x11
+      - wayland
+      - opengl
+      - removable-media
+
+parts:
+  proximap:
+    plugin: dump
+    source: dist/Proximap
+    source-type: local
+    organize:
+      '*': Proximap/
