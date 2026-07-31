@@ -78,6 +78,6 @@ addon = MyAIModelAddon()
 ## 3. How Users Install Your Add-on ZIP
 
 1. In Proximap, switch to the **Mesh Editor** tab.
-2. Go to **Edit → Preferences — Add-ons...**.
+2. Go to **Edit → Preferences...**.
 3. Click **Install Add-on...** and choose your `my_ai_tool.zip` file.
 4. Proximap will extract the archive to `~/.proximap/addons/my_ai_tool/` and enable the add-on instantly.

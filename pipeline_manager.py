@@ -605,7 +605,7 @@ class PipelineWorker(QThread):
                     if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
                 ])
             except Exception:
-            self._total_images = 0
+                self._total_images = 0
         self.progress_changed.emit(10)
 
         colmap_exe = os.path.join(base_dir, self.toolchain_map["colmap"]["colmap"])

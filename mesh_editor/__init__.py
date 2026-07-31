@@ -485,7 +485,7 @@ class MeshEditorWidget(QWidget):
         action_delete.triggered.connect(self._delete_selected_object)
         
         edit_menu.addSeparator()
-        self.action_preferences = edit_menu.addAction("Preferences — Add-ons...")
+        self.action_preferences = edit_menu.addAction("Preferences")
         self.action_preferences.triggered.connect(self._open_preferences)
         
         self.menu_bar.addMenu(edit_menu)

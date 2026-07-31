@@ -2,6 +2,9 @@ import os
 import sys
 import subprocess
 import ctypes
+import json
+import time
+from typing import Optional
 try:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -3118,7 +3121,7 @@ class MainWindow(QMainWindow):
             self.custom_refine_scales_spin.setValue(3)
             self.custom_texture_res_combo.setCurrentIndex(0)
 
-    def _start_processing(self):
+    def _start_processing(self, resume_from_step: str = None):
         if not self.standalone_cloud_path and not self.image_list:
             return
             
@@ -3236,6 +3239,7 @@ class MainWindow(QMainWindow):
             mesh_mode=mesh_mode,
             poisson_depth=poisson_depth,
             custom_params=custom_params,
+            resume_from_step=resume_from_step,
             parent=self
         )
         self.worker.progress_changed.connect(self._on_progress_changed)
@@ -5596,6 +5600,7 @@ class StartupManager:
         self.window.show()
         if self.splash:
             self.splash.finish(self.window)
+        QTimer.singleShot(500, self.window._check_startup_recovery)
 
 
 if __name__ == "__main__":
