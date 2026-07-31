@@ -1308,13 +1308,44 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._check_existing_scene)
 
     def _clear_reconstruction_out(self):
-        """Clears all temporary files and folders in reconstruction_out directory on application startup."""
+        """Clears temporary files in reconstruction_out on startup, but retains valid COLMAP database checkpoints."""
         import shutil
         out_dir = get_reconstruction_out_dir()
+        db_checkpoint = os.path.join(out_dir, "colmap", "database.db")
+        
+        has_checkpoint = False
+        if os.path.exists(db_checkpoint):
+            try:
+                import sqlite3
+                conn = sqlite3.connect(db_checkpoint)
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM images")
+                n_imgs = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM two_view_geometries WHERE rows > 0")
+                n_pairs = cur.fetchone()[0]
+                conn.close()
+                if n_imgs >= 2 and n_pairs >= 1:
+                    has_checkpoint = True
+            except Exception:
+                has_checkpoint = False
+
         if os.path.exists(out_dir):
             for item in os.listdir(out_dir):
                 item_path = os.path.join(out_dir, item)
                 try:
+                    if item == "colmap" and has_checkpoint:
+                        print("[INFO] Preserving valid database.db checkpoint in colmap/ directory on startup.")
+                        colmap_dir = item_path
+                        for sub_item in os.listdir(colmap_dir):
+                            if sub_item == "database.db":
+                                continue
+                            sub_path = os.path.join(colmap_dir, sub_item)
+                            if os.path.isfile(sub_path) or os.path.islink(sub_path):
+                                os.unlink(sub_path)
+                            elif os.path.isdir(sub_path):
+                                shutil.rmtree(sub_path, ignore_errors=True)
+                        continue
+
                     if os.path.isfile(item_path) or os.path.islink(item_path):
                         os.unlink(item_path)
                     elif os.path.isdir(item_path):
@@ -1647,10 +1678,16 @@ class MainWindow(QMainWindow):
         self.custom_ba_check.setChecked(False)
         custom_grid.addWidget(self.custom_ba_check, 4, 0, 1, 2)
 
+        # Resume Checkpoint
+        self.custom_resume_check = QCheckBox("Resume from Checkpoint (skip extraction if DB exists)", self.custom_settings_container)
+        self.custom_resume_check.setStyleSheet("font-size: 10px; font-weight: bold; color: #00E676; border: none; background: transparent;")
+        self.custom_resume_check.setChecked(False)
+        custom_grid.addWidget(self.custom_resume_check, 5, 0, 1, 2)
+
         # OpenMVS section
         openmvs_sec = QLabel("OpenMVS Settings", self.custom_settings_container)
         openmvs_sec.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676; margin-top: 4px; border: none; background: transparent;")
-        custom_grid.addWidget(openmvs_sec, 5, 0, 1, 2)
+        custom_grid.addWidget(openmvs_sec, 6, 0, 1, 2)
 
         # Densification Resolution
         lbl_densify_res = QLabel("Densification Res:", self.custom_settings_container)
@@ -1664,8 +1701,8 @@ class MainWindow(QMainWindow):
         ])
         self.custom_densify_res_combo.setCurrentIndex(1)
         self.custom_densify_res_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_densify_res, 6, 0)
-        custom_grid.addWidget(self.custom_densify_res_combo, 6, 1)
+        custom_grid.addWidget(lbl_densify_res, 7, 0)
+        custom_grid.addWidget(self.custom_densify_res_combo, 7, 1)
 
         # Max Views for Densification
         lbl_densify_views = QLabel("Max Densify Views:", self.custom_settings_container)
@@ -1674,8 +1711,8 @@ class MainWindow(QMainWindow):
         self.custom_densify_views_spin.setRange(1, 16)
         self.custom_densify_views_spin.setValue(4)
         self.custom_densify_views_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_densify_views, 7, 0)
-        custom_grid.addWidget(self.custom_densify_views_spin, 7, 1)
+        custom_grid.addWidget(lbl_densify_views, 8, 0)
+        custom_grid.addWidget(self.custom_densify_views_spin, 8, 1)
 
         # Mesh Refinement Scales
         lbl_refine_scales = QLabel("Mesh Refinement Scales:", self.custom_settings_container)
@@ -1684,8 +1721,8 @@ class MainWindow(QMainWindow):
         self.custom_refine_scales_spin.setRange(1, 5)
         self.custom_refine_scales_spin.setValue(2)
         self.custom_refine_scales_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_refine_scales, 8, 0)
-        custom_grid.addWidget(self.custom_refine_scales_spin, 8, 1)
+        custom_grid.addWidget(lbl_refine_scales, 9, 0)
+        custom_grid.addWidget(self.custom_refine_scales_spin, 9, 1)
 
         # Texturing Resolution
         lbl_texture_res = QLabel("Texturing Res:", self.custom_settings_container)
@@ -1699,8 +1736,8 @@ class MainWindow(QMainWindow):
         ])
         self.custom_texture_res_combo.setCurrentIndex(1)
         self.custom_texture_res_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_texture_res, 9, 0)
-        custom_grid.addWidget(self.custom_texture_res_combo, 9, 1)
+        custom_grid.addWidget(lbl_texture_res, 10, 0)
+        custom_grid.addWidget(self.custom_texture_res_combo, 10, 1)
         
         advanced_layout.addWidget(self.custom_settings_toggle)
         advanced_layout.addWidget(self.mapper_label)
@@ -3087,7 +3124,8 @@ class MainWindow(QMainWindow):
                 "densify_res": str(self.custom_densify_res_combo.currentIndex()),
                 "densify_views": str(self.custom_densify_views_spin.value()),
                 "refine_scales": str(self.custom_refine_scales_spin.value()),
-                "texture_res": str(self.custom_texture_res_combo.currentIndex())
+                "texture_res": str(self.custom_texture_res_combo.currentIndex()),
+                "resume_checkpoint": self.custom_resume_check.isChecked()
             }
 
         from pipeline_manager import PipelineWorker
