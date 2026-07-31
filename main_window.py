@@ -1895,11 +1895,7 @@ class MainWindow(QMainWindow):
         self.custom_ba_check.setChecked(False)
         custom_grid.addWidget(self.custom_ba_check, 4, 0, 1, 2)
 
-        # Resume Checkpoint
-        self.custom_resume_check = QCheckBox("Resume from Checkpoint (skip extraction if DB exists)", self.custom_settings_container)
-        self.custom_resume_check.setStyleSheet("font-size: 10px; font-weight: bold; color: #00E676; border: none; background: transparent;")
-        self.custom_resume_check.setChecked(False)
-        custom_grid.addWidget(self.custom_resume_check, 5, 0, 1, 2)
+
 
         # OpenMVS section
         openmvs_sec = QLabel("OpenMVS Settings", self.custom_settings_container)
@@ -3008,6 +3004,10 @@ class MainWindow(QMainWindow):
             if f not in current_set:
                 self.image_list.append(f)
                 added_count += 1
+        
+        # Auto-stage and back up video frames to ~/.proximap/backup/
+        if self.image_list:
+            self._stage_images_for_reconstruction()
                 
 
 
@@ -3262,8 +3262,7 @@ class MainWindow(QMainWindow):
                 "densify_res": str(self.custom_densify_res_combo.currentIndex()),
                 "densify_views": str(self.custom_densify_views_spin.value()),
                 "refine_scales": str(self.custom_refine_scales_spin.value()),
-                "texture_res": str(self.custom_texture_res_combo.currentIndex()),
-                "resume_checkpoint": self.custom_resume_check.isChecked()
+                "texture_res": str(self.custom_texture_res_combo.currentIndex())
             }
 
         from pipeline_manager import PipelineWorker
@@ -3672,7 +3671,7 @@ class MainWindow(QMainWindow):
 
         # Prompt user if they want to resume remaining reconstruction steps
         step = meta.get("last_completed_step", "unknown") if meta else "unknown"
-        if step in ["images_imported", "sparse_reconstruction", "dense_reconstruction"]:
+        if step in ["images_imported", "features_extracted", "sparse_reconstruction", "dense_reconstruction"]:
             reply = QMessageBox.question(
                 self,
                 "Continue Reconstruction?",

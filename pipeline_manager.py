@@ -191,6 +191,11 @@ class PipelineWorker(QThread):
             existing_meta = load_session_metadata() or {}
             existing_meta["scan_type"] = "photogrammetry"
             existing_meta["last_completed_step"] = step_name
+            img_cnt = getattr(self, '_total_images', 0) or len(getattr(self, '_image_names_map', {}))
+            if img_cnt > 0:
+                existing_meta["image_count"] = img_cnt
+            elif "image_count" not in existing_meta:
+                existing_meta["image_count"] = 0
             existing_meta["quality_preset"] = self.quality_preset
             existing_meta["gpu_mode"] = self.gpu_mode
             existing_meta["has_plain_surfaces"] = self.has_plain_surfaces
@@ -467,7 +472,7 @@ class PipelineWorker(QThread):
         """
         base_dir = get_base_dir()
         
-        resume_requested = bool(self.custom_params and self.custom_params.get("resume_checkpoint", False))
+        resume_requested = bool(self.resume_from_step)
         colmap_dir_check = os.path.join(self.output_dir, "colmap")
         check_db_path = os.path.join(colmap_dir_check, "database.db")
         is_checkpoint_valid = self._is_valid_checkpoint(check_db_path)
@@ -2073,20 +2078,24 @@ class PipelineWorker(QThread):
 
     def _is_valid_checkpoint(self, db_path: str) -> bool:
         """Checks if a COLMAP database exists and contains valid camera/image registration and verified feature matches."""
-        if not os.path.exists(db_path):
+        abs_db_path = os.path.abspath(db_path)
+        if not os.path.exists(abs_db_path):
             return False
-        try:
-            import sqlite3
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM images")
-            num_images = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM two_view_geometries WHERE rows > 0")
-            num_pairs = cur.fetchone()[0]
-            conn.close()
-            return num_images >= 2 and num_pairs >= 1
-        except Exception:
-            return False
+        import sqlite3, time
+        for attempt in range(3):
+            try:
+                conn = sqlite3.connect(abs_db_path, timeout=10.0)
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM images")
+                num_images = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM two_view_geometries WHERE rows > 0")
+                num_pairs = cur.fetchone()[0]
+                conn.close()
+                return num_images >= 2 and num_pairs >= 1
+            except Exception:
+                if attempt < 2:
+                    time.sleep(0.3)
+        return False
 
     def _query_colmap_database_stats(self, db_path: str) -> dict:
         """Query COLMAP's SQLite database for feature and match statistics."""
