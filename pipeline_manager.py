@@ -724,6 +724,7 @@ class PipelineWorker(QThread):
                 self._match_counts = db_stats["match_counts"]
             self._emit_matching_summary(database_path)
             self.progress_changed.emit(40)
+            self._backup_checkpoint("features_extracted")
 
         else:
             # -----------------------------------------------------------------
@@ -852,6 +853,7 @@ class PipelineWorker(QThread):
                 self._match_counts = db_stats["match_counts"]
             self._emit_matching_summary(database_path)
             self.progress_changed.emit(40)
+            self._backup_checkpoint("features_extracted")
 
 
         # =========================================================================

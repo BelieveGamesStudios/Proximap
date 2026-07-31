@@ -1398,6 +1398,7 @@ class SessionRecoveryDialog(QDialog):
         step_raw = metadata.get("last_completed_step", "unknown")
         step_map = {
             "images_imported": "Images Imported (Staged)",
+            "features_extracted": "Extracted Features & Pair Matches",
             "sparse_reconstruction": "Sparse Point Cloud (Colmap SfM)",
             "dense_reconstruction": "Dense Point Cloud (OpenMVS)",
             "mesh_reconstruction": "Textured Mesh Reconstruction"
