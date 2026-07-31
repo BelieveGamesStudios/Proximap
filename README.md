@@ -23,39 +23,39 @@ Proximap is an intuitive desktop application built in Python and PySide6 that pr
 Optimized for Apple Silicon (M1/M2/M3) and compatible with Intel Macs on macOS 11 or later. The macOS package includes the Proximap desktop client plus bundled COLMAP and OpenMVS reconstruction tools.
 
 [Download Proximap for macOS](https://github.com/BelieveGamesStudios/Proximap/releases/latest/download/Proximap_Mac_Release.zip)
-
-After downloading, unzip `Proximap_Mac_Release.zip`, open `Proximap.app`, and select a folder of overlapping photos to start a reconstruction.
-
----
-
-## Repository Structure
-
-```text
-Proximap/
-├── main_window.py          # PySide6 desktop GUI entry point
-├── pipeline_manager.py     # Multi-stage photogrammetry pipeline coordinator
-├── hardware_profiler.py    # Hardware checker (RAM and CUDA detection)
-│
-├── package_app.ps1         # PowerShell automated build and compilation pipeline
-├── installer.nsi           # NSIS Setup Wizard installer configuration
-├── toolchain_map.json      # Config mapping GUI calls to C++ binaries
-│
-├── LICENSE                 # GNU GPL v3 Source code license
-└── THIRD_PARTY_LICENSES.md # License attributions for OpenMVS, COLMAP, etc.
-```
-
----
-
-## Getting Started (Developers)
-
-### 1. Prerequisites
-* **Python**: Version 3.9 or higher (64-bit recommended).
-* **GPU (Optional but Recommended)**: NVIDIA GPU with CUDA drivers installed for GPU-accelerated mesh refinement and densification.
-
-### 2. Installation
-Clone the repository and install dependencies:
-```bash
-git clone https://github.com/BelieveGamesStudios/Proximap.git
+ 
+ After downloading, unzip `Proximap_Mac_Release.zip`, open `Proximap.app`, and select a folder of overlapping photos to start a reconstruction.
+ 
+ ---
+ 
+ ## Repository Structure
+ 
+ ```text
+ Proximap/
+ ├── main_window.py          # PySide6 desktop GUI entry point
+ ├── pipeline_manager.py     # Multi-stage photogrammetry pipeline coordinator
+ ├── hardware_profiler.py    # Hardware checker (RAM and CUDA detection)
+ │
+ ├── package_app.ps1         # PowerShell automated build and compilation pipeline
+ ├── installer.nsi           # NSIS Setup Wizard installer configuration
+ ├── toolchain_map.json      # Config mapping GUI calls to C++ binaries
+ │
+ ├── LICENSE                 # GNU GPL v3 Source code license
+ └── THIRD_PARTY_LICENSES.md # License attributions for OpenMVS, COLMAP, etc.
+ ```
+ 
+ ---
+ 
+ ## Getting Started (Developers)
+ 
+ ### 1. Prerequisites
+ * **Python**: Version 3.9 or higher (64-bit recommended).
+ * **GPU (Optional but Recommended)**: NVIDIA GPU with CUDA drivers installed for GPU-accelerated mesh refinement and densification.
+ 
+ ### 2. Installation
+ Clone the repository and install dependencies:
+ ```bash
+ git clone https://github.com/ProximaXR/Proximap.git
 cd Proximap
 pip install -r requirements.txt
 ```

@@ -8,8 +8,8 @@ APP_NAME="proximap"
 DISPLAY_NAME="Proximap"
 VERSION="1.4.0"
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-MAINTAINER="Believe Games Studios <support@believegamesstudios.com>"
-DESCRIPTION="Intuitive desktop 3D photogrammetry pipeline GUI dashboard."
+MAINTAINER="ProximaXR Spatial Technologies <fumz@proximaxr.space>"
+DESCRIPTION="Intuitive desktop 3D photogrammetry app."
 
 echo "=========================================================="
 echo " Starting Proximap Linux Bundling & Packaging (.deb)"
