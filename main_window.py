@@ -2647,36 +2647,48 @@ class MainWindow(QMainWindow):
         """
         self.setStyleSheet(qss)
 
+    def _detect_and_update_camera_info(self, image_list: list = None, video_list: list = None) -> str:
+        """Scans image EXIF to extract camera make & model. Video files remain Undetected."""
+        camera_name = "Undetected"
+        imgs = image_list if image_list is not None else getattr(self, 'image_list', [])
+
+        # Try reading EXIF from image files
+        if imgs:
+            try:
+                from PIL import Image
+                from PIL.ExifTags import TAGS
+                for path in imgs[:10]:
+                    if not os.path.exists(path):
+                        continue
+                    with Image.open(path) as img:
+                        exif = img.getexif()
+                        if exif:
+                            exif_dict = {TAGS.get(k, k): v for k, v in exif.items()}
+                            make = str(exif_dict.get("Make", "")).strip()
+                            model = str(exif_dict.get("Model", "")).strip()
+                            if model:
+                                if make and make.upper() not in model.upper():
+                                    camera_name = f"{make} {model}"
+                                else:
+                                    camera_name = model
+                                break
+            except Exception:
+                pass
+
+        display_camera_name = self._camera_name_for_display(camera_name)
+        self.camera_label.setText(f"Camera: {display_camera_name}")
+        self.camera_label.setToolTip(camera_name if camera_name else "Undetected")
+        return camera_name
+
     def _handle_dropped_images(self, files: list):
         if hasattr(self, 'standalone_cloud_path') and self.standalone_cloud_path:
             self._clear_standalone_cloud_clicked()
         self.image_list = files
         self.img_count_label.setText(f"Images Loaded: {len(files)}")
-        self.photos_tab.set_images(self.image_list)
+        if hasattr(self, 'photos_tab'):
+            self.photos_tab.set_images(self.image_list)
         
-        # Scan actual EXIF camera model using Pillow
-        camera_name = "Undetected"
-        if files:
-            try:
-                from PIL import Image
-                from PIL.ExifTags import TAGS
-                with Image.open(files[0]) as img:
-                    exif = img.getexif()
-                    if exif:
-                        exif_dict = {TAGS.get(k, k): v for k, v in exif.items()}
-                        make = exif_dict.get("Make", "").strip()
-                        model = exif_dict.get("Model", "").strip()
-                        if model:
-                            if make and make.upper() not in model.upper():
-                                camera_name = f"{make} {model}"
-                            else:
-                                camera_name = model
-            except Exception:
-                pass
-                
-        display_camera_name = self._camera_name_for_display(camera_name)
-        self.camera_label.setText(f"Camera: {display_camera_name}")
-        self.camera_label.setToolTip(camera_name if camera_name else "Undetected")
+        camera_name = self._detect_and_update_camera_info(files, getattr(self, 'current_video_list', []))
         if files:
             self.console_text.append(f"[INFO] Successfully imported {len(files)} files. Camera identified: {camera_name}")
             self._set_process_btn_state("ready")
@@ -2794,6 +2806,7 @@ class MainWindow(QMainWindow):
                 self.console_text.append("[VIDEO] Video import cancelled.")
 
     def _start_video_extraction(self, videos: list, interval: float, blur: float | None):
+        self.current_video_list = list(videos)
         self.extraction_queue = list(videos)
         self.extracted_frames = []
         self.extraction_interval = interval
@@ -3047,9 +3060,12 @@ class MainWindow(QMainWindow):
                 self.image_list.append(f)
                 added_count += 1
         
-        # Auto-stage and back up video frames to ~/.proximap/backup/
-        if self.image_list:
-            self._stage_images_for_reconstruction()
+        # Update Photos tab gallery view with extracted frames
+        if hasattr(self, 'photos_tab'):
+            self.photos_tab.set_images(self.image_list)
+
+        # Detect camera info from video or extracted frames
+        self._detect_and_update_camera_info(self.image_list, getattr(self, 'current_video_list', []))
 
         self.img_count_label.setText(f"Images Loaded: {len(self.image_list)}")
         self.progress_bar.setValue(100)
@@ -3701,6 +3717,9 @@ class MainWindow(QMainWindow):
         if restored_imgs:
             self.image_list = restored_imgs
             self.img_count_label.setText(f"Images Loaded: {len(self.image_list)}")
+            if hasattr(self, 'photos_tab'):
+                self.photos_tab.set_images(self.image_list)
+            self._detect_and_update_camera_info(self.image_list)
 
         # Restore UI controls from metadata
         if meta:
