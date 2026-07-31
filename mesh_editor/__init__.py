@@ -14,6 +14,9 @@ from mesh_editor.undo import (
     UndoStack, BaseCommand, TransformCommand, SpinboxTransformCommand,
     DeleteCommand, AddObjectCommand
 )
+from addon_manager import AddonManager
+from preferences_dialog import PreferencesDialog
+
 
 class MeshImportWorker(QThread):
     # Signals: finished (success, meshes, error_message)
@@ -115,6 +118,11 @@ class MeshEditorWidget(QWidget):
         self._init_ui()
         self._wire_events()
         self._populate_outliner()
+        
+        # Initialize Add-on Manager for Mesh Editor
+        self.addon_manager = AddonManager(self)
+        self.addon_manager.initialize_addons(self)
+
 
     def _init_ui(self):
         layout = QHBoxLayout(self)
@@ -365,6 +373,24 @@ class MeshEditorWidget(QWidget):
         properties_vlayout.addLayout(grid_layout)
         scroll_layout.addWidget(self.properties_box, stretch=0)
         
+        # SECTION 3: Add-on Tools Container
+        self.addon_box = QFrame(scroll_content)
+        self.addon_box.setObjectName("StepBox")
+        addon_vlayout = QVBoxLayout(self.addon_box)
+        
+        addon_title = QLabel("Add-on Tools", self.addon_box)
+        addon_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #00E676;")
+        addon_vlayout.addWidget(addon_title)
+        
+        self.addon_container = QWidget(self.addon_box)
+        self.addon_container_layout = QVBoxLayout(self.addon_container)
+        self.addon_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.addon_container_layout.setSpacing(6)
+        addon_vlayout.addWidget(self.addon_container)
+        
+        scroll_layout.addWidget(self.addon_box, stretch=0)
+
+        
         scroll_area.setWidget(scroll_content)
         sidebar_layout.addWidget(scroll_area)
         layout.addWidget(self.sidebar)
@@ -457,7 +483,13 @@ class MeshEditorWidget(QWidget):
         
         action_delete = edit_menu.addAction("Delete Selected")
         action_delete.triggered.connect(self._delete_selected_object)
+        
+        edit_menu.addSeparator()
+        self.action_preferences = edit_menu.addAction("Preferences")
+        self.action_preferences.triggered.connect(self._open_preferences)
+        
         self.menu_bar.addMenu(edit_menu)
+
         
         # 3. View Menu with embedded Settings panel (dropdown style)
         view_menu = QMenu("View", self.menu_bar)
@@ -1495,3 +1527,35 @@ class MeshEditorWidget(QWidget):
             event.acceptProposedAction()
         else:
             event.ignore()
+
+    def _open_preferences(self):
+        dlg = PreferencesDialog(self.addon_manager, self, self)
+        dlg.exec()
+
+    def update_addon_panels(self):
+        if not hasattr(self, "addon_container_layout"):
+            return
+
+        # Clear container layout
+        while self.addon_container_layout.count():
+            item = self.addon_container_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().setParent(None)
+
+        if not hasattr(self, "addon_manager"):
+            return
+
+        # Get active add-on panel widgets
+        active_instances = self.addon_manager.get_enabled_instances()
+        panel_added = False
+        for addon_inst in active_instances:
+            w = addon_inst.get_panel_widget(self.addon_container)
+            if w:
+                self.addon_container_layout.addWidget(w)
+                panel_added = True
+
+        if not panel_added:
+            lbl_hint = QLabel("<i>No active add-ons. Manage in Edit → Preferences</i>", self.addon_container)
+            lbl_hint.setStyleSheet("color: #666666; font-size: 10px; border: none; margin-top: 4px;")
+            self.addon_container_layout.addWidget(lbl_hint)
+

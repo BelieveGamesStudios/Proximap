@@ -50,7 +50,7 @@ class PipelineWorker(QThread):
     log_message = Signal(str)
     finished = Signal(bool, str)
 
-    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, mapper_mode: str = "incremental", ref_cloud_path: str = None, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, parent=None):
+    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, mapper_mode: str = "incremental", ref_cloud_path: str = None, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, resume_from_step: str = None, parent=None):
         super().__init__(parent)
         self.image_dir = image_dir
         self.output_dir = output_dir
@@ -62,6 +62,7 @@ class PipelineWorker(QThread):
         self.mesh_mode = mesh_mode
         self.poisson_depth = poisson_depth
         self.custom_params = custom_params
+        self.resume_from_step = resume_from_step
         self.is_running = True
         self.toolchain_map = self._load_toolchain_map()
         self.last_output_lines = []
@@ -152,7 +153,57 @@ class PipelineWorker(QThread):
                     normalized[group][name] = clean_rel_path
         return normalized
 
+    def _backup_checkpoint(self, step_name: str):
+        try:
+            from main_window import get_backup_dir, save_session_metadata, load_session_metadata
+            backup_dir = get_backup_dir()
+
+            mvs_out = os.path.join(self.output_dir, "mvs")
+            colmap_out = os.path.join(self.output_dir, "colmap")
+            backup_mvs = os.path.join(backup_dir, "mvs")
+            backup_colmap = os.path.join(backup_dir, "colmap")
+
+            os.makedirs(backup_mvs, exist_ok=True)
+            os.makedirs(backup_colmap, exist_ok=True)
+
+            if os.path.exists(mvs_out):
+                for item in os.listdir(mvs_out):
+                    s_path = os.path.join(mvs_out, item)
+                    d_path = os.path.join(backup_mvs, item)
+                    if os.path.isfile(s_path):
+                        shutil.copy2(s_path, d_path)
+                    elif os.path.isdir(s_path):
+                        if os.path.exists(d_path):
+                            shutil.rmtree(d_path)
+                        shutil.copytree(s_path, d_path)
+
+            if os.path.exists(colmap_out):
+                for item in os.listdir(colmap_out):
+                    s_path = os.path.join(colmap_out, item)
+                    d_path = os.path.join(backup_colmap, item)
+                    if os.path.isfile(s_path):
+                        shutil.copy2(s_path, d_path)
+                    elif os.path.isdir(s_path):
+                        if os.path.exists(d_path):
+                            shutil.rmtree(d_path)
+                        shutil.copytree(s_path, d_path)
+
+            existing_meta = load_session_metadata() or {}
+            existing_meta["scan_type"] = "photogrammetry"
+            existing_meta["last_completed_step"] = step_name
+            existing_meta["quality_preset"] = self.quality_preset
+            existing_meta["gpu_mode"] = self.gpu_mode
+            existing_meta["has_plain_surfaces"] = self.has_plain_surfaces
+            existing_meta["mapper_mode"] = self.mapper_mode
+            existing_meta["mesh_mode"] = self.mesh_mode
+            existing_meta["poisson_depth"] = self.poisson_depth
+            save_session_metadata(existing_meta)
+            self.log_message.emit(f"[BACKUP] Saved checkpoint for '{step_name}'.")
+        except Exception as e:
+            self.log_message.emit(f"[WARNING] Failed to write backup checkpoint: {e}")
+
     def run(self):
+
         try:
             self.status_changed.emit("Initializing Pipeline...")
             self.log_message.emit(f"[INFO] Plain/Smooth Surfaces optimization: {'Enabled' if self.has_plain_surfaces else 'Disabled'}")
@@ -548,20 +599,27 @@ class PipelineWorker(QThread):
             if "texture_res" in self.custom_params:
                 texture_res = self.custom_params["texture_res"]
 
-        # =========================================================================
-        # STEP 1/9 — Image Preparation
-        # =========================================================================
-        self.status_changed.emit("Step 1/9: Preparing Images...")
-        working_image_dir = self._prepare_images(
-            self.image_dir, self.output_dir, max_image_dim
-        )
-        try:
-            self._total_images = len([
-                f for f in os.listdir(working_image_dir)
-                if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
-            ])
-        except Exception:
-            self._total_images = 0
+        skip_sfm = self.resume_from_step in ["sparse_reconstruction", "dense_reconstruction"]
+        skip_dense = self.resume_from_step == "dense_reconstruction"
+
+        if skip_sfm:
+            self.log_message.emit(f"[RESUME] Resuming session from checkpoint: '{self.resume_from_step}'. Skipping Steps 1-5 (SfM & Sparse Cloud already complete).")
+            self.progress_changed.emit(70)
+        else:
+            # =========================================================================
+            # STEP 1/9 — Image Preparation
+            # =========================================================================
+            self.status_changed.emit("Step 1/9: Preparing Images...")
+            working_image_dir = self._prepare_images(
+                self.image_dir, self.output_dir, max_image_dim
+            )
+            try:
+                self._total_images = len([
+                    f for f in os.listdir(working_image_dir)
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
+                ])
+            except Exception:
+                self._total_images = 0
         self.progress_changed.emit(10)
 
         colmap_exe = os.path.join(base_dir, self.toolchain_map["colmap"]["colmap"])
@@ -923,44 +981,50 @@ class PipelineWorker(QThread):
         ]
         if not self._run_process_realtime(cmd_export, timeout=300.0):
             return False
+        self._backup_checkpoint("sparse_reconstruction")
         self.progress_changed.emit(70)
 
         # =========================================================================
         # STEP 6/9 — Dense Point Cloud Generation
         # =========================================================================
-        self.status_changed.emit("Step 6/9: Generating Dense Point Cloud...")
-        mvs_densify_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["DensifyPointCloud"])
-
-        sparse_point_count = self._count_scene_points(mvs_out)
-        calibrated_count = self._count_calibrated_images(mvs_out)
-
-        actual_densify_views = densify_views
-        actual_fuse_views = "2"
-        if sparse_point_count < 500 or calibrated_count < 15:
-            actual_densify_views = str(min(int(densify_views), max(2, calibrated_count - 1)))
-            actual_fuse_views = "1"
-            self.log_message.emit(f"[ADAPT] Low sparse data ({sparse_point_count} pts, {calibrated_count} cal imgs). "
-                                   f"Reducing --number-views to {actual_densify_views}, --number-views-fuse to {actual_fuse_views}")
-
-        cmd = [
-            mvs_densify_exe,
-            "scene.mvs",
-            "--resolution-level",    densify_res,
-            "--max-resolution",      max_res,
-            "--number-views",        actual_densify_views,
-            "--number-views-fuse",   actual_fuse_views,
-            "--geometric-iters",     "2",
-            "--estimate-colors",     "2",
-            "--estimate-normals",    "2",
-        ]
-        self._depth_map_count = 0
-        self._dense_point_count = 0
-        densify_ok = self._run_process_realtime(cmd, timeout=7200.0, cwd=mvs_out, env=env, line_parser=self._parse_densify_line)
-        if not densify_ok:
-            self.log_message.emit("[WARNING] DensifyPointCloud failed or returned no points! ReconstructMesh will use sparse cloud.")
+        if skip_dense:
+            self.log_message.emit("[RESUME] Skipping Step 6 (Dense Point Cloud already complete).")
+            self.progress_changed.emit(80)
         else:
-            self._emit_dense_summary()
-        self.progress_changed.emit(80)
+            self.status_changed.emit("Step 6/9: Generating Dense Point Cloud...")
+            mvs_densify_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["DensifyPointCloud"])
+
+            sparse_point_count = self._count_scene_points(mvs_out)
+            calibrated_count = self._count_calibrated_images(mvs_out)
+
+            actual_densify_views = densify_views
+            actual_fuse_views = "2"
+            if sparse_point_count < 500 or calibrated_count < 15:
+                actual_densify_views = str(min(int(densify_views), max(2, calibrated_count - 1)))
+                actual_fuse_views = "1"
+                self.log_message.emit(f"[ADAPT] Low sparse data ({sparse_point_count} pts, {calibrated_count} cal imgs). "
+                                       f"Reducing --number-views to {actual_densify_views}, --number-views-fuse to {actual_fuse_views}")
+
+            cmd = [
+                mvs_densify_exe,
+                "scene.mvs",
+                "--resolution-level",    densify_res,
+                "--max-resolution",      max_res,
+                "--number-views",        actual_densify_views,
+                "--number-views-fuse",   actual_fuse_views,
+                "--geometric-iters",     "2",
+                "--estimate-colors",     "2",
+                "--estimate-normals",    "2",
+            ]
+            self._depth_map_count = 0
+            self._dense_point_count = 0
+            densify_ok = self._run_process_realtime(cmd, timeout=7200.0, cwd=mvs_out, env=env, line_parser=self._parse_densify_line)
+            if not densify_ok:
+                self.log_message.emit("[WARNING] DensifyPointCloud failed or returned no points! ReconstructMesh will use sparse cloud.")
+            else:
+                self._emit_dense_summary()
+            self._backup_checkpoint("dense_reconstruction")
+            self.progress_changed.emit(80)
 
         # =========================================================================
         # STEP 6b — Optional Reference Point Cloud Alignment & Fusion
@@ -1101,6 +1165,7 @@ class PipelineWorker(QThread):
             self.log_message.emit("[WARNING] TextureMesh PLY pass failed. Skipping OBJ export pass.")
 
         self.progress_changed.emit(99)
+        self._backup_checkpoint("mesh_reconstruction")
         return True
 
     def _run_sp_lg_pipeline(
@@ -2278,73 +2343,3 @@ class PipelineWorker(QThread):
             return False
 
 
-class BackgroundRemovalWorker(QThread):
-    """
-    Worker thread that executes background removal offline on a list of image files.
-    """
-    progress_changed = Signal(int)
-    status_changed = Signal(str)
-    log_message = Signal(str)
-    finished = Signal(bool, list, str)
-
-    def __init__(self, image_paths: list, parent=None):
-        super().__init__(parent)
-        self.image_paths = image_paths
-        self.is_running = True
-
-    def run(self):
-        try:
-            import rembg
-            from PIL import Image
-        except Exception as e:
-            self.log_message.emit(f"[ERROR] Failed to import rembg or PIL: {e}")
-            self.finished.emit(False, self.image_paths, f"Required dependencies not installed: {e}")
-            return
-
-        updated_paths = []
-        total = len(self.image_paths)
-
-        self.log_message.emit(f"[START] Starting offline background removal for {total} images...")
-        
-        for i, path in enumerate(self.image_paths):
-            if not self.is_running:
-                self.log_message.emit("[INFO] Background removal cancelled.")
-                self.finished.emit(False, self.image_paths, "Background removal cancelled by user.")
-                return
-
-            self.status_changed.emit(f"Removing background: {i+1}/{total}")
-            self.progress_changed.emit(int((i / total) * 100))
-            self.log_message.emit(f"[BG_REMOVE] Processing: {os.path.basename(path)}")
-
-            try:
-                # Open image using Pillow
-                with Image.open(path) as img:
-                    # Run background removal
-                    output = rembg.remove(img)
-
-                    # We must save as PNG to preserve transparency
-                    base, ext = os.path.splitext(path)
-                    new_path = base + ".png"
-
-                    # Save output
-                    output.save(new_path, "PNG")
-
-                    # If the file path changed (e.g. from jpg to png), remove the original file
-                    if os.path.abspath(path) != os.path.abspath(new_path):
-                        if os.path.exists(path):
-                            os.remove(path)
-
-                    updated_paths.append(os.path.normpath(new_path))
-                    self.log_message.emit(f"[BG_REMOVE] Completed and saved as: {os.path.basename(new_path)}")
-
-            except Exception as e:
-                self.log_message.emit(f"[ERROR] Failed to process {os.path.basename(path)}: {e}")
-                # Fallback: keep original path
-                updated_paths.append(path)
-
-        self.progress_changed.emit(100)
-        self.status_changed.emit("Background removal complete!")
-        self.finished.emit(True, updated_paths, f"Successfully removed background of {total} images.")
-
-    def stop(self):
-        self.is_running = False

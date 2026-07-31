@@ -2,6 +2,9 @@ import os
 import sys
 import subprocess
 import ctypes
+import json
+import time
+from typing import Optional
 try:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -54,10 +57,79 @@ def get_reconstruction_out_dir():
         return out_dir
 
 
+def get_backup_dir():
+    user_home = os.path.expanduser("~")
+    backup_dir = os.path.join(user_home, ".proximap", "backup")
+    os.makedirs(backup_dir, exist_ok=True)
+    return backup_dir
+
+def get_backup_metadata_path():
+    return os.path.join(get_backup_dir(), "session_metadata.json")
+
+def get_app_settings_path():
+    user_home = os.path.expanduser("~")
+    settings_dir = os.path.join(user_home, ".proximap")
+    os.makedirs(settings_dir, exist_ok=True)
+    return os.path.join(settings_dir, "app_settings.json")
+
+def load_app_settings() -> dict:
+    path = get_app_settings_path()
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"dont_ask_recovery_on_startup": False}
+
+def save_app_settings(settings: dict):
+    path = get_app_settings_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(settings, f, indent=2)
+    except Exception as e:
+        print(f"[SETTINGS] Failed to save app settings: {e}")
+
+def save_session_metadata(metadata: dict):
+    path = get_backup_metadata_path()
+    try:
+        metadata["timestamp"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2)
+    except Exception as e:
+        print(f"[BACKUP] Failed to save session metadata: {e}")
+
+def load_session_metadata() -> Optional[dict]:
+    path = get_backup_metadata_path()
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[BACKUP] Failed to read session metadata: {e}")
+    return None
+
+def clear_backup_dir():
+    import shutil
+    bdir = get_backup_dir()
+    if os.path.exists(bdir):
+        for item in os.listdir(bdir):
+            item_path = os.path.join(bdir, item)
+            try:
+                if os.path.isfile(item_path) or os.path.islink(item_path):
+                    os.unlink(item_path)
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path, ignore_errors=True)
+            except Exception as e:
+                print(f"[BACKUP] Warning: Could not clear backup item {item_path}: {e}")
+
+
+
 from PySide6.QtCore import Qt, QSize, Signal, QTimer, QThread
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QFont, QWindow, QPixmap, QImage
 
 import hardware_profiler
+
 
 # Deferred imports for faster startup: MeshEditorWidget, PipelineWorker, BackgroundRemovalWorker
 
@@ -1279,6 +1351,147 @@ class UploadProgressDialog(QDialog):
         layout.addLayout(btn_layout)
 
 
+class SessionRecoveryDialog(QDialog):
+    def __init__(self, metadata: dict, parent=None):
+        super().__init__(parent)
+        self.metadata = metadata
+        self.setWindowTitle("Recover Previous Session")
+        self.resize(520, 360)
+        self.user_choice = "cancel"  # "resume", "discard", "cancel"
+
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1A1A1A;
+                color: #FFFFFF;
+            }
+            QLabel {
+                color: #E0E0E0;
+            }
+            QCheckBox {
+                color: #CCCCCC;
+                font-size: 12px;
+            }
+            QPushButton {
+                background-color: #2A2A2A;
+                color: #FFFFFF;
+                border: 1px solid #3A3A3A;
+                border-radius: 4px;
+                padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #333333;
+                border-color: #00E676;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        # Title
+        title_lbl = QLabel("Previous Session Checkpoint Found", self)
+        title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #00E676;")
+        layout.addWidget(title_lbl)
+
+        # Stage friendly names
+        step_raw = metadata.get("last_completed_step", "unknown")
+        step_map = {
+            "images_imported": "Images Imported (Staged)",
+            "sparse_reconstruction": "Sparse Point Cloud (Colmap SfM)",
+            "dense_reconstruction": "Dense Point Cloud (OpenMVS)",
+            "mesh_reconstruction": "Textured Mesh Reconstruction"
+        }
+        step_friendly = step_map.get(step_raw, step_raw)
+
+        # Info Box
+        info_frame = QFrame(self)
+        info_frame.setStyleSheet("""
+            QFrame {
+                background-color: #242424;
+                border: 1px solid #333333;
+                border-radius: 6px;
+                padding: 12px;
+            }
+        """)
+        info_layout = QVBoxLayout(info_frame)
+        info_layout.setSpacing(6)
+
+        info_layout.addWidget(QLabel(f"<b>Last Completed Stage:</b> <span style='color:#00E676;'>{step_friendly}</span>"))
+        info_layout.addWidget(QLabel(f"<b>Timestamp:</b> {metadata.get('timestamp', 'N/A')}"))
+        info_layout.addWidget(QLabel(f"<b>Image Count:</b> {metadata.get('image_count', 0)}"))
+        info_layout.addWidget(QLabel(f"<b>Quality Preset:</b> {metadata.get('quality_preset', 'Medium').capitalize()}"))
+        info_layout.addWidget(QLabel(f"<b>Mesh Mode:</b> {metadata.get('mesh_mode', 'Default').capitalize()}"))
+
+        layout.addWidget(info_frame)
+
+        prompt_lbl = QLabel("Would you like to resume this session from where it left off?")
+        prompt_lbl.setStyleSheet("font-size: 13px; color: #CCCCCC;")
+        layout.addWidget(prompt_lbl)
+
+        # Don't ask again checkbox
+        self.chk_dont_ask = QCheckBox("Don't prompt automatically on application startup", self)
+        layout.addWidget(self.chk_dont_ask)
+
+        layout.addStretch()
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        
+        btn_discard = QPushButton("Discard Backup", self)
+        btn_discard.setStyleSheet("""
+            QPushButton {
+                background-color: #3A1A1A;
+                color: #FF5252;
+                border: 1px solid #FF5252;
+            }
+            QPushButton:hover {
+                background-color: #4A1A1A;
+            }
+        """)
+        btn_discard.clicked.connect(self._on_discard)
+
+        btn_cancel = QPushButton("Later", self)
+        btn_cancel.clicked.connect(self.reject)
+
+        btn_resume = QPushButton("Resume Reconstruction", self)
+        btn_resume.setStyleSheet("""
+            QPushButton {
+                background-color: #00E676;
+                color: #121212;
+                font-weight: bold;
+                border: 1px solid #00E676;
+            }
+            QPushButton:hover {
+                background-color: #00C853;
+            }
+        """)
+        btn_resume.clicked.connect(self._on_resume)
+
+        btn_layout.addWidget(btn_discard)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_cancel)
+        btn_layout.addWidget(btn_resume)
+
+        layout.addLayout(btn_layout)
+
+    def _on_resume(self):
+        self.user_choice = "resume"
+        self._update_settings()
+        self.accept()
+
+    def _on_discard(self):
+        self.user_choice = "discard"
+        self._update_settings()
+        self.accept()
+
+    def _update_settings(self):
+        if self.chk_dont_ask.isChecked():
+            settings = load_app_settings()
+            settings["dont_ask_recovery_on_startup"] = True
+            save_app_settings(settings)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -1306,6 +1519,8 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self._apply_styling()
         QTimer.singleShot(0, self._check_existing_scene)
+
+
 
     def _clear_reconstruction_out(self):
         """Clears temporary files in reconstruction_out on startup, but retains valid COLMAP database checkpoints."""
@@ -1425,10 +1640,11 @@ class MainWindow(QMainWindow):
         self.mobile_import_btn = QPushButton("Import from Mobile Device", step1_box)
         self.mobile_import_btn.clicked.connect(self._on_import_from_mobile_clicked)
         
-        self.bg_remove_btn = QPushButton("Remove Image Background", step1_box)
-        self.bg_remove_btn.setObjectName("BgRemoveBtn")
-        self.bg_remove_btn.setEnabled(False)
-        self.bg_remove_btn.clicked.connect(self._remove_backgrounds_clicked)
+        # Add-on Panels Container (Step 1)
+        self.addon_container = QWidget(step1_box)
+        self.addon_container_layout = QVBoxLayout(self.addon_container)
+        self.addon_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.addon_container_layout.setSpacing(4)
 
         # Reference Cloud Import (Optional)
         # self.ref_cloud_btn = QPushButton("Import Reference Cloud", step1_box)
@@ -1510,7 +1726,7 @@ class MainWindow(QMainWindow):
         step1_layout.addWidget(self.badge)
         step1_layout.addWidget(self.browse_btn)
         step1_layout.addWidget(self.mobile_import_btn)
-        step1_layout.addWidget(self.bg_remove_btn)
+        step1_layout.addWidget(self.addon_container)
         # step1_layout.addWidget(self.ref_cloud_btn)
         # step1_layout.addWidget(self.ref_cloud_container)
         step1_layout.addWidget(self.standalone_cloud_container)
@@ -1868,6 +2084,7 @@ class MainWindow(QMainWindow):
         self.viewer_widget.action_import_standalone.triggered.connect(self._import_standalone_cloud_clicked)
         self.viewer_widget.action_mobile_export.triggered.connect(self._on_send_to_mobile_clicked)
         self.viewer_widget.action_upload_proximap.triggered.connect(self._upload_to_proximap)
+
         
         # Initialize VisPy Canvas
         self.canvas = scene.SceneCanvas(keys='interactive', show=False, bgcolor=self.viewport_bg_color)
@@ -2424,11 +2641,10 @@ class MainWindow(QMainWindow):
         if files:
             self.console_text.append(f"[INFO] Successfully imported {len(files)} files. Camera identified: {camera_name}")
             self._set_process_btn_state("ready")
-            self.bg_remove_btn.setEnabled(True)
         else:
             self.console_text.append("[INFO] Image list cleared.")
             self._set_process_btn_state("idle")
-            self.bg_remove_btn.setEnabled(False)
+
 
     def _camera_name_for_display(self, camera_name: str) -> str:
         """Return a compact, printable camera name that cannot stretch the sidebar."""
@@ -2548,7 +2764,6 @@ class MainWindow(QMainWindow):
         
         self.browse_btn.setEnabled(False)
         self.mobile_import_btn.setEnabled(False)
-        self.bg_remove_btn.setEnabled(False)
         self.process_btn.setEnabled(False)
         
         self.process_btn.setText("Cancel Extraction")
@@ -2698,7 +2913,6 @@ class MainWindow(QMainWindow):
         self.extracted_frames = []
         self.img_count_label.setText("Images Loaded: 0 (Standalone Mode)")
         self.camera_label.setText("Camera: N/A (Direct point cloud reconstruction)")
-        self.bg_remove_btn.setEnabled(False)
         
         # 2. Clear & disable reference cloud fusion
         # self._clear_reference_cloud_clicked()
@@ -2763,7 +2977,6 @@ class MainWindow(QMainWindow):
     def _cleanup_extraction_ui(self, cancelled=False):
         self.browse_btn.setEnabled(True)
         self.mobile_import_btn.setEnabled(True)
-        self.bg_remove_btn.setEnabled(len(self.image_list) > 0)
         
         try:
             self.process_btn.clicked.disconnect()
@@ -2781,7 +2994,6 @@ class MainWindow(QMainWindow):
     def _on_all_extractions_finished(self):
         self.browse_btn.setEnabled(True)
         self.mobile_import_btn.setEnabled(True)
-        self.bg_remove_btn.setEnabled(True)
         
         try:
             self.process_btn.clicked.disconnect()
@@ -2796,106 +3008,7 @@ class MainWindow(QMainWindow):
                 self.image_list.append(f)
                 added_count += 1
                 
-        self._handle_dropped_images(self.image_list)
-        self.status_label.setText("Extraction complete!")
-        self.console_text.append(f"[VIDEO] Complete. Added {added_count} frames from video sources.")
 
-    def _remove_backgrounds_clicked(self):
-        if not self.image_list:
-            return
-
-        msg_box = QMessageBox(self)
-        msg_box.setWindowTitle("Confirm Background Removal")
-        msg_box.setIcon(QMessageBox.Question)
-        msg_box.setText("Do you want to remove the background of all loaded images?")
-        msg_box.setInformativeText(
-            "This will create preprocessed working copies of the images in the project's temporary reconstruction folder and remove their backgrounds offline.\n\n"
-            "Your original camera files will NOT be modified.\n\n"
-            "Do you want to proceed?"
-        )
-        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
-        msg_box.setDefaultButton(QMessageBox.No)
-        
-        # Apply the app stylesheet
-        msg_box.setStyleSheet(self.styleSheet())
-        
-        ret = msg_box.exec()
-        if ret == QMessageBox.Yes:
-            self._start_background_removal()
-
-    def _start_background_removal(self):
-        if not self.image_list:
-            return
-            
-        # Terminate any active viewer
-        self._terminate_viewer()
-        
-        # Disable inputs to avoid modification during processing
-        self.browse_btn.setEnabled(False)
-        self.mobile_import_btn.setEnabled(False)
-        self.bg_remove_btn.setEnabled(False)
-        self.process_btn.setEnabled(False)
-        self._set_export_actions_enabled(False)
-        self.photos_tab.setEnabled(False)
-        
-        self.progress_bar.setValue(0)
-        self.status_label.setText("Preparing working copies...")
-        
-        # Create reconstruction out workspace folder for preprocessed images
-        import shutil
-        preprocessed_dir = os.path.join(get_reconstruction_out_dir(), "preprocessed_images")
-        
-        # Clean up any existing preprocessed folder to avoid mix-up
-        if os.path.exists(preprocessed_dir):
-            try:
-                shutil.rmtree(preprocessed_dir)
-            except Exception:
-                pass
-        os.makedirs(preprocessed_dir, exist_ok=True)
-        
-        self.console_text.append(f"[PREP] Copying {len(self.image_list)} images to workspace: {preprocessed_dir}")
-        
-        copied_list = []
-        for path in self.image_list:
-            filename = os.path.basename(path)
-            dest_path = os.path.join(preprocessed_dir, filename)
-            try:
-                shutil.copy2(path, dest_path)
-                copied_list.append(os.path.normpath(dest_path))
-            except Exception as e:
-                self.console_text.append(f"[ERROR] Failed to copy {filename} to workspace: {e}")
-                
-        if not copied_list:
-            self.console_text.append("[ERROR] No images could be prepared in the workspace directory.")
-            self._on_bg_removal_finished(False, self.image_list, "Failed to copy images to workspace.")
-            return
-
-        from pipeline_manager import BackgroundRemovalWorker
-        self.worker = BackgroundRemovalWorker(copied_list, self)
-        self.worker.progress_changed.connect(self.progress_bar.setValue)
-        self.worker.status_changed.connect(self.status_label.setText)
-        self.worker.log_message.connect(self._append_log)
-        self.worker.finished.connect(self._on_bg_removal_finished)
-        
-        self.console_text.append("[START] Initializing background removal worker thread...")
-        self.worker.start()
-
-    def _on_bg_removal_finished(self, success: bool, updated_list: list, message: str):
-        self.browse_btn.setEnabled(True)
-        self.mobile_import_btn.setEnabled(True)
-        self.photos_tab.setEnabled(True)
-        
-        if success:
-            self.console_text.append(f"[FINISHED] {message}")
-            # Refresh photos list with the new files
-            self._handle_dropped_images(updated_list)
-        else:
-            self.console_text.append(f"[FAILED] Background removal failed: {message}")
-            # Re-enable controls with the current list
-            self._handle_dropped_images(self.image_list)
-            
-        self.progress_bar.setValue(0)
-        self.status_label.setText("Status: Idle")
 
     def _stage_images_for_reconstruction(self) -> str | None:
         """
@@ -2935,6 +3048,32 @@ class MainWindow(QMainWindow):
 
         if not staged:
             return None
+
+        # Update backup folder (~/.proximap/backup/images)
+        try:
+            backup_img_dir = os.path.join(get_backup_dir(), "images")
+            clear_backup_dir()
+            os.makedirs(backup_img_dir, exist_ok=True)
+            for s_path in staged:
+                try:
+                    shutil.copy2(s_path, os.path.join(backup_img_dir, os.path.basename(s_path)))
+                except Exception:
+                    pass
+
+            meta = {
+                "scan_type": "photogrammetry",
+                "last_completed_step": "images_imported",
+                "image_count": len(staged),
+                "quality_preset": self.quality_combo.currentText().lower(),
+                "gpu_mode": self.gpu_combo.currentText().lower(),
+                "has_plain_surfaces": self.plain_surfaces_checkbox.isChecked(),
+                "mapper_mode": self.mapper_combo.currentText().lower() if hasattr(self, 'mapper_combo') else "incremental",
+                "mesh_mode": "poisson" if hasattr(self, 'mesh_mode_combo') and self.mesh_mode_combo.currentIndex() == 1 else "default",
+                "poisson_depth": self.poisson_depth_slider.value() if hasattr(self, 'poisson_depth_slider') else 9
+            }
+            save_session_metadata(meta)
+        except Exception as e:
+            self.console_text.append(f"[WARNING] Could not write backup metadata: {e}")
 
         self.console_text.append(f"[PREP] Staged {len(staged)} images for reconstruction → {staging_dir}")
         return staging_dir
@@ -3019,7 +3158,7 @@ class MainWindow(QMainWindow):
             self.custom_refine_scales_spin.setValue(3)
             self.custom_texture_res_combo.setCurrentIndex(0)
 
-    def _start_processing(self):
+    def _start_processing(self, resume_from_step: str = None):
         if not self.standalone_cloud_path and not self.image_list:
             return
             
@@ -3030,7 +3169,6 @@ class MainWindow(QMainWindow):
         self.browse_btn.setEnabled(False)
         self.mobile_import_btn.setEnabled(False)
         self._set_export_actions_enabled(False)
-        self.bg_remove_btn.setEnabled(False)
         # self.ref_cloud_btn.setEnabled(False)
         # self.ref_cloud_clear_btn.setEnabled(False)
         self.quality_combo.setEnabled(False)
@@ -3093,7 +3231,6 @@ class MainWindow(QMainWindow):
             self._set_process_btn_state("ready")
             self.browse_btn.setEnabled(True)
             self.mobile_import_btn.setEnabled(True)
-            self.bg_remove_btn.setEnabled(True)
             # self.ref_cloud_btn.setEnabled(True)
             # self.ref_cloud_clear_btn.setEnabled(True)
             self.gpu_combo.setEnabled(True)
@@ -3140,6 +3277,7 @@ class MainWindow(QMainWindow):
             mesh_mode=mesh_mode,
             poisson_depth=poisson_depth,
             custom_params=custom_params,
+            resume_from_step=resume_from_step,
             parent=self
         )
         self.worker.progress_changed.connect(self._on_progress_changed)
@@ -3214,7 +3352,6 @@ class MainWindow(QMainWindow):
         self.advanced_toggle_btn.setEnabled(True)
         # self.ref_cloud_btn.setEnabled(True)
         # self.ref_cloud_clear_btn.setEnabled(True)
-        self.bg_remove_btn.setEnabled(len(self.image_list) > 0)
         
         if success:
             self._set_process_btn_state("ready")
@@ -3424,50 +3561,126 @@ class MainWindow(QMainWindow):
         self._set_export_actions_enabled(has_model)
 
     def _check_existing_scene(self):
-        """Checks if a previous reconstruction scene exists and updates recover action state."""
-        output_dir = get_reconstruction_out_dir()
-        mvs_dir = os.path.join(output_dir, "mvs")
-        has_scene = os.path.exists(os.path.join(mvs_dir, "scene.mvs")) or \
-                    os.path.exists(os.path.join(mvs_dir, "scene_dense_mesh_refine.ply")) or \
-                    os.path.exists(os.path.join(mvs_dir, "scene_dense_mesh.ply"))
-        if has_scene:
-            self.viewer_widget.set_mvs_directory(mvs_dir)
-            self.console_text.append("[INFO] Detected previous reconstruction. Go to File Menu -> Recover Last Session to load it.")
-        self._update_file_menu_states()
+        """Checks if a previous reconstruction checkpoint exists in ~/.proximap/backup/."""
+        meta = load_session_metadata()
+        has_backup = meta is not None
+        self.viewer_widget.action_recover.setEnabled(has_backup)
+        if has_backup:
+            step = meta.get("last_completed_step", "unknown")
+            self.console_text.append(f"[INFO] Backup session found from previous run (Stage: {step}). Select File → Recover Last Session to load.")
+
+    def _check_startup_recovery(self):
+        """Checks on application initialization if an automatic recovery prompt should be displayed."""
+        meta = load_session_metadata()
+        if not meta:
+            return
+        
+        settings = load_app_settings()
+        if settings.get("dont_ask_recovery_on_startup", False):
+            return
+        
+        dlg = SessionRecoveryDialog(meta, self)
+        if dlg.exec() == QDialog.Accepted:
+            if dlg.user_choice == "resume":
+                self._retrieve_last_session()
+            elif dlg.user_choice == "discard":
+                clear_backup_dir()
+                self._check_existing_scene()
 
     def _retrieve_last_session(self):
-        """Retrieves and displays the last session, and enables export/upload buttons."""
+        """Restores checkpoint from ~/.proximap/backup/, loads settings, updates UI and viewer."""
+        import shutil
+        meta = load_session_metadata()
+        if not meta:
+            output_dir = get_reconstruction_out_dir()
+            mvs_dir = os.path.join(output_dir, "mvs")
+            has_files = os.path.exists(mvs_dir) and len(os.listdir(mvs_dir)) > 0
+            if not has_files:
+                QMessageBox.information(self, "No Backup Session", "No recoverable session found.")
+                return
+
+        backup_dir = get_backup_dir()
+        out_dir = get_reconstruction_out_dir()
+        os.makedirs(out_dir, exist_ok=True)
+
+        # Copy backup folders (colmap, mvs) to reconstruction_out
+        for folder in ["colmap", "mvs"]:
+            src_f = os.path.join(backup_dir, folder)
+            dst_f = os.path.join(out_dir, folder)
+            if os.path.exists(src_f):
+                if os.path.exists(dst_f):
+                    shutil.rmtree(dst_f, ignore_errors=True)
+                try:
+                    shutil.copytree(src_f, dst_f)
+                except Exception as e:
+                    self.console_text.append(f"[WARNING] Could not copy backup folder {folder}: {e}")
+
+        # Restore images list if present in backup/images
+        backup_img_dir = os.path.join(backup_dir, "images")
+        if os.path.exists(backup_img_dir):
+            restored_imgs = [
+                os.path.join(backup_img_dir, f) for f in os.listdir(backup_img_dir)
+                if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
+            ]
+            if restored_imgs:
+                self.image_list = restored_imgs
+                self.img_count_label.setText(f"Images Loaded: {len(self.image_list)}")
+
+        # Restore UI controls from metadata
+        if meta:
+            if "quality_preset" in meta:
+                idx = self.quality_combo.findText(meta["quality_preset"].capitalize())
+                if idx >= 0:
+                    self.quality_combo.setCurrentIndex(idx)
+            if "gpu_mode" in meta:
+                idx = self.gpu_combo.findText(meta["gpu_mode"].capitalize())
+                if idx >= 0:
+                    self.gpu_combo.setCurrentIndex(idx)
+            if "has_plain_surfaces" in meta:
+                self.plain_surfaces_checkbox.setChecked(meta["has_plain_surfaces"])
+
+        # Enable view scene button and set mode
+        mvs_dir = os.path.join(out_dir, "mvs")
+        self.viewer_widget.set_mvs_directory(mvs_dir)
         self.view_scene_btn.setEnabled(True)
-        self.console_text.append("[INFO] Retrieved last session. 3D Viewer is ready to display.")
         self._update_upload_button_state()
-        
-        # Determine the best view mode and load it immediately
-        output_dir = get_reconstruction_out_dir()
-        mvs_dir = os.path.join(output_dir, "mvs")
-        
+
         self.viewer_widget.mode_select.blockSignals(True)
         mesh_exists = False
         for candidate in ["scene_dense_mesh_texture.ply", "scene_dense_mesh_texture.obj", "scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
             if os.path.exists(os.path.join(mvs_dir, candidate)):
                 mesh_exists = True
                 break
-        
+
         dense_exists = os.path.exists(os.path.join(mvs_dir, "scene_dense.mvs"))
-        
+
         if mesh_exists:
             self.viewer_widget.mode_select.setCurrentIndex(2)
         elif dense_exists:
             self.viewer_widget.mode_select.setCurrentIndex(1)
         else:
             self.viewer_widget.mode_select.setCurrentIndex(0)
-            
+
         self.viewer_widget.mode_select.blockSignals(False)
-        
+
         path = self.viewer_widget.get_selected_file_path()
         if path:
             self._reload_viewer(path)
-            
+
         self._update_file_menu_states()
+
+        # Prompt user if they want to resume remaining reconstruction steps
+        step = meta.get("last_completed_step", "unknown") if meta else "unknown"
+        if step in ["images_imported", "sparse_reconstruction", "dense_reconstruction"]:
+            reply = QMessageBox.question(
+                self,
+                "Continue Reconstruction?",
+                f"Session restored to checkpoint stage '{step}'.\nWould you like to resume and execute the remaining reconstruction steps?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                self._start_processing(resume_from_step=step)
 
     def _save_project(self):
         mvs_dir = self.viewer_widget.current_mvs_dir
@@ -3606,7 +3819,6 @@ class MainWindow(QMainWindow):
 
         # 4. Re-enable Step 1 buttons and restore photogrammetry settings panel
         self._exit_standalone_mode()
-        self.bg_remove_btn.setEnabled(False)
 
         # 5. Reset progress and status bar
         self._set_process_btn_state("idle")
@@ -5426,6 +5638,7 @@ class StartupManager:
         self.window.show()
         if self.splash:
             self.splash.finish(self.window)
+        QTimer.singleShot(500, self.window._check_startup_recovery)
 
 
 if __name__ == "__main__":
