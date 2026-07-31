@@ -610,6 +610,18 @@ class PipelineWorker(QThread):
         if skip_sfm:
             self.log_message.emit(f"[RESUME] Resuming session from checkpoint: '{self.resume_from_step}'. Skipping Steps 1-5 (SfM & Sparse Cloud already complete).")
             self.progress_changed.emit(70)
+            working_image_dir = os.path.join(self.output_dir, "input_images")
+            if not os.path.exists(working_image_dir) or not any(f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff')) for f in (os.listdir(working_image_dir) if os.path.exists(working_image_dir) else [])):
+                working_image_dir = self._prepare_images(
+                    self.image_dir, self.output_dir, max_image_dim
+                )
+            try:
+                self._total_images = len([
+                    f for f in os.listdir(working_image_dir)
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
+                ])
+            except Exception:
+                self._total_images = 0
         else:
             # =========================================================================
             # STEP 1/9 — Image Preparation
@@ -861,135 +873,136 @@ class PipelineWorker(QThread):
             self._backup_checkpoint("features_extracted")
 
 
-        # =========================================================================
-        # STEP 4/9 — Sparse Reconstruction (Mapper)
-        # =========================================================================
-        self._triangulated_points = 0
-        self._registered_count = 0
-        sparse_dir = self._to_colmap_path(os.path.join(colmap_out, "sparse"))
-        if os.path.exists(sparse_dir):
-            try:
-                shutil.rmtree(sparse_dir)
-            except Exception as e:
-                self.log_message.emit(f"[WARNING] Failed to clean sparse folder: {e}")
-        os.makedirs(sparse_dir, exist_ok=True)
+        if not skip_sfm:
+            # =========================================================================
+            # STEP 4/9 — Sparse Reconstruction (Mapper)
+            # =========================================================================
+            self._triangulated_points = 0
+            self._registered_count = 0
+            sparse_dir = self._to_colmap_path(os.path.join(colmap_out, "sparse"))
+            if os.path.exists(sparse_dir):
+                try:
+                    shutil.rmtree(sparse_dir)
+                except Exception as e:
+                    self.log_message.emit(f"[WARNING] Failed to clean sparse folder: {e}")
+            os.makedirs(sparse_dir, exist_ok=True)
 
-        cmd_incremental = [
-            colmap_exe, "mapper",
-            "--database_path", database_path,
-            "--image_path", working_image_dir,
-            "--output_path", sparse_dir,
-            "--Mapper.ba_global_max_refinements", str(ba_global_max_refinements),
-            "--Mapper.ba_local_max_refinements", "3",
-            "--Mapper.min_num_matches", "15",
-            "--Mapper.init_min_num_inliers", "100",
-            "--Mapper.abs_pose_min_num_inliers", "15",
-            "--Mapper.abs_pose_min_inlier_ratio", "0.25",
-            "--Mapper.num_threads", str(num_threads),
-        ]
-
-        if self.mapper_mode == "global":
-            self.status_changed.emit("Step 4/9: Estimating Camera Poses (GLOMAP Global SfM)...")
-            self.log_message.emit("[INFO] SfM Mapper: GLOMAP global_mapper selected.")
-            cmd_global = [
-                colmap_exe, "global_mapper",
+            cmd_incremental = [
+                colmap_exe, "mapper",
                 "--database_path", database_path,
                 "--image_path", working_image_dir,
                 "--output_path", sparse_dir,
-                "--GlobalMapper.min_num_matches", "15",
-                "--GlobalMapper.num_threads", str(num_threads),
-                "--GlobalMapper.ba_num_iterations", str(ba_global_max_refinements),
+                "--Mapper.ba_global_max_refinements", str(ba_global_max_refinements),
+                "--Mapper.ba_local_max_refinements", "3",
+                "--Mapper.min_num_matches", "15",
+                "--Mapper.init_min_num_inliers", "100",
+                "--Mapper.abs_pose_min_num_inliers", "15",
+                "--Mapper.abs_pose_min_inlier_ratio", "0.25",
+                "--Mapper.num_threads", str(num_threads),
             ]
-            ok = self._run_process_realtime(cmd_global, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line)
-            if not ok or not self._select_best_sparse_model(sparse_dir):
-                self.log_message.emit("[WARNING] GLOMAP global_mapper failed or produced no model. Falling back to COLMAP incremental mapper...")
-                if os.path.exists(sparse_dir):
-                    try:
-                        shutil.rmtree(sparse_dir)
-                    except Exception:
-                        pass
-                os.makedirs(sparse_dir, exist_ok=True)
+
+            if self.mapper_mode == "global":
+                self.status_changed.emit("Step 4/9: Estimating Camera Poses (GLOMAP Global SfM)...")
+                self.log_message.emit("[INFO] SfM Mapper: GLOMAP global_mapper selected.")
+                cmd_global = [
+                    colmap_exe, "global_mapper",
+                    "--database_path", database_path,
+                    "--image_path", working_image_dir,
+                    "--output_path", sparse_dir,
+                    "--GlobalMapper.min_num_matches", "15",
+                    "--GlobalMapper.num_threads", str(num_threads),
+                    "--GlobalMapper.ba_num_iterations", str(ba_global_max_refinements),
+                ]
+                ok = self._run_process_realtime(cmd_global, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line)
+                if not ok or not self._select_best_sparse_model(sparse_dir):
+                    self.log_message.emit("[WARNING] GLOMAP global_mapper failed or produced no model. Falling back to COLMAP incremental mapper...")
+                    if os.path.exists(sparse_dir):
+                        try:
+                            shutil.rmtree(sparse_dir)
+                        except Exception:
+                            pass
+                    os.makedirs(sparse_dir, exist_ok=True)
+                    if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
+                        return False
+            else:
+                self.status_changed.emit("Step 4/9: Estimating Camera Poses (SfM)...")
                 if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
                     return False
-        else:
-            self.status_changed.emit("Step 4/9: Estimating Camera Poses (SfM)...")
-            if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
+
+            best_model_dir = self._to_colmap_path(self._select_best_sparse_model(sparse_dir)) if self._select_best_sparse_model(sparse_dir) else None
+            if not best_model_dir:
+                self.log_message.emit(
+                    "[FAILED] SfM registered 0 camera poses. Feature matching produced "
+                    "insufficient geometric correspondences to initialise reconstruction.\n"
+                    "  Suggestions:\n"
+                    "  • Try a higher quality preset (Medium or High)\n"
+                    "  • Ensure images have at least 60% overlap between adjacent shots"
+                )
                 return False
 
-        best_model_dir = self._to_colmap_path(self._select_best_sparse_model(sparse_dir)) if self._select_best_sparse_model(sparse_dir) else None
-        if not best_model_dir:
-            self.log_message.emit(
-                "[FAILED] SfM registered 0 camera poses. Feature matching produced "
-                "insufficient geometric correspondences to initialise reconstruction.\n"
-                "  Suggestions:\n"
-                "  • Try a higher quality preset (Medium or High)\n"
-                "  • Ensure images have at least 60% overlap between adjacent shots"
-            )
-            return False
+            target_model_dir = self._to_colmap_path(os.path.join(sparse_dir, "0"))
+            if os.path.abspath(best_model_dir) != os.path.abspath(target_model_dir):
+                if os.path.exists(target_model_dir):
+                    shutil.rmtree(target_model_dir)
+                try:
+                    shutil.move(best_model_dir, target_model_dir)
+                except Exception as e:
+                    self.log_message.emit(f"[WARNING] Failed to move best model folder: {e}")
 
-        target_model_dir = self._to_colmap_path(os.path.join(sparse_dir, "0"))
-        if os.path.abspath(best_model_dir) != os.path.abspath(target_model_dir):
-            if os.path.exists(target_model_dir):
-                shutil.rmtree(target_model_dir)
+            # Optional bundle adjuster polish pass
+            if run_bundle_adjuster:
+                self.log_message.emit("[INFO] Running extra bundle adjuster refinement...")
+                cmd_ba = [
+                    colmap_exe, "bundle_adjuster",
+                    "--input_path", target_model_dir,
+                    "--output_path", target_model_dir,
+                    "--BundleAdjustmentCeres.max_num_iterations", "100",
+                    "--BundleAdjustment.refine_focal_length", "1",
+                    "--BundleAdjustment.refine_principal_point", "0",
+                    "--BundleAdjustment.refine_extra_params", "1",
+                ]
+                self._run_process_realtime(cmd_ba, timeout=600.0, env=colmap_env, line_parser=self._parse_mapper_line)
+
+            # Get reconstruction statistics
+            self._last_reconstruction_stats = self._run_model_analyzer(target_model_dir)
+            if "images" in self._last_reconstruction_stats:
+                self._registered_count = self._last_reconstruction_stats["images"]
+            if "points" in self._last_reconstruction_stats:
+                self._triangulated_points = self._last_reconstruction_stats["points"]
+            if "mean_error" in self._last_reconstruction_stats:
+                self._mean_reproj_error = self._last_reconstruction_stats["mean_error"]
+
+            self._emit_sfm_summary()
+            self.progress_changed.emit(60)
+
+            # =========================================================================
+            # STEP 5/9 — Export to OpenMVS Format
+            # =========================================================================
+            self.status_changed.emit("Step 5/9: Exporting Scene to OpenMVS...")
+
+            # Copy sparse model files to the parent sparse directory so InterfaceCOLMAP can find them
             try:
-                shutil.move(best_model_dir, target_model_dir)
+                for filename in os.listdir(target_model_dir):
+                    src_file = os.path.join(target_model_dir, filename)
+                    dst_file = os.path.join(sparse_dir, filename)
+                    if os.path.isfile(src_file):
+                        shutil.copy2(src_file, dst_file)
+                self.log_message.emit("[INFO] Copied sparse model files to parent directory for InterfaceCOLMAP.")
             except Exception as e:
-                self.log_message.emit(f"[WARNING] Failed to move best model folder: {e}")
+                self.log_message.emit(f"[WARNING] Failed to copy sparse model files to parent: {e}")
 
-        # Optional bundle adjuster polish pass
-        if run_bundle_adjuster:
-            self.log_message.emit("[INFO] Running extra bundle adjuster refinement...")
-            cmd_ba = [
-                colmap_exe, "bundle_adjuster",
-                "--input_path", target_model_dir,
-                "--output_path", target_model_dir,
-                "--BundleAdjustmentCeres.max_num_iterations", "100",
-                "--BundleAdjustment.refine_focal_length", "1",
-                "--BundleAdjustment.refine_principal_point", "0",
-                "--BundleAdjustment.refine_extra_params", "1",
+            mvs_export_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["InterfaceCOLMAP"])
+            os.makedirs(os.path.join(mvs_out, "images"), exist_ok=True)
+            cmd_export = [
+                mvs_export_exe,
+                "-i", colmap_out,
+                "--image-folder", os.path.join(colmap_out, "images"),
+                "-o", os.path.join(mvs_out, "scene.mvs"),
             ]
-            self._run_process_realtime(cmd_ba, timeout=600.0, env=colmap_env, line_parser=self._parse_mapper_line)
-
-        # Get reconstruction statistics
-        self._last_reconstruction_stats = self._run_model_analyzer(target_model_dir)
-        if "images" in self._last_reconstruction_stats:
-            self._registered_count = self._last_reconstruction_stats["images"]
-        if "points" in self._last_reconstruction_stats:
-            self._triangulated_points = self._last_reconstruction_stats["points"]
-        if "mean_error" in self._last_reconstruction_stats:
-            self._mean_reproj_error = self._last_reconstruction_stats["mean_error"]
-
-        self._emit_sfm_summary()
-        self.progress_changed.emit(60)
-
-        # =========================================================================
-        # STEP 5/9 — Export to OpenMVS Format
-        # =========================================================================
-        self.status_changed.emit("Step 5/9: Exporting Scene to OpenMVS...")
-
-        # Copy sparse model files to the parent sparse directory so InterfaceCOLMAP can find them
-        try:
-            for filename in os.listdir(target_model_dir):
-                src_file = os.path.join(target_model_dir, filename)
-                dst_file = os.path.join(sparse_dir, filename)
-                if os.path.isfile(src_file):
-                    shutil.copy2(src_file, dst_file)
-            self.log_message.emit("[INFO] Copied sparse model files to parent directory for InterfaceCOLMAP.")
-        except Exception as e:
-            self.log_message.emit(f"[WARNING] Failed to copy sparse model files to parent: {e}")
-
-        mvs_export_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["InterfaceCOLMAP"])
-        os.makedirs(os.path.join(mvs_out, "images"), exist_ok=True)
-        cmd_export = [
-            mvs_export_exe,
-            "-i", colmap_out,
-            "--image-folder", os.path.join(colmap_out, "images"),
-            "-o", os.path.join(mvs_out, "scene.mvs"),
-        ]
-        if not self._run_process_realtime(cmd_export, timeout=300.0):
-            return False
-        self._backup_checkpoint("sparse_reconstruction")
-        self.progress_changed.emit(70)
+            if not self._run_process_realtime(cmd_export, timeout=300.0):
+                return False
+            self._backup_checkpoint("sparse_reconstruction")
+            self.progress_changed.emit(70)
 
         # =========================================================================
         # STEP 6/9 — Dense Point Cloud Generation
