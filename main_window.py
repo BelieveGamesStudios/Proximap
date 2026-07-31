@@ -123,6 +123,48 @@ def clear_backup_dir():
             except Exception as e:
                 print(f"[BACKUP] Warning: Could not clear backup item {item_path}: {e}")
 
+def is_session_backup_valid() -> bool:
+    """Returns True only if a session backup exists AND all required files (images/models) exist on disk."""
+    meta = load_session_metadata()
+    if not meta:
+        return False
+
+    step = meta.get("last_completed_step", "unknown")
+    backup_dir = get_backup_dir()
+    out_dir = get_reconstruction_out_dir()
+    image_exts = ('.jpg', '.jpeg', '.png', '.tif', '.tiff')
+
+    # If the step requires images to proceed, verify that image files actually exist on disk
+    if step in ["images_imported", "features_extracted", "sparse_reconstruction"]:
+        has_images = False
+        candidates = [
+            os.path.join(backup_dir, "images"),
+            os.path.join(out_dir, "input_images"),
+            os.path.join(out_dir, "extracted_frames")
+        ]
+        for cand in candidates:
+            if os.path.exists(cand):
+                for root, _, files in os.walk(cand):
+                    if any(f.lower().endswith(image_exts) for f in files):
+                        has_images = True
+                        break
+            if has_images:
+                break
+        if not has_images:
+            return False
+
+    # If the step is dense or mesh reconstruction, verify that model files exist
+    if step in ["dense_reconstruction", "mesh_reconstruction"]:
+        has_model = False
+        for folder in [os.path.join(backup_dir, "mvs"), os.path.join(out_dir, "mvs")]:
+            if os.path.exists(folder) and len(os.listdir(folder)) > 0:
+                has_model = True
+                break
+        if not has_model:
+            return False
+
+    return True
+
 
 
 from PySide6.QtCore import Qt, QSize, Signal, QTimer, QThread
@@ -3008,8 +3050,35 @@ class MainWindow(QMainWindow):
         # Auto-stage and back up video frames to ~/.proximap/backup/
         if self.image_list:
             self._stage_images_for_reconstruction()
+
+        self.img_count_label.setText(f"Images Loaded: {len(self.image_list)}")
+        self.progress_bar.setValue(100)
+        self.status_label.setText(f"Extraction complete. {len(self.image_list)} images ready.")
+        self._set_process_btn_state("ready" if len(self.image_list) > 0 else "idle")
                 
 
+
+    def _find_available_session_images(self) -> list[str]:
+        """Finds image files from backup/images, input_images, or extracted_frames."""
+        found = []
+        out_dir = get_reconstruction_out_dir()
+        backup_dir = get_backup_dir()
+
+        candidates = [
+            os.path.join(backup_dir, "images"),
+            os.path.join(out_dir, "input_images"),
+            os.path.join(out_dir, "extracted_frames")
+        ]
+        image_exts = ('.jpg', '.jpeg', '.png', '.tif', '.tiff')
+        for cand in candidates:
+            if os.path.exists(cand):
+                for root, _, files in os.walk(cand):
+                    for f in files:
+                        if f.lower().endswith(image_exts):
+                            found.append(os.path.join(root, f))
+                if found:
+                    break
+        return found
 
     def _stage_images_for_reconstruction(self) -> str | None:
         """
@@ -3021,13 +3090,8 @@ class MainWindow(QMainWindow):
         import shutil
         staging_dir = os.path.join(get_reconstruction_out_dir(), "input_images")
         
-        # Always start fresh so stale files from a previous run don't contaminate this one
-        if os.path.exists(staging_dir):
-            try:
-                shutil.rmtree(staging_dir)
-            except Exception as e:
-                self.console_text.append(f"[WARNING] Could not clear staging dir: {e}")
-        os.makedirs(staging_dir, exist_ok=True)
+        if not self.image_list:
+            self.image_list = self._find_available_session_images()
 
         staged = []
         seen_names = {}   # Track duplicate basenames and rename to avoid collisions
@@ -3042,10 +3106,19 @@ class MainWindow(QMainWindow):
                 seen_names[basename] = 0
             dest = os.path.join(staging_dir, basename)
             try:
-                shutil.copy2(path, dest)
+                if os.path.abspath(path) != os.path.abspath(dest):
+                    os.makedirs(staging_dir, exist_ok=True)
+                    shutil.copy2(path, dest)
                 staged.append(dest)
             except Exception as e:
                 self.console_text.append(f"[WARNING] Could not stage {os.path.basename(path)}: {e}")
+
+        # Fallback if self.image_list copy failed but staging_dir already has images
+        if not staged and os.path.exists(staging_dir):
+            staged = [
+                os.path.join(staging_dir, f) for f in os.listdir(staging_dir)
+                if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
+            ]
 
         if not staged:
             return None
@@ -3161,6 +3234,9 @@ class MainWindow(QMainWindow):
 
     def _start_processing(self, resume_from_step: str = None):
         if not self.standalone_cloud_path and not self.image_list:
+            self.image_list = self._find_available_session_images()
+        if not self.standalone_cloud_path and not self.image_list:
+            QMessageBox.warning(self, "No Images Found", "No images or video frames were found for this reconstruction session. Please import images or videos to proceed.")
             return
             
         # Terminate any active viewer to prevent lock conflict on MVS files during reconstruction
@@ -3561,16 +3637,19 @@ class MainWindow(QMainWindow):
         self._set_export_actions_enabled(has_model)
 
     def _check_existing_scene(self):
-        """Checks if a previous reconstruction checkpoint exists in ~/.proximap/backup/."""
-        meta = load_session_metadata()
-        has_backup = meta is not None
+        """Checks if a valid, recoverable reconstruction checkpoint exists in ~/.proximap/backup/."""
+        has_backup = is_session_backup_valid()
         self.viewer_widget.action_recover.setEnabled(has_backup)
         if has_backup:
-            step = meta.get("last_completed_step", "unknown")
+            meta = load_session_metadata()
+            step = meta.get("last_completed_step", "unknown") if meta else "unknown"
             self.console_text.append(f"[INFO] Backup session found from previous run (Stage: {step}). Select File → Recover Last Session to load.")
 
     def _check_startup_recovery(self):
         """Checks on application initialization if an automatic recovery prompt should be displayed."""
+        if not is_session_backup_valid():
+            return
+
         meta = load_session_metadata()
         if not meta:
             return
@@ -3590,14 +3669,16 @@ class MainWindow(QMainWindow):
     def _retrieve_last_session(self):
         """Restores checkpoint from ~/.proximap/backup/, loads settings, updates UI and viewer."""
         import shutil
+        if not is_session_backup_valid():
+            QMessageBox.warning(
+                self,
+                "Incomplete Session Backup",
+                "The previous session backup is missing required image or reconstruction files and cannot be recovered.\n\n"
+                "You can discard the backup to start a fresh reconstruction."
+            )
+            return
+
         meta = load_session_metadata()
-        if not meta:
-            output_dir = get_reconstruction_out_dir()
-            mvs_dir = os.path.join(output_dir, "mvs")
-            has_files = os.path.exists(mvs_dir) and len(os.listdir(mvs_dir)) > 0
-            if not has_files:
-                QMessageBox.information(self, "No Backup Session", "No recoverable session found.")
-                return
 
         backup_dir = get_backup_dir()
         out_dir = get_reconstruction_out_dir()
@@ -3615,16 +3696,11 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     self.console_text.append(f"[WARNING] Could not copy backup folder {folder}: {e}")
 
-        # Restore images list if present in backup/images
-        backup_img_dir = os.path.join(backup_dir, "images")
-        if os.path.exists(backup_img_dir):
-            restored_imgs = [
-                os.path.join(backup_img_dir, f) for f in os.listdir(backup_img_dir)
-                if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
-            ]
-            if restored_imgs:
-                self.image_list = restored_imgs
-                self.img_count_label.setText(f"Images Loaded: {len(self.image_list)}")
+        # Restore images list if present in backup/images or input_images/extracted_frames
+        restored_imgs = self._find_available_session_images()
+        if restored_imgs:
+            self.image_list = restored_imgs
+            self.img_count_label.setText(f"Images Loaded: {len(self.image_list)}")
 
         # Restore UI controls from metadata
         if meta:
