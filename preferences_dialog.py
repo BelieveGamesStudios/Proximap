@@ -20,6 +20,7 @@ def load_preferences() -> dict:
         "autosave_history": True,
         "default_snapping": False,
         "camera_mode": "Arcball Camera",
+        "invert_mouse_rotation": True,
         "show_controls": True,
         "reconstruction_bg_color": "#1A1A1A",
         "polyground_bg_color": "#1E1E1E",
@@ -222,16 +223,16 @@ class PreferencesDialog(QDialog):
         gen_layout.setContentsMargins(16, 16, 16, 16)
         gen_layout.setSpacing(16)
 
-        grp_startup = QGroupBox("Startup Preferences", self.general_tab)
-        grp_startup.setStyleSheet("QGroupBox { font-weight: bold; color: #00E676; border: 1px solid #333; border-radius: 4px; margin-top: 10px; padding-top: 15px; }")
-        startup_layout = QHBoxLayout(grp_startup)
-        startup_layout.setContentsMargins(12, 12, 12, 12)
-        startup_layout.setSpacing(12)
+        grp_rec_gen = QGroupBox("3D Reconstruction Settings", self.general_tab)
+        grp_rec_gen.setStyleSheet("QGroupBox { font-weight: bold; color: #00E676; border: 1px solid #333; border-radius: 4px; margin-top: 10px; padding-top: 15px; }")
+        rec_gen_layout = QHBoxLayout(grp_rec_gen)
+        rec_gen_layout.setContentsMargins(12, 12, 12, 12)
+        rec_gen_layout.setSpacing(12)
 
-        lbl_startup = QLabel("Default Startup Workspace:", grp_startup)
+        lbl_startup = QLabel("Default Startup Workspace:", grp_rec_gen)
         lbl_startup.setStyleSheet("color: #FFFFFF; font-size: 13px; font-weight: normal;")
 
-        self.combo_startup = QComboBox(grp_startup)
+        self.combo_startup = QComboBox(grp_rec_gen)
         self.combo_startup.addItems(["3D Reconstruction", "Polyground"])
         self.combo_startup.setFixedHeight(30)
         self.combo_startup.setCursor(Qt.PointingHandCursor)
@@ -254,29 +255,31 @@ class PreferencesDialog(QDialog):
         """)
         self.combo_startup.currentTextChanged.connect(self._on_startup_preference_changed)
 
-        startup_layout.addWidget(lbl_startup)
-        startup_layout.addWidget(self.combo_startup)
-        startup_layout.addStretch()
+        rec_gen_layout.addWidget(lbl_startup)
+        rec_gen_layout.addWidget(self.combo_startup)
+        rec_gen_layout.addStretch()
 
-        gen_layout.addWidget(grp_startup)
+        gen_layout.addWidget(grp_rec_gen)
 
-        grp_editor = QGroupBox("Mesh Editor Preferences", self.general_tab)
-        grp_editor.setStyleSheet("QGroupBox { font-weight: bold; color: #00E676; border: 1px solid #333; border-radius: 4px; margin-top: 10px; padding-top: 15px; }")
-        grp_layout = QVBoxLayout(grp_editor)
+        grp_pg_gen = QGroupBox("Polyground Settings", self.general_tab)
+        grp_pg_gen.setStyleSheet("QGroupBox { font-weight: bold; color: #00E676; border: 1px solid #333; border-radius: 4px; margin-top: 10px; padding-top: 15px; }")
+        pg_gen_layout = QVBoxLayout(grp_pg_gen)
+        pg_gen_layout.setContentsMargins(12, 12, 12, 12)
+        pg_gen_layout.setSpacing(10)
 
-        chk_autosave = QCheckBox("Enable Undo/Redo History Persistence", grp_editor)
+        chk_autosave = QCheckBox("Enable Undo/Redo History Persistence", grp_pg_gen)
         chk_autosave.setChecked(self.prefs.get("autosave_history", True))
         chk_autosave.setStyleSheet("color: #FFFFFF;")
         chk_autosave.toggled.connect(lambda val: save_preferences({"autosave_history": val}))
-        grp_layout.addWidget(chk_autosave)
+        pg_gen_layout.addWidget(chk_autosave)
 
-        chk_snapping = QCheckBox("Default Snapping Mode: Enabled", grp_editor)
+        chk_snapping = QCheckBox("Default Snapping Mode: Enabled", grp_pg_gen)
         chk_snapping.setChecked(self.prefs.get("default_snapping", False))
         chk_snapping.setStyleSheet("color: #FFFFFF;")
         chk_snapping.toggled.connect(lambda val: save_preferences({"default_snapping": val}))
-        grp_layout.addWidget(chk_snapping)
+        pg_gen_layout.addWidget(chk_snapping)
 
-        gen_layout.addWidget(grp_editor)
+        gen_layout.addWidget(grp_pg_gen)
         gen_layout.addStretch()
 
         self.tabs.addTab(self.general_tab, "General")
@@ -289,17 +292,18 @@ class PreferencesDialog(QDialog):
         nav_layout.setContentsMargins(16, 16, 16, 16)
         nav_layout.setSpacing(16)
 
-        grp_camera = QGroupBox("3D Viewport Navigation", self.navigation_tab)
-        grp_camera.setStyleSheet("QGroupBox { font-weight: bold; color: #00E676; border: 1px solid #333; border-radius: 4px; margin-top: 10px; padding-top: 15px; }")
-        cam_layout = QVBoxLayout(grp_camera)
-        cam_layout.setContentsMargins(12, 12, 12, 12)
-        cam_layout.setSpacing(12)
+        # 3D Reconstruction Navigation Group Box
+        grp_rec_nav = QGroupBox("3D Reconstruction Navigation", self.navigation_tab)
+        grp_rec_nav.setStyleSheet("QGroupBox { font-weight: bold; color: #00E676; border: 1px solid #333; border-radius: 4px; margin-top: 10px; padding-top: 15px; }")
+        rec_nav_layout = QVBoxLayout(grp_rec_nav)
+        rec_nav_layout.setContentsMargins(12, 12, 12, 12)
+        rec_nav_layout.setSpacing(12)
 
         row_cam = QHBoxLayout()
-        lbl_cam = QLabel("Camera Tracking Style:", grp_camera)
+        lbl_cam = QLabel("Camera Tracking Style:", grp_rec_nav)
         lbl_cam.setStyleSheet("color: #FFFFFF; font-size: 13px;")
 
-        self.combo_cam = QComboBox(grp_camera)
+        self.combo_cam = QComboBox(grp_rec_nav)
         self.combo_cam.addItems(["Arcball Camera", "Turntable Camera"])
         self.combo_cam.setFixedHeight(30)
         self.combo_cam.setCursor(Qt.PointingHandCursor)
@@ -310,16 +314,36 @@ class PreferencesDialog(QDialog):
         row_cam.addWidget(lbl_cam)
         row_cam.addWidget(self.combo_cam)
         row_cam.addStretch()
+        rec_nav_layout.addLayout(row_cam)
 
-        cam_layout.addLayout(row_cam)
+        self.chk_invert_rot = QCheckBox("Invert Mouse Y-Rotation", grp_rec_nav)
+        self.chk_invert_rot.setChecked(self.prefs.get("invert_mouse_rotation", True))
+        self.chk_invert_rot.setStyleSheet("color: #FFFFFF;")
+        self.chk_invert_rot.toggled.connect(self._on_invert_rotation_changed)
+        rec_nav_layout.addWidget(self.chk_invert_rot)
 
-        self.chk_show_controls = QCheckBox("Show Viewport Navigation Controls Overlay", grp_camera)
+        self.chk_show_controls = QCheckBox("Show Viewport Navigation Controls Overlay", grp_rec_nav)
         self.chk_show_controls.setChecked(self.prefs.get("show_controls", True))
         self.chk_show_controls.setStyleSheet("color: #FFFFFF;")
         self.chk_show_controls.toggled.connect(self._on_show_controls_changed)
-        cam_layout.addWidget(self.chk_show_controls)
+        rec_nav_layout.addWidget(self.chk_show_controls)
 
-        nav_layout.addWidget(grp_camera)
+        nav_layout.addWidget(grp_rec_nav)
+
+        # Polyground Navigation Group Box
+        grp_pg_nav = QGroupBox("Polyground Navigation", self.navigation_tab)
+        grp_pg_nav.setStyleSheet("QGroupBox { font-weight: bold; color: #00E676; border: 1px solid #333; border-radius: 4px; margin-top: 10px; padding-top: 15px; }")
+        pg_nav_layout = QVBoxLayout(grp_pg_nav)
+        pg_nav_layout.setContentsMargins(12, 12, 12, 12)
+        pg_nav_layout.setSpacing(12)
+
+        self.chk_pg_invert_rot = QCheckBox("Invert Polyground Mouse Orbit Rotation", grp_pg_nav)
+        self.chk_pg_invert_rot.setChecked(self.prefs.get("invert_mouse_rotation", True))
+        self.chk_pg_invert_rot.setStyleSheet("color: #FFFFFF;")
+        self.chk_pg_invert_rot.toggled.connect(self._on_invert_rotation_changed)
+        pg_nav_layout.addWidget(self.chk_pg_invert_rot)
+
+        nav_layout.addWidget(grp_pg_nav)
         nav_layout.addStretch()
 
         self.tabs.addTab(self.navigation_tab, "Navigation")
@@ -332,58 +356,65 @@ class PreferencesDialog(QDialog):
         themes_layout.setContentsMargins(16, 16, 16, 16)
         themes_layout.setSpacing(16)
 
-        grp_colors = QGroupBox("Viewport Colors & Backgrounds", self.themes_tab)
-        grp_colors.setStyleSheet("QGroupBox { font-weight: bold; color: #00E676; border: 1px solid #333; border-radius: 4px; margin-top: 10px; padding-top: 15px; }")
-        col_layout = QVBoxLayout(grp_colors)
-        col_layout.setContentsMargins(12, 12, 12, 12)
-        col_layout.setSpacing(12)
+        # 3D Reconstruction Theme Group Box
+        grp_rec_theme = QGroupBox("3D Reconstruction Theme", self.themes_tab)
+        grp_rec_theme.setStyleSheet("QGroupBox { font-weight: bold; color: #00E676; border: 1px solid #333; border-radius: 4px; margin-top: 10px; padding-top: 15px; }")
+        rec_theme_layout = QVBoxLayout(grp_rec_theme)
+        rec_theme_layout.setContentsMargins(12, 12, 12, 12)
+        rec_theme_layout.setSpacing(12)
 
-        # 1. 3D Reconstruction Background
         rec_bg = self.prefs.get("reconstruction_bg_color", "#1A1A1A")
         row_rec_bg = QHBoxLayout()
-        lbl_rec_bg = QLabel("3D Reconstruction Background:", grp_colors)
+        lbl_rec_bg = QLabel("3D Reconstruction Background:", grp_rec_theme)
         lbl_rec_bg.setStyleSheet("color: #FFFFFF; font-size: 13px;")
 
-        self.btn_rec_bg = QPushButton(rec_bg, grp_colors)
+        self.btn_rec_bg = QPushButton(rec_bg, grp_rec_theme)
         self.btn_rec_bg.setStyleSheet(f"background-color: {rec_bg}; color: #FFFFFF; font-weight: bold; border: 1px solid #555;")
         self.btn_rec_bg.clicked.connect(self._choose_rec_bg_color)
 
         row_rec_bg.addWidget(lbl_rec_bg)
         row_rec_bg.addWidget(self.btn_rec_bg)
         row_rec_bg.addStretch()
-        col_layout.addLayout(row_rec_bg)
+        rec_theme_layout.addLayout(row_rec_bg)
 
-        # 2. Polyground Viewport Background
+        themes_layout.addWidget(grp_rec_theme)
+
+        # Polyground Theme Group Box
+        grp_pg_theme = QGroupBox("Polyground Theme", self.themes_tab)
+        grp_pg_theme.setStyleSheet("QGroupBox { font-weight: bold; color: #00E676; border: 1px solid #333; border-radius: 4px; margin-top: 10px; padding-top: 15px; }")
+        pg_theme_layout = QVBoxLayout(grp_pg_theme)
+        pg_theme_layout.setContentsMargins(12, 12, 12, 12)
+        pg_theme_layout.setSpacing(12)
+
         pg_bg = self.prefs.get("polyground_bg_color", "#1E1E1E")
         row_pg_bg = QHBoxLayout()
-        lbl_pg_bg = QLabel("Polyground Background:", grp_colors)
+        lbl_pg_bg = QLabel("Polyground Background:", grp_pg_theme)
         lbl_pg_bg.setStyleSheet("color: #FFFFFF; font-size: 13px;")
 
-        self.btn_pg_bg = QPushButton(pg_bg, grp_colors)
+        self.btn_pg_bg = QPushButton(pg_bg, grp_pg_theme)
         self.btn_pg_bg.setStyleSheet(f"background-color: {pg_bg}; color: #FFFFFF; font-weight: bold; border: 1px solid #555;")
         self.btn_pg_bg.clicked.connect(self._choose_pg_bg_color)
 
         row_pg_bg.addWidget(lbl_pg_bg)
         row_pg_bg.addWidget(self.btn_pg_bg)
         row_pg_bg.addStretch()
-        col_layout.addLayout(row_pg_bg)
+        pg_theme_layout.addLayout(row_pg_bg)
 
-        # 3. Polyground Grid Color
         pg_grid = self.prefs.get("polyground_grid_color", "#333333")
         row_pg_grid = QHBoxLayout()
-        lbl_pg_grid = QLabel("Polyground Grid Color:", grp_colors)
+        lbl_pg_grid = QLabel("Polyground Grid Color:", grp_pg_theme)
         lbl_pg_grid.setStyleSheet("color: #FFFFFF; font-size: 13px;")
 
-        self.btn_pg_grid = QPushButton(pg_grid, grp_colors)
+        self.btn_pg_grid = QPushButton(pg_grid, grp_pg_theme)
         self.btn_pg_grid.setStyleSheet(f"background-color: {pg_grid}; color: #FFFFFF; font-weight: bold; border: 1px solid #555;")
         self.btn_pg_grid.clicked.connect(self._choose_pg_grid_color)
 
         row_pg_grid.addWidget(lbl_pg_grid)
         row_pg_grid.addWidget(self.btn_pg_grid)
         row_pg_grid.addStretch()
-        col_layout.addLayout(row_pg_grid)
+        pg_theme_layout.addLayout(row_pg_grid)
 
-        themes_layout.addWidget(grp_colors)
+        themes_layout.addWidget(grp_pg_theme)
         themes_layout.addStretch()
 
         self.tabs.addTab(self.themes_tab, "Themes")
@@ -529,15 +560,41 @@ class PreferencesDialog(QDialog):
     def _on_camera_mode_changed(self, text: str):
         save_preferences({"camera_mode": text})
         main_win = self.main_window
-        if main_win and hasattr(main_win, "viewer_widget") and hasattr(main_win.viewer_widget, "cam_select"):
+        if main_win:
             idx = 0 if text == "Arcball Camera" else 1
-            main_win.viewer_widget.cam_select.setCurrentIndex(idx)
+            if hasattr(main_win, "viewer_widget") and hasattr(main_win.viewer_widget, "cam_select"):
+                main_win.viewer_widget.cam_select.setCurrentIndex(idx)
+            if hasattr(main_win, "_on_camera_changed"):
+                main_win._on_camera_changed(idx)
+
+    def _on_invert_rotation_changed(self, checked: bool):
+        save_preferences({"invert_mouse_rotation": checked})
+        if hasattr(self, "chk_invert_rot"):
+            self.chk_invert_rot.blockSignals(True)
+            self.chk_invert_rot.setChecked(checked)
+            self.chk_invert_rot.blockSignals(False)
+        if hasattr(self, "chk_pg_invert_rot"):
+            self.chk_pg_invert_rot.blockSignals(True)
+            self.chk_pg_invert_rot.setChecked(checked)
+            self.chk_pg_invert_rot.blockSignals(False)
+        main_win = self.main_window
+        if main_win and hasattr(main_win, "view") and main_win.view and hasattr(main_win.view, "camera") and hasattr(main_win.view.camera, "flip"):
+            main_win.view.camera.flip = (False, checked, False)
 
     def _on_show_controls_changed(self, checked: bool):
         save_preferences({"show_controls": checked})
         main_win = self.main_window
-        if main_win and hasattr(main_win, "viewer_widget") and hasattr(main_win.viewer_widget, "show_controls_cb"):
-            main_win.viewer_widget.show_controls_cb.setChecked(checked)
+        if main_win:
+            if hasattr(main_win, "viewer_widget") and hasattr(main_win.viewer_widget, "show_controls_cb"):
+                main_win.viewer_widget.show_controls_cb.blockSignals(True)
+                main_win.viewer_widget.show_controls_cb.setChecked(checked)
+                main_win.viewer_widget.show_controls_cb.blockSignals(False)
+            if hasattr(main_win, "overlay_label") and main_win.overlay_label:
+                main_win.overlay_label.setVisible(checked)
+                if checked and hasattr(main_win, "_update_overlay_content"):
+                    main_win._update_overlay_content()
+                    if hasattr(main_win, "_position_overlay"):
+                        main_win._position_overlay()
 
     def _choose_rec_bg_color(self):
         curr = self.prefs.get("reconstruction_bg_color", "#1A1A1A")

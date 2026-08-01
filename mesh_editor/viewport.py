@@ -429,7 +429,13 @@ class MeshEditorViewport(QOpenGLWidget):
                     
             if self.is_orbiting:
                 # Orbiting navigation (Middle click drag or Alt + LMB drag)
-                self.camera.orbit(-dx * 0.005, -dy * 0.005)
+                try:
+                    from preferences_dialog import load_preferences
+                    invert = load_preferences().get("invert_mouse_rotation", True)
+                except Exception:
+                    invert = True
+                pitch_mult = 0.005 if invert else -0.005
+                self.camera.orbit(-dx * 0.005, dy * pitch_mult)
                 self.notify_camera_changed()
                 self.update()
             elif self.is_panning:

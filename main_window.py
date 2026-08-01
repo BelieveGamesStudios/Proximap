@@ -4379,6 +4379,12 @@ class MainWindow(QMainWindow):
         elif index == 4:
             import vispy.scene.cameras as cams
             self.view.camera = cams.MagnifyCamera()
+
+        from preferences_dialog import load_preferences
+        prefs = load_preferences()
+        invert = prefs.get("invert_mouse_rotation", True)
+        if hasattr(self.view.camera, "flip"):
+            self.view.camera.flip = (False, invert, False)
             
         # Re-center and re-scale if we have loaded points
         if self._last_points is not None and len(self._last_points) > 0:
