@@ -29,6 +29,8 @@ except ModuleNotFoundError as e:
 from vispy import app, scene
 app.use_app("pyside6")
 
+from preferences_dialog import load_preferences, save_preferences
+
 def get_base_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
@@ -1567,7 +1569,8 @@ class MainWindow(QMainWindow):
         self.cameras_visual = None
         self._last_points = None
         self.last_accessed_dir = os.path.expanduser("~")
-        self.viewport_bg_color = '#0C0C0C'
+        from preferences_dialog import load_preferences
+        self.viewport_bg_color = load_preferences().get("reconstruction_bg_color", "#1A1A1A")
         
         self._clear_reconstruction_out()
         self._init_ui()
@@ -2151,7 +2154,11 @@ class MainWindow(QMainWindow):
         if hasattr(self.canvas, '_keys_check') and 'escape' in self.canvas._keys_check:
             del self.canvas._keys_check['escape']
         self.view = self.canvas.central_widget.add_view()
-        self.view.camera = 'arcball' # Default camera mode is Arcball
+        prefs = load_preferences()
+        initial_cam = prefs.get("camera_mode", "Arcball Camera")
+        self.view.camera = 'turntable' if initial_cam == "Turntable Camera" else 'arcball'
+        cam_idx = 1 if initial_cam == "Turntable Camera" else 0
+        self.viewer_widget.cam_select.setCurrentIndex(cam_idx)
         
         # Add native VisPy canvas widget to the layout
         self.viewer_widget.container_area_layout.addWidget(self.canvas.native)
@@ -2169,8 +2176,12 @@ class MainWindow(QMainWindow):
                 padding: 10px;
             }
         """)
-        self.overlay_label.setVisible(False)
+        initial_controls = prefs.get("show_controls", True)
+        self.viewer_widget.show_controls_cb.setChecked(initial_controls)
         self.viewer_widget.show_controls_cb.stateChanged.connect(self._on_show_controls_changed)
+        self.overlay_label.setVisible(initial_controls)
+        if initial_controls:
+            self._update_overlay_content()
         
         right_layout.addWidget(self.viewer_widget, stretch=4)
         
@@ -2286,7 +2297,6 @@ class MainWindow(QMainWindow):
         self.chrome_bar.mode_changed.connect(self._on_mode_changed)
         
         # Set initial page stack & chrome menus based on user preference (Default: 3D Reconstruction)
-        from preferences_dialog import load_preferences
         init_tab = load_preferences().get("startup_tab", "3D Reconstruction")
         init_idx = 0 if init_tab == "3D Reconstruction" else 1
         self.page_stack.setCurrentIndex(init_idx)
