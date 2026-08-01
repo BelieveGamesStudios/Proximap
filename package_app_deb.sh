@@ -6,10 +6,10 @@ set -e
 
 APP_NAME="proximap"
 DISPLAY_NAME="Proximap"
-VERSION="1.0.0"
+VERSION="1.4.0"
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-MAINTAINER="Believe Games Studios <support@believegamesstudios.com>"
-DESCRIPTION="Intuitive desktop 3D photogrammetry pipeline GUI dashboard."
+MAINTAINER="ProximaXR Spatial Technologies <fumz@proximaxr.space>"
+DESCRIPTION="Intuitive desktop 3D photogrammetry app."
 
 echo "=========================================================="
 echo " Starting Proximap Linux Bundling & Packaging (.deb)"
@@ -57,8 +57,9 @@ echo "[2/6] Freezing Python application with PyInstaller..."
 python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all PySide6 --collect-all vispy --collect-all numpy \
     --collect-all pillow --collect-all cv2 --collect-all trimesh \
-    --collect-all pyrr --collect-all OpenGL \
-    --collect-all torch --collect-all lightglue --collect-all kornia --collect-all qrcode \
+    --collect-all pyrr --collect-all OpenGL --collect-all torch \
+    --collect-all lightglue --collect-all kornia --collect-all qrcode \
+    --collect-all scipy --collect-all skimage --collect-all open3d \
     --add-data "mesh_editor/shaders:mesh_editor/shaders" \
     main_window.py
 

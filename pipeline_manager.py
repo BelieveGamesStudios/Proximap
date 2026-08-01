@@ -50,7 +50,7 @@ class PipelineWorker(QThread):
     log_message = Signal(str)
     finished = Signal(bool, str)
 
-    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, mapper_mode: str = "incremental", ref_cloud_path: str = None, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, parent=None):
+    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, mapper_mode: str = "incremental", ref_cloud_path: str = None, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, resume_from_step: str = None, parent=None):
         super().__init__(parent)
         self.image_dir = image_dir
         self.output_dir = output_dir
@@ -62,6 +62,7 @@ class PipelineWorker(QThread):
         self.mesh_mode = mesh_mode
         self.poisson_depth = poisson_depth
         self.custom_params = custom_params
+        self.resume_from_step = resume_from_step
         self.is_running = True
         self.toolchain_map = self._load_toolchain_map()
         self.last_output_lines = []
@@ -91,17 +92,23 @@ class PipelineWorker(QThread):
         """Retrieves image IDs to names mapping from COLMAP database."""
         import sqlite3
         image_map = {}
-        if not os.path.exists(db_path):
+        abs_db_path = os.path.abspath(db_path)
+        if not os.path.exists(abs_db_path):
             return image_map
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT image_id, name FROM images ORDER BY image_id")
-            for row in cursor.fetchall():
-                image_map[row[0]] = row[1]
-            conn.close()
-        except Exception as e:
-            self.log_message.emit(f"[WARNING] Could not read COLMAP database for image names: {e}")
+        for attempt in range(3):
+            try:
+                conn = sqlite3.connect(abs_db_path, timeout=10.0)
+                cursor = conn.cursor()
+                cursor.execute("SELECT image_id, name FROM images ORDER BY image_id")
+                for row in cursor.fetchall():
+                    image_map[row[0]] = row[1]
+                conn.close()
+                break
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.3)
+                else:
+                    self.log_message.emit(f"[WARNING] Could not read COLMAP database for image names: {e}")
         return image_map
 
     def _to_colmap_path(self, p: str) -> str:
@@ -146,7 +153,62 @@ class PipelineWorker(QThread):
                     normalized[group][name] = clean_rel_path
         return normalized
 
+    def _backup_checkpoint(self, step_name: str):
+        try:
+            from main_window import get_backup_dir, save_session_metadata, load_session_metadata
+            backup_dir = get_backup_dir()
+
+            mvs_out = os.path.join(self.output_dir, "mvs")
+            colmap_out = os.path.join(self.output_dir, "colmap")
+            backup_mvs = os.path.join(backup_dir, "mvs")
+            backup_colmap = os.path.join(backup_dir, "colmap")
+
+            os.makedirs(backup_mvs, exist_ok=True)
+            os.makedirs(backup_colmap, exist_ok=True)
+
+            if os.path.exists(mvs_out):
+                for item in os.listdir(mvs_out):
+                    s_path = os.path.join(mvs_out, item)
+                    d_path = os.path.join(backup_mvs, item)
+                    if os.path.isfile(s_path):
+                        shutil.copy2(s_path, d_path)
+                    elif os.path.isdir(s_path):
+                        if os.path.exists(d_path):
+                            shutil.rmtree(d_path)
+                        shutil.copytree(s_path, d_path)
+
+            if os.path.exists(colmap_out):
+                for item in os.listdir(colmap_out):
+                    s_path = os.path.join(colmap_out, item)
+                    d_path = os.path.join(backup_colmap, item)
+                    if os.path.isfile(s_path):
+                        shutil.copy2(s_path, d_path)
+                    elif os.path.isdir(s_path):
+                        if os.path.exists(d_path):
+                            shutil.rmtree(d_path)
+                        shutil.copytree(s_path, d_path)
+
+            existing_meta = load_session_metadata() or {}
+            existing_meta["scan_type"] = "photogrammetry"
+            existing_meta["last_completed_step"] = step_name
+            img_cnt = getattr(self, '_total_images', 0) or len(getattr(self, '_image_names_map', {}))
+            if img_cnt > 0:
+                existing_meta["image_count"] = img_cnt
+            elif "image_count" not in existing_meta:
+                existing_meta["image_count"] = 0
+            existing_meta["quality_preset"] = self.quality_preset
+            existing_meta["gpu_mode"] = self.gpu_mode
+            existing_meta["has_plain_surfaces"] = self.has_plain_surfaces
+            existing_meta["mapper_mode"] = self.mapper_mode
+            existing_meta["mesh_mode"] = self.mesh_mode
+            existing_meta["poisson_depth"] = self.poisson_depth
+            save_session_metadata(existing_meta)
+            self.log_message.emit(f"[BACKUP] Saved checkpoint for '{step_name}'.")
+        except Exception as e:
+            self.log_message.emit(f"[WARNING] Failed to write backup checkpoint: {e}")
+
     def run(self):
+
         try:
             self.status_changed.emit("Initializing Pipeline...")
             self.log_message.emit(f"[INFO] Plain/Smooth Surfaces optimization: {'Enabled' if self.has_plain_surfaces else 'Disabled'}")
@@ -410,8 +472,16 @@ class PipelineWorker(QThread):
         """
         base_dir = get_base_dir()
         
+        resume_requested = bool(self.resume_from_step)
+        colmap_dir_check = os.path.join(self.output_dir, "colmap")
+        check_db_path = os.path.join(colmap_dir_check, "database.db")
+        is_checkpoint_valid = self._is_valid_checkpoint(check_db_path)
+
         # Clean up stale reconstruction subdirectories to prevent legacy files impacting new scans
         for subdir in ["colmap", "mvs"]:
+            if subdir == "colmap" and resume_requested and is_checkpoint_valid:
+                self.log_message.emit(f"[RESUME] Preserving valid database checkpoint at: {check_db_path}")
+                continue
             sub_path = os.path.join(self.output_dir, subdir)
             if os.path.exists(sub_path):
                 self.log_message.emit(f"[INFO] Cleaning up stale reconstruction directory: {sub_path}")
@@ -534,20 +604,39 @@ class PipelineWorker(QThread):
             if "texture_res" in self.custom_params:
                 texture_res = self.custom_params["texture_res"]
 
-        # =========================================================================
-        # STEP 1/9 — Image Preparation
-        # =========================================================================
-        self.status_changed.emit("Step 1/9: Preparing Images...")
-        working_image_dir = self._prepare_images(
-            self.image_dir, self.output_dir, max_image_dim
-        )
-        try:
-            self._total_images = len([
-                f for f in os.listdir(working_image_dir)
-                if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
-            ])
-        except Exception:
-            self._total_images = 0
+        skip_sfm = self.resume_from_step in ["sparse_reconstruction", "dense_reconstruction"]
+        skip_dense = self.resume_from_step == "dense_reconstruction"
+
+        if skip_sfm:
+            self.log_message.emit(f"[RESUME] Resuming session from checkpoint: '{self.resume_from_step}'. Skipping Steps 1-5 (SfM & Sparse Cloud already complete).")
+            self.progress_changed.emit(70)
+            working_image_dir = os.path.join(self.output_dir, "input_images")
+            if not os.path.exists(working_image_dir) or not any(f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff')) for f in (os.listdir(working_image_dir) if os.path.exists(working_image_dir) else [])):
+                working_image_dir = self._prepare_images(
+                    self.image_dir, self.output_dir, max_image_dim
+                )
+            try:
+                self._total_images = len([
+                    f for f in os.listdir(working_image_dir)
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
+                ])
+            except Exception:
+                self._total_images = 0
+        else:
+            # =========================================================================
+            # STEP 1/9 — Image Preparation
+            # =========================================================================
+            self.status_changed.emit("Step 1/9: Preparing Images...")
+            working_image_dir = self._prepare_images(
+                self.image_dir, self.output_dir, max_image_dim
+            )
+            try:
+                self._total_images = len([
+                    f for f in os.listdir(working_image_dir)
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
+                ])
+            except Exception:
+                self._total_images = 0
         self.progress_changed.emit(10)
 
         colmap_exe = os.path.join(base_dir, self.toolchain_map["colmap"]["colmap"])
@@ -555,23 +644,18 @@ class PipelineWorker(QThread):
         database_path = self._to_colmap_path(os.path.join(colmap_out, "database.db"))
         working_image_dir = self._to_colmap_path(working_image_dir)
         if os.path.exists(database_path):
-            try:
-                os.remove(database_path)
-                self.log_message.emit("[INFO] Cleared stale COLMAP database.")
-            except Exception as e:
-                self.log_message.emit(f"[WARNING] Failed to clear database: {e}")
+            if resume_requested and is_checkpoint_valid:
+                self.log_message.emit("[RESUME] Preserving valid COLMAP database checkpoint for reconstruction.")
+            else:
+                try:
+                    os.remove(database_path)
+                    self.log_message.emit("[INFO] Cleared stale COLMAP database.")
+                except Exception as e:
+                    self.log_message.emit(f"[WARNING] Failed to clear database: {e}")
 
         # =========================================================================
         # STEP 2/9 — Feature Extraction
         # STEP 3/9 — Feature Matching
-        #
-        # When has_plain_surfaces is True AND quality_preset != "preview", replace
-        # both COLMAP CLI steps with the SuperPoint + LightGlue neural pipeline.
-        # The neural path writes keypoints and matches directly into database.db
-        # using the same schema the mapper expects, so Steps 4-9 are unchanged.
-        #
-        # At Preview quality, neural matching is skipped (users optimise for speed;
-        # CPU-bound torch inference directly fights that goal).
         # =========================================================================
         use_neural = self.has_plain_surfaces and self.quality_preset != "preview"
 
@@ -596,7 +680,25 @@ class PipelineWorker(QThread):
         except Exception as e:
             self.log_message.emit(f"[WARNING] Could not check image dimensions: {e}. Defaulting to single camera model.")
 
-        if use_neural:
+        if resume_requested and is_checkpoint_valid:
+            self.log_message.emit(
+                "[RESUME] Valid checkpoint database detected! "
+                "Skipping Step 2 (Feature Extraction) and Step 3 (Feature Matching)."
+            )
+            db_stats = self._query_colmap_database_stats(database_path)
+            num_registered = db_stats["num_images"]
+            self.log_message.emit(
+                f"[RESUME] Loaded checkpoint database with {num_registered} registered images and {db_stats['num_pairs']} matched pairs."
+            )
+            self._image_names_map = self._get_image_names_from_db(database_path)
+            self._pairs_tested = (num_registered * (num_registered - 1)) // 2 if num_registered > 1 else 0
+            self._pairs_matched = db_stats["num_pairs"]
+            if db_stats["match_counts"]:
+                self._match_counts = db_stats["match_counts"]
+            self._emit_matching_summary(database_path)
+            self.progress_changed.emit(40)
+
+        elif use_neural:
             # -----------------------------------------------------------------
             # Neural path: SuperPoint detection + LightGlue matching
             # Replaces feature_extractor AND exhaustive_matcher entirely.
@@ -617,6 +719,11 @@ class PipelineWorker(QThread):
             db_stats = self._query_colmap_database_stats(database_path)
             num_registered = db_stats["num_images"]
             if num_registered < 2:
+                if len(self._feature_counts) >= 2:
+                    num_registered = len(self._feature_counts)
+                elif self._total_images >= 2:
+                    num_registered = self._total_images
+            if num_registered < 2:
                 self.log_message.emit(
                     f"[ERROR] Only {num_registered} image(s) registered. "
                     "Reconstruction requires at least 2. Aborting."
@@ -634,6 +741,7 @@ class PipelineWorker(QThread):
                 self._match_counts = db_stats["match_counts"]
             self._emit_matching_summary(database_path)
             self.progress_changed.emit(40)
+            self._backup_checkpoint("features_extracted")
 
         else:
             # -----------------------------------------------------------------
@@ -686,6 +794,11 @@ class PipelineWorker(QThread):
             self._emit_feature_summary()
 
             num_registered = db_stats["num_images"]
+            if num_registered < 2:
+                if len(self._feature_counts) >= 2:
+                    num_registered = len(self._feature_counts)
+                elif self._total_images >= 2:
+                    num_registered = self._total_images
             if num_registered < 2:
                 self.log_message.emit(
                     f"[ERROR] Only {num_registered} image(s) successfully registered in the database. "
@@ -757,173 +870,181 @@ class PipelineWorker(QThread):
                 self._match_counts = db_stats["match_counts"]
             self._emit_matching_summary(database_path)
             self.progress_changed.emit(40)
+            self._backup_checkpoint("features_extracted")
 
 
-        # =========================================================================
-        # STEP 4/9 — Sparse Reconstruction (Mapper)
-        # =========================================================================
-        self._triangulated_points = 0
-        self._registered_count = 0
-        sparse_dir = self._to_colmap_path(os.path.join(colmap_out, "sparse"))
-        if os.path.exists(sparse_dir):
-            try:
-                shutil.rmtree(sparse_dir)
-            except Exception as e:
-                self.log_message.emit(f"[WARNING] Failed to clean sparse folder: {e}")
-        os.makedirs(sparse_dir, exist_ok=True)
+        if not skip_sfm:
+            # =========================================================================
+            # STEP 4/9 — Sparse Reconstruction (Mapper)
+            # =========================================================================
+            self._triangulated_points = 0
+            self._registered_count = 0
+            sparse_dir = self._to_colmap_path(os.path.join(colmap_out, "sparse"))
+            if os.path.exists(sparse_dir):
+                try:
+                    shutil.rmtree(sparse_dir)
+                except Exception as e:
+                    self.log_message.emit(f"[WARNING] Failed to clean sparse folder: {e}")
+            os.makedirs(sparse_dir, exist_ok=True)
 
-        cmd_incremental = [
-            colmap_exe, "mapper",
-            "--database_path", database_path,
-            "--image_path", working_image_dir,
-            "--output_path", sparse_dir,
-            "--Mapper.ba_global_max_refinements", str(ba_global_max_refinements),
-            "--Mapper.ba_local_max_refinements", "3",
-            "--Mapper.min_num_matches", "15",
-            "--Mapper.init_min_num_inliers", "100",
-            "--Mapper.abs_pose_min_num_inliers", "15",
-            "--Mapper.abs_pose_min_inlier_ratio", "0.25",
-            "--Mapper.num_threads", str(num_threads),
-        ]
-
-        if self.mapper_mode == "global":
-            self.status_changed.emit("Step 4/9: Estimating Camera Poses (GLOMAP Global SfM)...")
-            self.log_message.emit("[INFO] SfM Mapper: GLOMAP global_mapper selected.")
-            cmd_global = [
-                colmap_exe, "global_mapper",
+            cmd_incremental = [
+                colmap_exe, "mapper",
                 "--database_path", database_path,
                 "--image_path", working_image_dir,
                 "--output_path", sparse_dir,
-                "--GlobalMapper.min_num_matches", "15",
-                "--GlobalMapper.num_threads", str(num_threads),
-                "--GlobalMapper.ba_num_iterations", str(ba_global_max_refinements),
+                "--Mapper.ba_global_max_refinements", str(ba_global_max_refinements),
+                "--Mapper.ba_local_max_refinements", "3",
+                "--Mapper.min_num_matches", "15",
+                "--Mapper.init_min_num_inliers", "100",
+                "--Mapper.abs_pose_min_num_inliers", "15",
+                "--Mapper.abs_pose_min_inlier_ratio", "0.25",
+                "--Mapper.num_threads", str(num_threads),
             ]
-            ok = self._run_process_realtime(cmd_global, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line)
-            if not ok or not self._select_best_sparse_model(sparse_dir):
-                self.log_message.emit("[WARNING] GLOMAP global_mapper failed or produced no model. Falling back to COLMAP incremental mapper...")
-                if os.path.exists(sparse_dir):
-                    try:
-                        shutil.rmtree(sparse_dir)
-                    except Exception:
-                        pass
-                os.makedirs(sparse_dir, exist_ok=True)
+
+            if self.mapper_mode == "global":
+                self.status_changed.emit("Step 4/9: Estimating Camera Poses (GLOMAP Global SfM)...")
+                self.log_message.emit("[INFO] SfM Mapper: GLOMAP global_mapper selected.")
+                cmd_global = [
+                    colmap_exe, "global_mapper",
+                    "--database_path", database_path,
+                    "--image_path", working_image_dir,
+                    "--output_path", sparse_dir,
+                    "--GlobalMapper.min_num_matches", "15",
+                    "--GlobalMapper.num_threads", str(num_threads),
+                    "--GlobalMapper.ba_num_iterations", str(ba_global_max_refinements),
+                ]
+                ok = self._run_process_realtime(cmd_global, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line)
+                if not ok or not self._select_best_sparse_model(sparse_dir):
+                    self.log_message.emit("[WARNING] GLOMAP global_mapper failed or produced no model. Falling back to COLMAP incremental mapper...")
+                    if os.path.exists(sparse_dir):
+                        try:
+                            shutil.rmtree(sparse_dir)
+                        except Exception:
+                            pass
+                    os.makedirs(sparse_dir, exist_ok=True)
+                    if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
+                        return False
+            else:
+                self.status_changed.emit("Step 4/9: Estimating Camera Poses (SfM)...")
                 if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
                     return False
-        else:
-            self.status_changed.emit("Step 4/9: Estimating Camera Poses (SfM)...")
-            if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
+
+            best_model_dir = self._to_colmap_path(self._select_best_sparse_model(sparse_dir)) if self._select_best_sparse_model(sparse_dir) else None
+            if not best_model_dir:
+                self.log_message.emit(
+                    "[FAILED] SfM registered 0 camera poses. Feature matching produced "
+                    "insufficient geometric correspondences to initialise reconstruction.\n"
+                    "  Suggestions:\n"
+                    "  • Try a higher quality preset (Medium or High)\n"
+                    "  • Ensure images have at least 60% overlap between adjacent shots"
+                )
                 return False
 
-        best_model_dir = self._to_colmap_path(self._select_best_sparse_model(sparse_dir)) if self._select_best_sparse_model(sparse_dir) else None
-        if not best_model_dir:
-            self.log_message.emit(
-                "[FAILED] SfM registered 0 camera poses. Feature matching produced "
-                "insufficient geometric correspondences to initialise reconstruction.\n"
-                "  Suggestions:\n"
-                "  • Try a higher quality preset (Medium or High)\n"
-                "  • Ensure images have at least 60% overlap between adjacent shots"
-            )
-            return False
+            target_model_dir = self._to_colmap_path(os.path.join(sparse_dir, "0"))
+            if os.path.abspath(best_model_dir) != os.path.abspath(target_model_dir):
+                if os.path.exists(target_model_dir):
+                    shutil.rmtree(target_model_dir)
+                try:
+                    shutil.move(best_model_dir, target_model_dir)
+                except Exception as e:
+                    self.log_message.emit(f"[WARNING] Failed to move best model folder: {e}")
 
-        target_model_dir = self._to_colmap_path(os.path.join(sparse_dir, "0"))
-        if os.path.abspath(best_model_dir) != os.path.abspath(target_model_dir):
-            if os.path.exists(target_model_dir):
-                shutil.rmtree(target_model_dir)
+            # Optional bundle adjuster polish pass
+            if run_bundle_adjuster:
+                self.log_message.emit("[INFO] Running extra bundle adjuster refinement...")
+                cmd_ba = [
+                    colmap_exe, "bundle_adjuster",
+                    "--input_path", target_model_dir,
+                    "--output_path", target_model_dir,
+                    "--BundleAdjustmentCeres.max_num_iterations", "100",
+                    "--BundleAdjustment.refine_focal_length", "1",
+                    "--BundleAdjustment.refine_principal_point", "0",
+                    "--BundleAdjustment.refine_extra_params", "1",
+                ]
+                self._run_process_realtime(cmd_ba, timeout=600.0, env=colmap_env, line_parser=self._parse_mapper_line)
+
+            # Get reconstruction statistics
+            self._last_reconstruction_stats = self._run_model_analyzer(target_model_dir)
+            if "images" in self._last_reconstruction_stats:
+                self._registered_count = self._last_reconstruction_stats["images"]
+            if "points" in self._last_reconstruction_stats:
+                self._triangulated_points = self._last_reconstruction_stats["points"]
+            if "mean_error" in self._last_reconstruction_stats:
+                self._mean_reproj_error = self._last_reconstruction_stats["mean_error"]
+
+            self._emit_sfm_summary()
+            self.progress_changed.emit(60)
+
+            # =========================================================================
+            # STEP 5/9 — Export to OpenMVS Format
+            # =========================================================================
+            self.status_changed.emit("Step 5/9: Exporting Scene to OpenMVS...")
+
+            # Copy sparse model files to the parent sparse directory so InterfaceCOLMAP can find them
             try:
-                shutil.move(best_model_dir, target_model_dir)
+                for filename in os.listdir(target_model_dir):
+                    src_file = os.path.join(target_model_dir, filename)
+                    dst_file = os.path.join(sparse_dir, filename)
+                    if os.path.isfile(src_file):
+                        shutil.copy2(src_file, dst_file)
+                self.log_message.emit("[INFO] Copied sparse model files to parent directory for InterfaceCOLMAP.")
             except Exception as e:
-                self.log_message.emit(f"[WARNING] Failed to move best model folder: {e}")
+                self.log_message.emit(f"[WARNING] Failed to copy sparse model files to parent: {e}")
 
-        # Optional bundle adjuster polish pass
-        if run_bundle_adjuster:
-            self.log_message.emit("[INFO] Running extra bundle adjuster refinement...")
-            cmd_ba = [
-                colmap_exe, "bundle_adjuster",
-                "--input_path", target_model_dir,
-                "--output_path", target_model_dir,
-                "--BundleAdjustmentCeres.max_num_iterations", "100",
-                "--BundleAdjustment.refine_focal_length", "1",
-                "--BundleAdjustment.refine_principal_point", "0",
-                "--BundleAdjustment.refine_extra_params", "1",
+            mvs_export_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["InterfaceCOLMAP"])
+            os.makedirs(os.path.join(mvs_out, "images"), exist_ok=True)
+            cmd_export = [
+                mvs_export_exe,
+                "-i", colmap_out,
+                "--image-folder", os.path.join(colmap_out, "images"),
+                "-o", os.path.join(mvs_out, "scene.mvs"),
             ]
-            self._run_process_realtime(cmd_ba, timeout=600.0, env=colmap_env, line_parser=self._parse_mapper_line)
-
-        # Get reconstruction statistics
-        self._last_reconstruction_stats = self._run_model_analyzer(target_model_dir)
-        if "images" in self._last_reconstruction_stats:
-            self._registered_count = self._last_reconstruction_stats["images"]
-        if "points" in self._last_reconstruction_stats:
-            self._triangulated_points = self._last_reconstruction_stats["points"]
-        if "mean_error" in self._last_reconstruction_stats:
-            self._mean_reproj_error = self._last_reconstruction_stats["mean_error"]
-
-        self._emit_sfm_summary()
-        self.progress_changed.emit(60)
-
-        # =========================================================================
-        # STEP 5/9 — Export to OpenMVS Format
-        # =========================================================================
-        self.status_changed.emit("Step 5/9: Exporting Scene to OpenMVS...")
-
-        # Copy sparse model files to the parent sparse directory so InterfaceCOLMAP can find them
-        try:
-            for filename in os.listdir(target_model_dir):
-                src_file = os.path.join(target_model_dir, filename)
-                dst_file = os.path.join(sparse_dir, filename)
-                if os.path.isfile(src_file):
-                    shutil.copy2(src_file, dst_file)
-            self.log_message.emit("[INFO] Copied sparse model files to parent directory for InterfaceCOLMAP.")
-        except Exception as e:
-            self.log_message.emit(f"[WARNING] Failed to copy sparse model files to parent: {e}")
-
-        mvs_export_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["InterfaceCOLMAP"])
-        os.makedirs(os.path.join(mvs_out, "images"), exist_ok=True)
-        cmd_export = [
-            mvs_export_exe,
-            "-i", colmap_out,
-            "--image-folder", os.path.join(colmap_out, "images"),
-            "-o", os.path.join(mvs_out, "scene.mvs"),
-        ]
-        if not self._run_process_realtime(cmd_export, timeout=300.0):
-            return False
-        self.progress_changed.emit(70)
+            if not self._run_process_realtime(cmd_export, timeout=300.0):
+                return False
+            self._backup_checkpoint("sparse_reconstruction")
+            self.progress_changed.emit(70)
 
         # =========================================================================
         # STEP 6/9 — Dense Point Cloud Generation
         # =========================================================================
-        self.status_changed.emit("Step 6/9: Generating Dense Point Cloud...")
-        mvs_densify_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["DensifyPointCloud"])
-
-        sparse_point_count = self._count_scene_points(mvs_out)
-        calibrated_count = self._count_calibrated_images(mvs_out)
-
-        actual_densify_views = densify_views
-        actual_fuse_views = "2"
-        if sparse_point_count < 500 or calibrated_count < 15:
-            actual_densify_views = str(min(int(densify_views), max(2, calibrated_count - 1)))
-            actual_fuse_views = "1"
-            self.log_message.emit(f"[ADAPT] Low sparse data ({sparse_point_count} pts, {calibrated_count} cal imgs). "
-                                   f"Reducing --number-views to {actual_densify_views}, --number-views-fuse to {actual_fuse_views}")
-
-        cmd = [
-            mvs_densify_exe,
-            "scene.mvs",
-            "--resolution-level",    densify_res,
-            "--max-resolution",      max_res,
-            "--number-views",        actual_densify_views,
-            "--number-views-fuse",   actual_fuse_views,
-            "--geometric-iters",     "2",
-            "--estimate-colors",     "2",
-            "--estimate-normals",    "2",
-        ]
-        self._depth_map_count = 0
-        self._dense_point_count = 0
-        densify_ok = self._run_process_realtime(cmd, timeout=7200.0, cwd=mvs_out, env=env, line_parser=self._parse_densify_line)
-        if not densify_ok:
-            self.log_message.emit("[WARNING] DensifyPointCloud failed or returned no points! ReconstructMesh will use sparse cloud.")
+        if skip_dense:
+            self.log_message.emit("[RESUME] Skipping Step 6 (Dense Point Cloud already complete).")
+            self.progress_changed.emit(80)
         else:
-            self._emit_dense_summary()
-        self.progress_changed.emit(80)
+            self.status_changed.emit("Step 6/9: Generating Dense Point Cloud...")
+            mvs_densify_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["DensifyPointCloud"])
+
+            sparse_point_count = self._count_scene_points(mvs_out)
+            calibrated_count = self._count_calibrated_images(mvs_out)
+
+            actual_densify_views = densify_views
+            actual_fuse_views = "2"
+            if sparse_point_count < 500 or calibrated_count < 15:
+                actual_densify_views = str(min(int(densify_views), max(2, calibrated_count - 1)))
+                actual_fuse_views = "1"
+                self.log_message.emit(f"[ADAPT] Low sparse data ({sparse_point_count} pts, {calibrated_count} cal imgs). "
+                                       f"Reducing --number-views to {actual_densify_views}, --number-views-fuse to {actual_fuse_views}")
+
+            cmd = [
+                mvs_densify_exe,
+                "scene.mvs",
+                "--resolution-level",    densify_res,
+                "--max-resolution",      max_res,
+                "--number-views",        actual_densify_views,
+                "--number-views-fuse",   actual_fuse_views,
+                "--geometric-iters",     "2",
+                "--estimate-colors",     "2",
+                "--estimate-normals",    "2",
+            ]
+            self._depth_map_count = 0
+            self._dense_point_count = 0
+            densify_ok = self._run_process_realtime(cmd, timeout=7200.0, cwd=mvs_out, env=env, line_parser=self._parse_densify_line)
+            if not densify_ok:
+                self.log_message.emit("[WARNING] DensifyPointCloud failed or returned no points! ReconstructMesh will use sparse cloud.")
+            else:
+                self._emit_dense_summary()
+            self._backup_checkpoint("dense_reconstruction")
+            self.progress_changed.emit(80)
 
         # =========================================================================
         # STEP 6b — Optional Reference Point Cloud Alignment & Fusion
@@ -1064,6 +1185,7 @@ class PipelineWorker(QThread):
             self.log_message.emit("[WARNING] TextureMesh PLY pass failed. Skipping OBJ export pass.")
 
         self.progress_changed.emit(99)
+        self._backup_checkpoint("mesh_reconstruction")
         return True
 
     def _run_sp_lg_pipeline(
@@ -1188,17 +1310,28 @@ class PipelineWorker(QThread):
             return False
         total_images = len(image_files)
 
-        # --- Create DB schema via colmap database_creator ------------------
+        # --- Create DB schema via colmap database_creator (or Python fallback) -
+        import shutil
         base_dir = get_base_dir()
         colmap_exe = os.path.join(base_dir, self.toolchain_map["colmap"]["colmap"])
+        system_colmap = shutil.which("colmap")
+        colmap_for_db = system_colmap or colmap_exe
+
         colmap_env = self._get_colmap_env()
         self.log_message.emit("[SP+LG] Initialising COLMAP database schema...")
-        ok = self._run_process_realtime(
-            [colmap_exe, "database_creator", "--database_path", database_path],
-            timeout=30.0, env=colmap_env
-        )
+        ok = False
+        if colmap_for_db and not colmap_for_db.lower().endswith('.exe'):
+            ok = self._run_process_realtime(
+                [colmap_for_db, "database_creator", "--database_path", database_path],
+                timeout=30.0, env=colmap_env
+            )
+        
         if not ok:
-            self.log_message.emit("[ERROR] SP+LG: colmap database_creator failed.")
+            self.log_message.emit("[SP+LG] colmap database_creator unavailable or failed; using Python schema fallback.")
+            ok = self._create_colmap_db_schema(database_path)
+
+        if not ok:
+            self.log_message.emit("[ERROR] SP+LG: Failed to initialise database schema.")
             return False
 
         # --- Measure image dimensions and register cameras + images --------
@@ -1210,7 +1343,6 @@ class PipelineWorker(QThread):
             except Exception:
                 size_map[fname] = (1920, 1080)
 
-        nan = float("nan")
         conn = sqlite3.connect(database_path)
         cur = conn.cursor()
         try:
@@ -1250,151 +1382,142 @@ class PipelineWorker(QThread):
                 )
                 image_id_map[fname] = cur.lastrowid
             conn.commit()
-        except Exception as e:
-            self.log_message.emit(f"[ERROR] SP+LG: Failed to register cameras/images: {e}")
-            conn.close()
-            return False
 
-        # --- SuperPoint extraction per image --------------------------------
-        self.status_changed.emit("Step 2/9: Extracting Neural Features (SuperPoint)...")
-        self._feature_counts = []
-        features_by_id = {}  # image_id -> lightglue feature dict (on CPU for storage)
-        dev_tag = "GPU" if device.type == "cuda" else "CPU"
+            # --- SuperPoint extraction per image --------------------------------
+            self.status_changed.emit("Step 2/9: Extracting Neural Features (SuperPoint)...")
+            self._feature_counts = []
+            features_by_id = {}  # image_id -> lightglue feature dict (on CPU for storage)
+            dev_tag = "GPU" if device.type == "cuda" else "CPU"
 
-        for i, fname in enumerate(image_files):
-            if not self.is_running:
-                conn.close()
-                return False
+            for i, fname in enumerate(image_files):
+                if not self.is_running:
+                    return False
 
-            image_id = image_id_map[fname]
-            self.status_changed.emit(f"Step 2/9: SP Keypoints ({i + 1}/{total_images})...")
-            self.progress_changed.emit(10 + int(15 * i / total_images))
+                image_id = image_id_map[fname]
+                self.status_changed.emit(f"Step 2/9: SP Keypoints ({i + 1}/{total_images})...")
+                self.progress_changed.emit(10 + int(15 * i / total_images))
 
-            try:
-                img_tensor = lg_load_image(os.path.join(image_dir, fname)).to(device)
-                with torch.inference_mode():
-                    feats = extractor.extract(img_tensor)
-
-                # keypoints: [1, N, 2] pixel coords
-                kps = feats["keypoints"][0].cpu().numpy()  # [N, 2]
-                n_kp = len(kps)
-
-                # COLMAP similarity keypoint blob: float32[N, 4] — [x, y, scale, orientation]
-                # Columns 2 (scale) and 3 (orientation) are zeroed; mapper uses only 0/1.
-                # cols=4 is the "similarity" format per COLMAP database.html.
-                kp_blob = np.zeros((n_kp, 4), dtype=np.float32)
-                kp_blob[:, 0] = kps[:, 0]  # x
-                kp_blob[:, 1] = kps[:, 1]  # y
-
-                cur.execute(
-                    "INSERT INTO keypoints (image_id, rows, cols, data) VALUES (?,?,?,?)",
-                    (image_id, n_kp, 4, kp_blob.tobytes())
-                )
-
-                # Move feature dict to CPU and store for matching pass
-                features_by_id[image_id] = {
-                    k: v.cpu() for k, v in feats.items()
-                }
-                self._feature_counts.append(n_kp)
-                self.log_message.emit(
-                    f"[SP/{dev_tag}] {fname}: {n_kp:,} keypoints ({i + 1}/{total_images})"
-                )
-            except Exception as e:
-                self.log_message.emit(f"[ERROR] SP+LG: SuperPoint failed on {fname}: {e}")
-                conn.close()
-                return False
-
-        conn.commit()
-
-        # Sanity check
-        if len(features_by_id) < 2:
-            self.log_message.emit("[ERROR] SP+LG: Fewer than 2 images successfully processed.")
-            conn.close()
-            return False
-
-        # --- LightGlue exhaustive matching + RANSAC geometric verification --
-        self.status_changed.emit("Step 3/9: Matching Neural Features (LightGlue)...")
-        image_ids = list(image_id_map.values())
-        all_pairs = [
-            (image_ids[a], image_ids[b])
-            for a in range(len(image_ids))
-            for b in range(a + 1, len(image_ids))
-        ]
-        num_pairs = len(all_pairs)
-        self._match_counts = []
-
-        # F matrix as float64[3,3] row-major zero blob (written when RANSAC fails to
-        # find inliers; a valid F will overwrite it when inliers are found).
-        zero_f = np.zeros((3, 3), dtype=np.float64).tobytes()
-
-        for pair_idx, (id1, id2) in enumerate(all_pairs):
-            if not self.is_running:
-                conn.close()
-                return False
-
-            self.progress_changed.emit(25 + int(15 * pair_idx / max(num_pairs, 1)))
-
-            feats0 = {k: v.to(device) for k, v in features_by_id[id1].items()}
-            feats1 = {k: v.to(device) for k, v in features_by_id[id2].items()}
-
-            try:
-                with torch.inference_mode():
-                    result = matcher({"image0": feats0, "image1": feats1})
-            except Exception as e:
-                self.log_message.emit(f"[WARNING] SP+LG: LightGlue failed for pair ({id1},{id2}): {e}")
-                continue
-
-            match_indices = result["matches"][0].cpu().numpy()  # [M, 2]
-            if len(match_indices) == 0:
-                continue
-
-            pid = _pair_id(id1, id2)
-            matches_blob = match_indices.astype(np.uint32).tobytes()
-            cur.execute(
-                "INSERT INTO matches (pair_id, rows, cols, data) VALUES (?,?,?,?)",
-                (pid, len(match_indices), 2, matches_blob)
-            )
-
-            # Geometric verification via RANSAC on fundamental matrix.
-            # UNCALIBRATED (config=3) is semantically correct for a general interior
-            # scene (a room is not globally planar; PLANAR/homography would be wrong).
-            kps0 = features_by_id[id1]["keypoints"][0].numpy()  # [N0, 2]
-            kps1 = features_by_id[id2]["keypoints"][0].numpy()  # [N1, 2]
-            pts0 = kps0[match_indices[:, 0]].astype(np.float64)
-            pts1 = kps1[match_indices[:, 1]].astype(np.float64)
-
-            inlier_indices = match_indices  # fallback: all LG matches as inliers
-            f_blob = zero_f
-            if len(pts0) >= 8:
                 try:
-                    F, mask = cv2.findFundamentalMat(pts0, pts1, cv2.FM_RANSAC, 3.0, 0.999)
-                    if F is not None and mask is not None:
-                        inlier_mask = mask.ravel().astype(bool)
-                        inlier_indices = match_indices[inlier_mask]
-                        f_blob = F.astype(np.float64).tobytes()
-                except Exception:
-                    pass  # keep fallback values
+                    img_tensor = lg_load_image(os.path.join(image_dir, fname)).to(device)
+                    with torch.inference_mode():
+                        feats = extractor.extract(img_tensor)
 
-            n_inliers = len(inlier_indices)
-            if n_inliers < 4:
-                continue  # not enough inliers for mapper initialisation
+                    # keypoints: [1, N, 2] pixel coords
+                    kps = feats["keypoints"][0].cpu().numpy()  # [N, 2]
+                    n_kp = len(kps)
 
-            inliers_blob = inlier_indices.astype(np.uint32).tobytes()
-            cur.execute(
-                "INSERT INTO two_view_geometries"
-                " (pair_id, rows, cols, data, config, F, E, H)"
-                " VALUES (?,?,?,?,?,?,?,?)",
-                (pid, n_inliers, 2, inliers_blob,
-                 COLMAP_UNCALIBRATED, f_blob, zero_f, zero_f)
-            )
-            self._match_counts.append(n_inliers)
-            self.log_message.emit(
-                f"[LG/{dev_tag}] Pair ({id1},{id2}): {len(match_indices)} matches → {n_inliers} inliers"
-                f" ({pair_idx + 1}/{num_pairs})"
-            )
+                    # COLMAP similarity keypoint blob: float32[N, 4] — [x, y, scale, orientation]
+                    kp_blob = np.zeros((n_kp, 4), dtype=np.float32)
+                    kp_blob[:, 0] = kps[:, 0]  # x
+                    kp_blob[:, 1] = kps[:, 1]  # y
 
-        conn.commit()
-        conn.close()
+                    cur.execute(
+                        "INSERT INTO keypoints (image_id, rows, cols, data) VALUES (?,?,?,?)",
+                        (image_id, n_kp, 4, kp_blob.tobytes())
+                    )
+
+                    # Move feature dict to CPU and store for matching pass
+                    features_by_id[image_id] = {
+                        k: v.cpu() for k, v in feats.items()
+                    }
+                    self._feature_counts.append(n_kp)
+                    self.log_message.emit(
+                        f"[SP/{dev_tag}] {fname}: {n_kp:,} keypoints ({i + 1}/{total_images})"
+                    )
+                except Exception as e:
+                    self.log_message.emit(f"[ERROR] SP+LG: SuperPoint failed on {fname}: {e}")
+                    return False
+
+            conn.commit()
+
+            # Sanity check
+            if len(features_by_id) < 2:
+                self.log_message.emit("[ERROR] SP+LG: Fewer than 2 images successfully processed.")
+                return False
+
+            # --- LightGlue exhaustive matching + RANSAC geometric verification --
+            self.status_changed.emit("Step 3/9: Matching Neural Features (LightGlue)...")
+            image_ids = list(image_id_map.values())
+            all_pairs = [
+                (image_ids[a], image_ids[b])
+                for a in range(len(image_ids))
+                for b in range(a + 1, len(image_ids))
+            ]
+            num_pairs = len(all_pairs)
+            self._match_counts = []
+
+            # F matrix as float64[3,3] row-major zero blob
+            zero_f = np.zeros((3, 3), dtype=np.float64).tobytes()
+
+            for pair_idx, (id1, id2) in enumerate(all_pairs):
+                if not self.is_running:
+                    return False
+
+                self.progress_changed.emit(25 + int(15 * pair_idx / max(num_pairs, 1)))
+
+                feats0 = {k: v.to(device) for k, v in features_by_id[id1].items()}
+                feats1 = {k: v.to(device) for k, v in features_by_id[id2].items()}
+
+                try:
+                    with torch.inference_mode():
+                        result = matcher({"image0": feats0, "image1": feats1})
+                except Exception as e:
+                    self.log_message.emit(f"[WARNING] SP+LG: LightGlue failed for pair ({id1},{id2}): {e}")
+                    continue
+
+                match_indices = result["matches"][0].cpu().numpy()  # [M, 2]
+                if len(match_indices) == 0:
+                    continue
+
+                pid = _pair_id(id1, id2)
+                matches_blob = match_indices.astype(np.uint32).tobytes()
+                cur.execute(
+                    "INSERT INTO matches (pair_id, rows, cols, data) VALUES (?,?,?,?)",
+                    (pid, len(match_indices), 2, matches_blob)
+                )
+
+                # Geometric verification via RANSAC on fundamental matrix.
+                kps0 = features_by_id[id1]["keypoints"][0].numpy()  # [N0, 2]
+                kps1 = features_by_id[id2]["keypoints"][0].numpy()  # [N1, 2]
+                pts0 = kps0[match_indices[:, 0]].astype(np.float64)
+                pts1 = kps1[match_indices[:, 1]].astype(np.float64)
+
+                inlier_indices = match_indices  # fallback: all LG matches as inliers
+                f_blob = zero_f
+                if len(pts0) >= 8:
+                    try:
+                        F, mask = cv2.findFundamentalMat(pts0, pts1, cv2.FM_RANSAC, 3.0, 0.999)
+                        if F is not None and mask is not None:
+                            inlier_mask = mask.ravel().astype(bool)
+                            inlier_indices = match_indices[inlier_mask]
+                            f_blob = F.astype(np.float64).tobytes()
+                    except Exception:
+                        pass  # keep fallback values
+
+                n_inliers = len(inlier_indices)
+                if n_inliers < 4:
+                    continue  # not enough inliers for mapper initialisation
+
+                inliers_blob = inlier_indices.astype(np.uint32).tobytes()
+                cur.execute(
+                    "INSERT INTO two_view_geometries"
+                    " (pair_id, rows, cols, data, config, F, E, H)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (pid, n_inliers, 2, inliers_blob,
+                     COLMAP_UNCALIBRATED, f_blob, zero_f, zero_f)
+                )
+                self._match_counts.append(n_inliers)
+                self.log_message.emit(
+                    f"[LG/{dev_tag}] Pair ({id1},{id2}): {len(match_indices)} matches → {n_inliers} inliers"
+                    f" ({pair_idx + 1}/{num_pairs})"
+                )
+
+            conn.commit()
+        except Exception as e:
+            self.log_message.emit(f"[ERROR] SP+LG: Database transaction failed: {e}")
+            return False
+        finally:
+            conn.close()
 
         n_verified = len(self._match_counts)
         self.log_message.emit(
@@ -1904,6 +2027,96 @@ class PipelineWorker(QThread):
         
         return None
 
+    def _create_colmap_db_schema(self, db_path: str) -> bool:
+        """
+        Creates the standard COLMAP SQLite database schema directly in Python.
+        Ensures compatibility even when 'database_creator' CLI is unavailable or fails.
+        """
+        import sqlite3
+        try:
+            if os.path.exists(db_path):
+                try:
+                    os.remove(db_path)
+                except Exception:
+                    pass
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.executescript("""
+                CREATE TABLE IF NOT EXISTS cameras (
+                    camera_id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    model INTEGER NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    params BLOB,
+                    prior_focal_length INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS images (
+                    image_id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    name TEXT NOT NULL UNIQUE,
+                    camera_id INTEGER NOT NULL,
+                    CONSTRAINT fk_images_camera_id FOREIGN KEY (camera_id) REFERENCES cameras (camera_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS keypoints (
+                    image_id INTEGER PRIMARY KEY NOT NULL,
+                    rows INTEGER NOT NULL,
+                    cols INTEGER NOT NULL,
+                    data BLOB,
+                    CONSTRAINT fk_keypoints_image_id FOREIGN KEY (image_id) REFERENCES images (image_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS descriptors (
+                    image_id INTEGER PRIMARY KEY NOT NULL,
+                    rows INTEGER NOT NULL,
+                    cols INTEGER NOT NULL,
+                    data BLOB,
+                    CONSTRAINT fk_descriptors_image_id FOREIGN KEY (image_id) REFERENCES images (image_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS matches (
+                    pair_id INTEGER PRIMARY KEY NOT NULL,
+                    rows INTEGER NOT NULL,
+                    cols INTEGER NOT NULL,
+                    data BLOB
+                );
+                CREATE TABLE IF NOT EXISTS two_view_geometries (
+                    pair_id INTEGER PRIMARY KEY NOT NULL,
+                    rows INTEGER NOT NULL,
+                    cols INTEGER NOT NULL,
+                    data BLOB,
+                    config INTEGER NOT NULL,
+                    F BLOB,
+                    E BLOB,
+                    H BLOB
+                );
+            """)
+            conn.commit()
+            conn.close()
+            self.log_message.emit("[SP+LG] COLMAP database schema created successfully via Python schema builder.")
+            return True
+        except Exception as e:
+            self.log_message.emit(f"[ERROR] Failed to create COLMAP database schema: {e}")
+            return False
+
+    def _is_valid_checkpoint(self, db_path: str) -> bool:
+        """Checks if a COLMAP database exists and contains valid camera/image registration and verified feature matches."""
+        abs_db_path = os.path.abspath(db_path)
+        if not os.path.exists(abs_db_path):
+            return False
+        import sqlite3, time
+        for attempt in range(3):
+            try:
+                conn = sqlite3.connect(abs_db_path, timeout=10.0)
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM images")
+                num_images = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM two_view_geometries WHERE rows > 0")
+                num_pairs = cur.fetchone()[0]
+                conn.close()
+                return num_images >= 2 and num_pairs >= 1
+            except Exception:
+                if attempt < 2:
+                    time.sleep(0.3)
+        return False
+
     def _query_colmap_database_stats(self, db_path: str) -> dict:
         """Query COLMAP's SQLite database for feature and match statistics."""
         import sqlite3
@@ -1914,28 +2127,38 @@ class PipelineWorker(QThread):
             "match_counts": [],
         }
         
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            # Count images
-            cursor.execute("SELECT COUNT(*) FROM images")
-            stats["num_images"] = cursor.fetchone()[0]
-            
-            # Feature counts per image
-            cursor.execute("SELECT image_id, rows FROM keypoints")
-            for row in cursor.fetchall():
-                stats["feature_counts"].append(row[1])
-            
-            # Match counts per pair (from two_view_geometries, which has verified matches)
-            cursor.execute("SELECT pair_id, rows FROM two_view_geometries WHERE rows > 0")
-            for row in cursor.fetchall():
-                stats["num_pairs"] += 1
-                stats["match_counts"].append(row[1])
-            
-            conn.close()
-        except Exception as e:
-            self.log_message.emit(f"[WARNING] Could not read COLMAP database: {e}")
+        abs_db_path = os.path.abspath(db_path)
+        if not os.path.exists(abs_db_path):
+            self.log_message.emit(f"[WARNING] COLMAP database file does not exist: {abs_db_path}")
+            return stats
+
+        for attempt in range(3):
+            try:
+                conn = sqlite3.connect(abs_db_path, timeout=10.0)
+                cursor = conn.cursor()
+                
+                # Count images
+                cursor.execute("SELECT COUNT(*) FROM images")
+                stats["num_images"] = cursor.fetchone()[0]
+                
+                # Feature counts per image
+                cursor.execute("SELECT image_id, rows FROM keypoints")
+                for row in cursor.fetchall():
+                    stats["feature_counts"].append(row[1])
+                
+                # Match counts per pair (from two_view_geometries, which has verified matches)
+                cursor.execute("SELECT pair_id, rows FROM two_view_geometries WHERE rows > 0")
+                for row in cursor.fetchall():
+                    stats["num_pairs"] += 1
+                    stats["match_counts"].append(row[1])
+                
+                conn.close()
+                break
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.3)
+                else:
+                    self.log_message.emit(f"[WARNING] Could not read COLMAP database ({abs_db_path}): {e}")
         
         return stats
 
@@ -2151,73 +2374,3 @@ class PipelineWorker(QThread):
             return False
 
 
-class BackgroundRemovalWorker(QThread):
-    """
-    Worker thread that executes background removal offline on a list of image files.
-    """
-    progress_changed = Signal(int)
-    status_changed = Signal(str)
-    log_message = Signal(str)
-    finished = Signal(bool, list, str)
-
-    def __init__(self, image_paths: list, parent=None):
-        super().__init__(parent)
-        self.image_paths = image_paths
-        self.is_running = True
-
-    def run(self):
-        try:
-            import rembg
-            from PIL import Image
-        except Exception as e:
-            self.log_message.emit(f"[ERROR] Failed to import rembg or PIL: {e}")
-            self.finished.emit(False, self.image_paths, f"Required dependencies not installed: {e}")
-            return
-
-        updated_paths = []
-        total = len(self.image_paths)
-
-        self.log_message.emit(f"[START] Starting offline background removal for {total} images...")
-        
-        for i, path in enumerate(self.image_paths):
-            if not self.is_running:
-                self.log_message.emit("[INFO] Background removal cancelled.")
-                self.finished.emit(False, self.image_paths, "Background removal cancelled by user.")
-                return
-
-            self.status_changed.emit(f"Removing background: {i+1}/{total}")
-            self.progress_changed.emit(int((i / total) * 100))
-            self.log_message.emit(f"[BG_REMOVE] Processing: {os.path.basename(path)}")
-
-            try:
-                # Open image using Pillow
-                with Image.open(path) as img:
-                    # Run background removal
-                    output = rembg.remove(img)
-
-                    # We must save as PNG to preserve transparency
-                    base, ext = os.path.splitext(path)
-                    new_path = base + ".png"
-
-                    # Save output
-                    output.save(new_path, "PNG")
-
-                    # If the file path changed (e.g. from jpg to png), remove the original file
-                    if os.path.abspath(path) != os.path.abspath(new_path):
-                        if os.path.exists(path):
-                            os.remove(path)
-
-                    updated_paths.append(os.path.normpath(new_path))
-                    self.log_message.emit(f"[BG_REMOVE] Completed and saved as: {os.path.basename(new_path)}")
-
-            except Exception as e:
-                self.log_message.emit(f"[ERROR] Failed to process {os.path.basename(path)}: {e}")
-                # Fallback: keep original path
-                updated_paths.append(path)
-
-        self.progress_changed.emit(100)
-        self.status_changed.emit("Background removal complete!")
-        self.finished.emit(True, updated_paths, f"Successfully removed background of {total} images.")
-
-    def stop(self):
-        self.is_running = False
