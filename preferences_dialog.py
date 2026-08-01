@@ -554,16 +554,31 @@ class PreferencesDialog(QDialog):
         else:
             subprocess.Popen(["xdg-open", path])
 
+    def _get_main_window(self):
+        candidate = self.main_window
+        if candidate is not None and (hasattr(candidate, "viewer_widget") or hasattr(candidate, "polyground_workspace")):
+            return candidate
+        if candidate is not None and hasattr(candidate, "main_window") and candidate.main_window is not None:
+            return candidate.main_window
+        p = self.parent()
+        while p is not None:
+            if hasattr(p, "viewer_widget") or hasattr(p, "polyground_workspace"):
+                return p
+            p = p.parent() if hasattr(p, "parent") else None
+        return self.main_window
+
     def _on_startup_preference_changed(self, text: str):
         save_preferences({"startup_tab": text})
 
     def _on_camera_mode_changed(self, text: str):
         save_preferences({"camera_mode": text})
-        main_win = self.main_window
+        main_win = self._get_main_window()
         if main_win:
             idx = 0 if text == "Arcball Camera" else 1
             if hasattr(main_win, "viewer_widget") and hasattr(main_win.viewer_widget, "cam_select"):
+                main_win.viewer_widget.cam_select.blockSignals(True)
                 main_win.viewer_widget.cam_select.setCurrentIndex(idx)
+                main_win.viewer_widget.cam_select.blockSignals(False)
             if hasattr(main_win, "_on_camera_changed"):
                 main_win._on_camera_changed(idx)
 
@@ -577,13 +592,13 @@ class PreferencesDialog(QDialog):
             self.chk_pg_invert_rot.blockSignals(True)
             self.chk_pg_invert_rot.setChecked(checked)
             self.chk_pg_invert_rot.blockSignals(False)
-        main_win = self.main_window
+        main_win = self._get_main_window()
         if main_win and hasattr(main_win, "view") and main_win.view and hasattr(main_win.view, "camera") and hasattr(main_win.view.camera, "flip"):
             main_win.view.camera.flip = (False, checked, False)
 
     def _on_show_controls_changed(self, checked: bool):
         save_preferences({"show_controls": checked})
-        main_win = self.main_window
+        main_win = self._get_main_window()
         if main_win:
             if hasattr(main_win, "viewer_widget") and hasattr(main_win.viewer_widget, "show_controls_cb"):
                 main_win.viewer_widget.show_controls_cb.blockSignals(True)
@@ -604,11 +619,13 @@ class PreferencesDialog(QDialog):
             self.btn_rec_bg.setText(hex_c)
             self.btn_rec_bg.setStyleSheet(f"background-color: {hex_c}; color: #FFFFFF; font-weight: bold; border: 1px solid #555;")
             save_preferences({"reconstruction_bg_color": hex_c})
-            if self.main_window and hasattr(self.main_window, "viewport_bg_color"):
-                self.main_window.viewport_bg_color = hex_c
-                if hasattr(self.main_window, "canvas") and self.main_window.canvas:
-                    self.main_window.canvas.bgcolor = hex_c
-                    self.main_window.canvas.update()
+            main_win = self._get_main_window()
+            if main_win:
+                if hasattr(main_win, "viewport_bg_color"):
+                    main_win.viewport_bg_color = hex_c
+                if hasattr(main_win, "canvas") and main_win.canvas:
+                    main_win.canvas.bgcolor = hex_c
+                    main_win.canvas.update()
 
     def _choose_pg_bg_color(self):
         curr = self.prefs.get("polyground_bg_color", "#1E1E1E")
@@ -618,8 +635,13 @@ class PreferencesDialog(QDialog):
             self.btn_pg_bg.setText(hex_c)
             self.btn_pg_bg.setStyleSheet(f"background-color: {hex_c}; color: #FFFFFF; font-weight: bold; border: 1px solid #555;")
             save_preferences({"polyground_bg_color": hex_c})
-            if self.main_window and hasattr(self.main_window, "polyground_workspace") and self.main_window.polyground_workspace:
-                vp = getattr(self.main_window.polyground_workspace, "viewport", None)
+            main_win = self._get_main_window()
+            if main_win:
+                vp = None
+                if hasattr(main_win, "polyground_workspace") and main_win.polyground_workspace:
+                    vp = getattr(main_win.polyground_workspace, "viewport", None)
+                elif hasattr(main_win, "viewport"):
+                    vp = main_win.viewport
                 if vp and hasattr(vp, "bg_color"):
                     r, g, b = color.redF(), color.greenF(), color.blueF()
                     import numpy as np
@@ -634,10 +656,16 @@ class PreferencesDialog(QDialog):
             self.btn_pg_grid.setText(hex_c)
             self.btn_pg_grid.setStyleSheet(f"background-color: {hex_c}; color: #FFFFFF; font-weight: bold; border: 1px solid #555;")
             save_preferences({"polyground_grid_color": hex_c})
-            if self.main_window and hasattr(self.main_window, "polyground_workspace") and self.main_window.polyground_workspace:
-                vp = getattr(self.main_window.polyground_workspace, "viewport", None)
+            main_win = self._get_main_window()
+            if main_win:
+                vp = None
+                if hasattr(main_win, "polyground_workspace") and main_win.polyground_workspace:
+                    vp = getattr(main_win.polyground_workspace, "viewport", None)
+                elif hasattr(main_win, "viewport"):
+                    vp = main_win.viewport
                 if vp and hasattr(vp, "grid_color_1"):
                     r, g, b = color.redF(), color.greenF(), color.blueF()
                     import numpy as np
                     vp.grid_color_1 = np.array([r, g, b, 1.0], dtype=np.float32)
+                    vp.grid_color_2 = np.array([min(1.0, r * 1.3), min(1.0, g * 1.3), min(1.0, b * 1.3), 1.0], dtype=np.float32)
                     vp.update()

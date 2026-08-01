@@ -2659,21 +2659,21 @@ class MainWindow(QMainWindow):
         a_docs = help_menu.addAction("Proximap Documentation")
         a_docs.triggered.connect(lambda: QMessageBox.information(self, "Documentation", "Visit https://proximaxr.space for documentation."))
 
-    def _open_preferences_dialog(self):
-        try:
-            from preferences_dialog import PreferencesDialog
-            ed = getattr(self, 'mesh_editor_coordinator', self)
-            addon_mgr = getattr(ed, 'addon_manager', None)
-            dlg = PreferencesDialog(addon_mgr, ed, self)
-            dlg.exec()
-        except Exception as e:
-            print(f"[WARNING] Could not open preferences dialog: {e}")
-
         a_shortcuts = help_menu.addAction("Keyboard Shortcuts")
         a_shortcuts.triggered.connect(lambda: QMessageBox.information(self, "Shortcuts", "Translate: W | Rotate: E | Scale: R\nUndo: Ctrl+Z | Redo: Ctrl+Y | Delete: Del"))
 
         a_about = help_menu.addAction("About Proximap")
         a_about.triggered.connect(lambda: QMessageBox.about(self, "About Proximap", "Proximap v1.0.0\nProximaXR Spatial Technologies\nContact: fumz@proximaxr.space"))
+
+    def _open_preferences_dialog(self):
+        try:
+            from preferences_dialog import PreferencesDialog
+            ed = getattr(self, 'mesh_editor_coordinator', self)
+            addon_mgr = getattr(ed, 'addon_manager', None)
+            dlg = PreferencesDialog(addon_mgr, self, self)
+            dlg.exec()
+        except Exception as e:
+            print(f"[WARNING] Could not open preferences dialog: {e}")
 
 
     def closeEvent(self, event):

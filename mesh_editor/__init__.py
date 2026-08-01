@@ -1534,7 +1534,8 @@ class MeshEditorWidget(QWidget):
             event.ignore()
 
     def _open_preferences(self):
-        dlg = PreferencesDialog(self.addon_manager, self, self)
+        main_win = getattr(self, "main_window", self)
+        dlg = PreferencesDialog(self.addon_manager, main_win, self)
         dlg.exec()
 
     def update_addon_panels(self):
