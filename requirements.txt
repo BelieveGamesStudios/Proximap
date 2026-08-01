@@ -8,3 +8,4 @@ PyOpenGL
 pyrr
 lightglue
 qrcode
+PySide6-QtAds

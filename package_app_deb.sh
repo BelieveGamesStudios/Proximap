@@ -58,7 +58,7 @@ python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all PySide6 --collect-all vispy --collect-all numpy \
     --collect-all pillow --collect-all cv2 --collect-all trimesh \
     --collect-all pyrr --collect-all OpenGL \
-    --collect-all torch --collect-all lightglue --collect-all qrcode \
+    --collect-all torch --collect-all lightglue --collect-all kornia --collect-all qrcode \
     --add-data "mesh_editor/shaders:mesh_editor/shaders" \
     main_window.py
 

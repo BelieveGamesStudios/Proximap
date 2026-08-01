@@ -1323,16 +1323,26 @@ class MainWindow(QMainWindow):
                     print(f"[WARNING] Could not clear {item_path} on startup: {e}")
 
     def _init_ui(self):
-        # Main Tabbed Interface
-        self.main_tabs = QTabWidget(self)
-        self.main_tabs.setObjectName("MainTabs")
-        self.setCentralWidget(self.main_tabs)
+        # Root Container with PolygroundChromeBar + QStackedWidget
+        central_container = QWidget(self)
+        self.setCentralWidget(central_container)
+        root_layout = QVBoxLayout(central_container)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        from mesh_editor.pg_chrome import PolygroundChromeBar
+        self.chrome_bar = PolygroundChromeBar(self)
+        root_layout.addWidget(self.chrome_bar)
+
+        self.page_stack = QStackedWidget(central_container)
+        root_layout.addWidget(self.page_stack, stretch=1)
         
-        # 3D Reconstruction Tab
-        reconstruction_tab = QWidget(self.main_tabs)
+        # 3D Reconstruction Tab Page
+        reconstruction_tab = QWidget(self.page_stack)
         main_layout = QHBoxLayout(reconstruction_tab)
         main_layout.setContentsMargins(15, 15, 15, 15)
         main_layout.setSpacing(15)
+
         
         # Left Side Control Panel (Wizard Steps)
         sidebar = QFrame(self)
@@ -1918,12 +1928,9 @@ class MainWindow(QMainWindow):
         
         main_layout.addWidget(right_panel, stretch=1)
         
-        # Register tabs to MainTabs
-        self.main_tabs.addTab(reconstruction_tab, "3D Reconstruction")
-        
         # Lazy load the Mesh Editor tab to avoid importing trimesh at startup
         self.mesh_editor_tab = None
-        self.mesh_editor_placeholder = QWidget(self.main_tabs)
+        self.mesh_editor_placeholder = QWidget(self.page_stack)
         
         # Add styled loading UI to the placeholder
         placeholder_layout = QVBoxLayout(self.mesh_editor_placeholder)
@@ -1967,25 +1974,51 @@ class MainWindow(QMainWindow):
         placeholder_layout.addWidget(loading_container, 0, Qt.AlignCenter)
         placeholder_layout.addStretch()
         
-        self.main_tabs.addTab(self.mesh_editor_placeholder, "Mesh Editor")
-        self.main_tabs.currentChanged.connect(self._on_tab_changed)
+        # Add pages to StackedWidget: Page 0 = Polyground, Page 1 = 3D Reconstruction
+        self.page_stack.addWidget(self.mesh_editor_placeholder)
+        self.page_stack.addWidget(reconstruction_tab)
+        
+        self.chrome_bar.tab_switch_requested.connect(self._on_chrome_tab_switch)
+        self.chrome_bar.mode_changed.connect(self._on_mode_changed)
+        
+        # Lazy load Polyground on startup (since active by default)
+        QTimer.singleShot(50, self._load_mesh_editor)
         
         self._set_process_btn_state("idle")
 
-    def _on_tab_changed(self, index):
-        if index == 1 and self.mesh_editor_tab is None:
+    def _on_chrome_tab_switch(self, index: int):
+        self.page_stack.setCurrentIndex(index)
+        if index == 0 and getattr(self, "mesh_editor_tab", None) is None:
             if not getattr(self, "_mesh_editor_loading", False):
                 self._mesh_editor_loading = True
                 QApplication.setOverrideCursor(Qt.WaitCursor)
                 QTimer.singleShot(100, self._load_mesh_editor)
 
+    def _on_mode_changed(self, mode: str):
+        if hasattr(self, "polyground_workspace") and self.polyground_workspace:
+            self.polyground_workspace._on_mode_changed(mode)
+
     def _load_mesh_editor(self):
         try:
             from mesh_editor import MeshEditorWidget
-            self.mesh_editor_tab = MeshEditorWidget(self)
-            self.mesh_editor_tab.action_upload_proximap.triggered.connect(self._upload_mesh_editor_scene)
+            from mesh_editor.pg_workspace import PolygroundWorkspace
+
+            self.mesh_editor_coordinator = MeshEditorWidget(self)
+            self.mesh_editor_tab = self.mesh_editor_coordinator  # backward compatibility
+            self.mesh_editor_coordinator.action_upload_proximap.triggered.connect(self._upload_mesh_editor_scene)
             
-            # Clear placeholder layout (loading UI) and swap in the actual mesh editor
+            # Create PolygroundWorkspace with QADS DockManager
+            self.polyground_workspace = PolygroundWorkspace(self.mesh_editor_coordinator, self)
+            self.polyground_workspace.initialize()
+
+            # Attach Window menu & File/Edit actions to top chrome bar
+            self._setup_window_menu()
+            self._setup_chrome_menu_actions()
+
+            # macOS native menu bar shim if on Darwin
+            self.chrome_bar.attach_native_mac_menu(self)
+
+            # Swap in the Polyground workspace
             layout = self.mesh_editor_placeholder.layout()
             if layout:
                 while layout.count():
@@ -1993,14 +2026,116 @@ class MainWindow(QMainWindow):
                     if child.widget():
                         child.widget().deleteLater()
                 layout.setContentsMargins(0, 0, 0, 0)
-                layout.addWidget(self.mesh_editor_tab)
+                layout.addWidget(self.polyground_workspace)
             else:
                 layout = QVBoxLayout(self.mesh_editor_placeholder)
                 layout.setContentsMargins(0, 0, 0, 0)
-                layout.addWidget(self.mesh_editor_tab)
+                layout.addWidget(self.polyground_workspace)
         finally:
             QApplication.restoreOverrideCursor()
             self._mesh_editor_loading = False
+
+    def _setup_window_menu(self):
+        if not hasattr(self, "polyground_workspace") or not self.polyground_workspace:
+            return
+
+        window_menu = self.chrome_bar.window_menu
+        window_menu.clear()
+
+        docks = self.polyground_workspace.docks
+        for name, dock in docks.items():
+            if name == "viewport":
+                continue
+            action = dock.toggleViewAction()
+            action.setText(dock.windowTitle())
+            window_menu.addAction(action)
+
+        window_menu.addSeparator()
+        reset_action = window_menu.addAction("Reset to Default Layout")
+        reset_action.triggered.connect(self.polyground_workspace._build_default_layout)
+
+    def _setup_chrome_menu_actions(self):
+        if not hasattr(self, "mesh_editor_coordinator") or not self.mesh_editor_coordinator:
+            return
+
+        ed = self.mesh_editor_coordinator
+
+        # 1. File Menu
+        file_menu = self.chrome_bar.file_menu
+        file_menu.clear()
+
+        a_import = file_menu.addAction("Import Mesh (.obj, .glb)")
+        if hasattr(ed, '_on_import_model_clicked'):
+            a_import.triggered.connect(ed._on_import_model_clicked)
+
+        a_rec = file_menu.addAction("Load Reconstructed Model")
+        if hasattr(ed, '_on_load_reconstructed_model_clicked'):
+            a_rec.triggered.connect(ed._on_load_reconstructed_model_clicked)
+
+        a_pxm = file_menu.addAction("Import .PXM File")
+        if hasattr(ed, '_on_import_pxm_clicked'):
+            a_pxm.triggered.connect(lambda: ed._on_import_pxm_clicked())
+
+        file_menu.addSeparator()
+
+        a_glb = file_menu.addAction("Export Scene (.glb)")
+        if hasattr(ed, '_on_export_scene_clicked'):
+            a_glb.triggered.connect(lambda: ed._on_export_scene_clicked('glb'))
+
+        a_obj = file_menu.addAction("Export Scene (.obj)")
+        if hasattr(ed, '_on_export_scene_clicked'):
+            a_obj.triggered.connect(lambda: ed._on_export_scene_clicked('obj'))
+
+        a_usdz = file_menu.addAction("Export Scene (.usdz)")
+        if hasattr(ed, '_on_export_scene_clicked'):
+            a_usdz.triggered.connect(lambda: ed._on_export_scene_clicked('usdz'))
+
+        file_menu.addSeparator()
+
+        a_upload = file_menu.addAction("Upload to Proximap")
+        a_upload.triggered.connect(self._upload_mesh_editor_scene)
+
+        # 2. Edit Menu
+        edit_menu = self.chrome_bar.edit_menu
+        edit_menu.clear()
+
+        a_undo = edit_menu.addAction("Undo")
+        a_undo.setShortcut("Ctrl+Z")
+        if hasattr(ed, '_perform_undo'):
+            a_undo.triggered.connect(ed._perform_undo)
+
+        a_redo = edit_menu.addAction("Redo")
+        a_redo.setShortcut("Ctrl+Y")
+        if hasattr(ed, '_perform_redo'):
+            a_redo.triggered.connect(ed._perform_redo)
+
+        edit_menu.addSeparator()
+
+        a_del = edit_menu.addAction("Delete Selected")
+        a_del.setShortcut("Delete")
+        if hasattr(ed, '_on_delete_selected_mesh'):
+            a_del.triggered.connect(ed._on_delete_selected_mesh)
+
+        # 3. Help Menu
+        help_menu = self.chrome_bar.help_menu
+        help_menu.clear()
+
+        a_docs = help_menu.addAction("Proximap Documentation")
+        a_docs.triggered.connect(lambda: QMessageBox.information(self, "Documentation", "Visit https://proximaxr.space for documentation."))
+
+        a_shortcuts = help_menu.addAction("Keyboard Shortcuts")
+        a_shortcuts.triggered.connect(lambda: QMessageBox.information(self, "Shortcuts", "Translate: W | Rotate: E | Scale: R\nUndo: Ctrl+Z | Redo: Ctrl+Y | Delete: Del"))
+
+        a_about = help_menu.addAction("About Proximap")
+        a_about.triggered.connect(lambda: QMessageBox.about(self, "About Proximap", "Proximap v1.0.0\nProximaXR Spatial Technologies\nContact: fumz@proximaxr.space"))
+
+
+    def closeEvent(self, event):
+        if hasattr(self, "polyground_workspace") and self.polyground_workspace:
+            self.polyground_workspace.save_layout()
+        super().closeEvent(event)
+
+
 
     def _update_system_badge(self):
         """Calculates system resource quality badge and updates style dynamically."""

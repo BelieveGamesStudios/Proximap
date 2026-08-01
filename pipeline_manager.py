@@ -1140,6 +1140,13 @@ class PipelineWorker(QThread):
         weights_dir = os.path.join(get_base_dir(), "backend_bin", "sp_lg_weights")
         os.makedirs(weights_dir, exist_ok=True)
         os.environ["TORCH_HOME"] = weights_dir
+        os.environ["PYTORCH_JIT"] = "0"
+        try:
+            import torch
+            if hasattr(torch.jit, "_state"):
+                torch.jit._state.disable()
+        except Exception:
+            pass
         self.log_message.emit(f"[SP+LG] Using model weight cache: {weights_dir}")
 
         # --- Load models ---------------------------------------------------

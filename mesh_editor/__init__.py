@@ -642,16 +642,21 @@ class MeshEditorWidget(QWidget):
         
         viewport_hbox.addWidget(self.trans_toolbar)
         
-        self.viewport = MeshEditorViewport(self.viewport_container)
-        viewport_hbox.addWidget(self.viewport, stretch=1)
-        
-        viewport_layout.addLayout(viewport_hbox, stretch=1)
-        
-        layout.addWidget(self.viewport_container, stretch=4)
+        self.viewport = MeshEditorViewport(self)
         
         # Disable properties inputs initially until an object is selected
         self._set_properties_enabled(False)
         self.properties_box.setVisible(False)
+
+    def get_outliner_widget(self):
+        return self.outliner_list
+
+    def get_properties_widget(self):
+        return self.properties_box
+
+    def get_addon_widget(self):
+        return getattr(self, "addon_container", None)
+
 
     def _wire_events(self):
         # 1. Viewport Selection -> Sync Sidebar
