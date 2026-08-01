@@ -1553,6 +1553,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Proximap 1.4.0")
         self.setMinimumSize(1100, 750)
+        self.showMaximized()
         self.image_list = []
         self.worker = None
         
@@ -1635,6 +1636,8 @@ class MainWindow(QMainWindow):
 
         from mesh_editor.pg_chrome import PolygroundChromeBar
         self.chrome_bar = PolygroundChromeBar(self)
+        self.chrome_bar.file_menu.aboutToShow.connect(lambda: self._update_chrome_menus_for_tab(self.page_stack.currentIndex()))
+        self.chrome_bar.edit_menu.aboutToShow.connect(lambda: self._update_chrome_menus_for_tab(self.page_stack.currentIndex()))
         root_layout.addWidget(self.chrome_bar)
 
         self.page_stack = QStackedWidget(central_container)
@@ -2378,6 +2381,9 @@ class MainWindow(QMainWindow):
             return
 
         vw = getattr(self, "viewer_widget", None)
+        has_images = bool(getattr(self, "image_list", []))
+        has_reconstruction = hasattr(self, "current_mvs_dir") or (hasattr(self, "_last_points") and self._last_points is not None)
+        has_project_data = has_images or has_reconstruction
 
         # 1. File Menu for 3D Reconstruction
         file_menu = self.chrome_bar.file_menu
@@ -2391,6 +2397,7 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
 
         a_save = file_menu.addAction("Save Project (.pxm)")
+        a_save.setEnabled(has_project_data)
         if vw and hasattr(vw, "action_save"):
             a_save.triggered.connect(vw.action_save.trigger)
 
@@ -2398,38 +2405,45 @@ class MainWindow(QMainWindow):
         if vw and hasattr(vw, "action_load"):
             a_load.triggered.connect(vw.action_load.trigger)
 
-        # "Recover Last Session" option (Only present in 3D Reconstruction tab!)
+        # "Recover Last Session" option
+        has_backup = os.path.exists(get_backup_metadata_path())
         a_recover = file_menu.addAction("Recover Last Session")
+        a_recover.setEnabled(has_backup)
         if vw and hasattr(vw, "action_recover"):
             a_recover.triggered.connect(vw.action_recover.trigger)
 
         file_menu.addSeparator()
 
         a_export_dense = file_menu.addAction("Export Dense Point Cloud")
+        is_dense_avail = bool(vw and hasattr(vw, "action_export_dense") and vw.action_export_dense.isEnabled())
+        a_export_dense.setEnabled(is_dense_avail)
         if vw and hasattr(vw, "action_export_dense"):
             a_export_dense.triggered.connect(vw.action_export_dense.trigger)
-            a_export_dense.setEnabled(vw.action_export_dense.isEnabled())
 
         a_export_sparse = file_menu.addAction("Export Sparse Model")
+        is_sparse_avail = bool(vw and hasattr(vw, "action_export_sparse") and vw.action_export_sparse.isEnabled())
+        a_export_sparse.setEnabled(is_sparse_avail)
         if vw and hasattr(vw, "action_export_sparse"):
             a_export_sparse.triggered.connect(vw.action_export_sparse.trigger)
-            a_export_sparse.setEnabled(vw.action_export_sparse.isEnabled())
 
         export_mesh = file_menu.addMenu("Export Mesh")
         a_glb = export_mesh.addAction("GLB (.glb)")
         a_obj = export_mesh.addAction("OBJ (.obj)")
         a_usdz = export_mesh.addAction("USDZ (.usdz)")
 
+        is_mesh_avail = bool(vw and hasattr(vw, "action_export_glb") and vw.action_export_glb.isEnabled())
+        a_glb.setEnabled(is_mesh_avail)
+        a_obj.setEnabled(is_mesh_avail)
+        a_usdz.setEnabled(is_mesh_avail)
+        export_mesh.setEnabled(is_mesh_avail)
+
         if vw:
             if hasattr(vw, "action_export_glb"):
                 a_glb.triggered.connect(vw.action_export_glb.trigger)
-                a_glb.setEnabled(vw.action_export_glb.isEnabled())
             if hasattr(vw, "action_export_obj"):
                 a_obj.triggered.connect(vw.action_export_obj.trigger)
-                a_obj.setEnabled(vw.action_export_obj.isEnabled())
             if hasattr(vw, "action_export_usdz"):
                 a_usdz.triggered.connect(vw.action_export_usdz.trigger)
-                a_usdz.setEnabled(vw.action_export_usdz.isEnabled())
 
         file_menu.addSeparator()
 
@@ -2442,15 +2456,23 @@ class MainWindow(QMainWindow):
             a_mob_imp.triggered.connect(vw.action_mobile_import.trigger)
 
         a_mob_exp = file_menu.addAction("Send 3D Model to Mobile")
+        is_mob_avail = bool(vw and hasattr(vw, "action_mobile_export") and vw.action_mobile_export.isEnabled())
+        a_mob_exp.setEnabled(is_mob_avail)
         if vw and hasattr(vw, "action_mobile_export"):
             a_mob_exp.triggered.connect(vw.action_mobile_export.trigger)
 
         # 2. Edit Menu for 3D Reconstruction
         edit_menu = self.chrome_bar.edit_menu
         edit_menu.clear()
+
+        has_selected_photos = False
+        if hasattr(self, "photos_tab") and hasattr(self.photos_tab, "photo_list"):
+            has_selected_photos = bool(self.photos_tab.photo_list.selectedItems())
+
         a_delete_photos = edit_menu.addAction("Delete Selected Photos")
-        if hasattr(self, "photos_widget") and hasattr(self.photos_widget, "_delete_selected"):
-            a_delete_photos.triggered.connect(self.photos_widget._delete_selected)
+        a_delete_photos.setEnabled(has_selected_photos)
+        if hasattr(self, "_remove_selected_photos"):
+            a_delete_photos.triggered.connect(self._remove_selected_photos)
 
         edit_menu.addSeparator()
         a_pref = edit_menu.addAction("Preferences...")
@@ -2463,6 +2485,21 @@ class MainWindow(QMainWindow):
         a_reset_view = window_menu.addAction("Reset 3D Viewport")
         if vw and hasattr(vw, "reset_view"):
             a_reset_view.triggered.connect(vw.reset_view)
+
+        window_menu.addSeparator()
+        a_fullscreen = window_menu.addAction("Toggle Fullscreen")
+        a_fullscreen.setShortcut("F11")
+        a_fullscreen.setCheckable(True)
+        a_fullscreen.setChecked(self.isFullScreen())
+        a_fullscreen.triggered.connect(self._toggle_fullscreen)
+
+    def _toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+            self.showMaximized()
+        else:
+            self.showFullScreen()
+        self._update_chrome_menus_for_tab(self.page_stack.currentIndex())
 
     def _on_mode_changed(self, mode: str):
         if hasattr(self, "polyground_workspace") and self.polyground_workspace:
@@ -2524,11 +2561,20 @@ class MainWindow(QMainWindow):
         reset_action = window_menu.addAction("Reset to Default Layout")
         reset_action.triggered.connect(self.polyground_workspace._build_default_layout)
 
+        window_menu.addSeparator()
+        a_fullscreen = window_menu.addAction("Toggle Fullscreen")
+        a_fullscreen.setShortcut("F11")
+        a_fullscreen.setCheckable(True)
+        a_fullscreen.setChecked(self.isFullScreen())
+        a_fullscreen.triggered.connect(self._toggle_fullscreen)
+
     def _setup_chrome_menu_actions(self):
         if not hasattr(self, "mesh_editor_coordinator") or not self.mesh_editor_coordinator:
             return
 
         ed = self.mesh_editor_coordinator
+        has_mesh = bool(getattr(ed, "mesh_nodes", {})) or (getattr(ed, "active_mesh", None) is not None)
+        has_reconstruction = hasattr(self, "current_mvs_dir") or (hasattr(self, "_last_points") and self._last_points is not None)
 
         # 1. File Menu
         file_menu = self.chrome_bar.file_menu
@@ -2539,6 +2585,7 @@ class MainWindow(QMainWindow):
             a_import.triggered.connect(ed._on_import_model_clicked)
 
         a_rec = file_menu.addAction("Load Reconstructed Model")
+        a_rec.setEnabled(has_reconstruction)
         if hasattr(ed, '_on_load_reconstructed_model_clicked'):
             a_rec.triggered.connect(ed._on_load_reconstructed_model_clicked)
 
@@ -2549,33 +2596,43 @@ class MainWindow(QMainWindow):
         file_menu.addSeparator()
 
         a_glb = file_menu.addAction("Export Scene (.glb)")
+        a_glb.setEnabled(has_mesh)
         if hasattr(ed, '_on_export_scene_clicked'):
             a_glb.triggered.connect(lambda: ed._on_export_scene_clicked('glb'))
 
         a_obj = file_menu.addAction("Export Scene (.obj)")
+        a_obj.setEnabled(has_mesh)
         if hasattr(ed, '_on_export_scene_clicked'):
             a_obj.triggered.connect(lambda: ed._on_export_scene_clicked('obj'))
 
         a_usdz = file_menu.addAction("Export Scene (.usdz)")
+        a_usdz.setEnabled(has_mesh)
         if hasattr(ed, '_on_export_scene_clicked'):
             a_usdz.triggered.connect(lambda: ed._on_export_scene_clicked('usdz'))
 
         file_menu.addSeparator()
 
         a_upload = file_menu.addAction("Upload to Proximap")
+        a_upload.setEnabled(has_mesh)
         a_upload.triggered.connect(self._upload_mesh_editor_scene)
 
         # 2. Edit Menu
         edit_menu = self.chrome_bar.edit_menu
         edit_menu.clear()
 
+        has_undo = bool(getattr(ed, "undo_stack", []))
+        has_redo = bool(getattr(ed, "redo_stack", []))
+        has_selection = (getattr(ed, "selected_node", None) is not None) or (getattr(ed, "active_mesh", None) is not None)
+
         a_undo = edit_menu.addAction("Undo")
         a_undo.setShortcut("Ctrl+Z")
+        a_undo.setEnabled(has_undo)
         if hasattr(ed, '_perform_undo'):
             a_undo.triggered.connect(ed._perform_undo)
 
         a_redo = edit_menu.addAction("Redo")
         a_redo.setShortcut("Ctrl+Y")
+        a_redo.setEnabled(has_redo)
         if hasattr(ed, '_perform_redo'):
             a_redo.triggered.connect(ed._perform_redo)
 
@@ -2583,6 +2640,7 @@ class MainWindow(QMainWindow):
 
         a_del = edit_menu.addAction("Delete Selected")
         a_del.setShortcut("Delete")
+        a_del.setEnabled(has_selection)
         if hasattr(ed, '_on_delete_selected_mesh'):
             a_del.triggered.connect(ed._on_delete_selected_mesh)
 
@@ -6060,7 +6118,7 @@ class StartupManager:
         self.window = MainWindow()
         if os.path.exists(self.icon_path):
             self.window.setWindowIcon(QIcon(self.icon_path))
-        self.window.show()
+        self.window.showMaximized()
         if self.splash:
             self.splash.finish(self.window)
         QTimer.singleShot(500, self.window._check_startup_recovery)
