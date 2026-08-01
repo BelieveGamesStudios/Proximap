@@ -7,7 +7,7 @@ and manages layout persistence.
 import os
 import json
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame, QComboBox
 import PySide6QtAds as ads
 
 from mesh_editor.pg_panels import OutlinerPanel, PropertiesPanel, StatsChip, ToolShelfWidget
@@ -16,8 +16,11 @@ from mesh_editor.pg_timeline import TimelineWidget
 
 class ViewportDockContainer(QWidget):
     """
-    Wrapper container for the QOpenGLWidget viewport and StatsChip corner overlay.
+    Wrapper container for the QOpenGLWidget viewport, StatsChip corner overlay,
+    and Object Mode / Edit Mode dropdown notch overlay anchored in top-left.
     """
+    mode_changed = Signal(str)
+
     def __init__(self, viewport_widget: QWidget, get_stats_cb, parent=None):
         super().__init__(parent)
         self.viewport_widget = viewport_widget
@@ -30,17 +33,62 @@ class ViewportDockContainer(QWidget):
         layout.setSpacing(0)
         layout.addWidget(self.viewport_widget)
 
+        # Mode Selector Notch anchored in top-left corner directly under + Proximap logo
+        self.mode_notch = QComboBox(self)
+        self.mode_notch.addItems(["Object Mode", "Edit Mode"])
+        self.mode_notch.setFixedHeight(26)
+        self.mode_notch.setCursor(Qt.PointingHandCursor)
+        self.mode_notch.setStyleSheet("""
+            QComboBox {
+                background-color: rgba(28, 28, 28, 230);
+                color: #FFFFFF;
+                font-weight: bold;
+                font-size: 11px;
+                border: 1px solid rgba(80, 80, 80, 200);
+                border-radius: 4px;
+                padding: 2px 10px;
+                min-width: 95px;
+            }
+            QComboBox:hover {
+                border-color: #00E676;
+                background-color: rgba(40, 40, 40, 250);
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 16px;
+                border-left: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1E1E1E;
+                color: #CCCCCC;
+                selection-background-color: #00E676;
+                selection-color: #121212;
+                border: 1px solid #3A3A3A;
+                outline: 0;
+            }
+        """)
+        self.mode_notch.currentTextChanged.connect(
+            lambda txt: self.mode_changed.emit(txt.replace(" Mode", ""))
+        )
+        self.mode_notch.show()
+
         # Stats Overlay Chip anchored in bottom-left corner
         self.stats_chip = StatsChip(self.get_stats_cb, self)
         self.stats_chip.show()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Position stats chip in bottom-left with 10px margin
-        chip_size = self.stats_chip.sizeHint()
         margin = 12
+        # Position Mode Notch overlay in top-left corner directly under + Proximap
+        self.mode_notch.move(margin, margin)
+        self.mode_notch.raise_()
+
+        # Position stats chip in bottom-left with 12px margin
+        chip_size = self.stats_chip.sizeHint()
         y_pos = self.height() - chip_size.height() - margin
         self.stats_chip.move(margin, max(margin, y_pos))
+        self.stats_chip.raise_()
 
 
 class PolygroundWorkspace(QWidget):
@@ -111,9 +159,10 @@ class PolygroundWorkspace(QWidget):
         self.is_initialized = True
 
         # 1. Viewport Dock (Non-floatable to prevent QOpenGLWidget context destruction)
-        viewport_container = ViewportDockContainer(self.editor.viewport, self._get_stats, self)
+        self.viewport_container = ViewportDockContainer(self.editor.viewport, self._get_stats, self)
+        self.viewport_container.mode_changed.connect(self._on_mode_changed)
         viewport_dock = ads.CDockWidget("3D Viewport", self)
-        viewport_dock.setWidget(viewport_container)
+        viewport_dock.setWidget(self.viewport_container)
         viewport_dock.setFeature(ads.CDockWidget.DockWidgetFloatable, False)
         viewport_dock.setFeature(ads.CDockWidget.DockWidgetClosable, False)
 

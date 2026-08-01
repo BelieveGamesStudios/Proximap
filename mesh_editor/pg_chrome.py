@@ -4,8 +4,9 @@ Provides a modern, Blender-inspired chrome header bar with modular segmented con
 """
 
 import sys
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QFont, QAction
+import os
+from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtGui import QColor, QFont, QAction, QIcon
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QLabel, 
     QComboBox, QToolButton, QMenu, QFrame, QSizePolicy, QDialog
@@ -177,23 +178,30 @@ class PolygroundChromeBar(QFrame):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(8)
 
-        # Proximap Logo Button
+        # Proximap Logo Button (face.png icon)
         self.logo_btn = QToolButton(self.left_region)
-        self.logo_btn.setText(" ✦ Proximap ")
+        self.logo_btn.setText("")  # Icon only, no spelled out text
         self.logo_btn.setPopupMode(QToolButton.InstantPopup)
         self.logo_btn.setCursor(Qt.PointingHandCursor)
+        self.logo_btn.setToolTip("Proximap")
+        self.logo_btn.setFixedSize(30, 28)
+
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        icon_path = os.path.join(base_dir, "public", "face.png")
+        if os.path.exists(icon_path):
+            self.logo_btn.setIcon(QIcon(icon_path))
+            self.logo_btn.setIconSize(QSize(22, 22))
+
         self.logo_btn.setStyleSheet("""
             QToolButton {
                 background-color: #1A1A1A;
-                color: #00E676;
-                font-weight: bold;
-                font-size: 12px;
                 border: 1px solid #00E676;
-                border-radius: 4px;
-                padding: 4px 8px;
+                border-radius: 6px;
+                padding: 2px;
             }
             QToolButton:hover {
-                background-color: #242424;
+                background-color: #262626;
+                border-color: #00FF88;
             }
             QToolButton::menu-indicator {
                 image: none;
@@ -225,35 +233,6 @@ class PolygroundChromeBar(QFrame):
 
         # Backward compatibility reference
         self.app_menu_btn = self.logo_btn
-
-        # Mode Dropdown Notch directly under/beside logo button
-        self.mode_notch = QComboBox(self.left_region)
-        self.mode_notch.addItems(["Object Mode", "Edit Mode", "Sculpt Mode"])
-        self.mode_notch.setFixedHeight(26)
-        self.mode_notch.setCursor(Qt.PointingHandCursor)
-        self.mode_notch.setStyleSheet("""
-            QComboBox {
-                background-color: #222222;
-                color: #00E676;
-                font-weight: bold;
-                font-size: 11px;
-                border: 1px solid #333333;
-                border-radius: 4px;
-                padding: 2px 8px;
-                min-width: 96px;
-            }
-            QComboBox:hover {
-                border-color: #00E676;
-                background-color: #2A2A2A;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1E1E1E;
-                color: #CCCCCC;
-                selection-background-color: #00E676;
-                selection-color: #121212;
-            }
-        """)
-        self.mode_notch.currentTextChanged.connect(lambda txt: self.mode_changed.emit(txt.replace(" Mode", "")))
 
         # Top Menu Bar (File / Edit / Window / Help)
         from PySide6.QtWidgets import QMenuBar
@@ -302,7 +281,6 @@ class PolygroundChromeBar(QFrame):
         self.help_menu = self.menu_bar.addMenu("Help")
 
         left_layout.addWidget(self.logo_btn)
-        left_layout.addWidget(self.mode_notch)
         left_layout.addWidget(self.menu_bar)
 
         # ---------------------------------------------------------------------
@@ -313,8 +291,12 @@ class PolygroundChromeBar(QFrame):
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(0)
 
-        # Primary Segmented Toggle: Polyground | 3D Reconstruction
-        self.tab_segmented = SegmentedControl(["Polyground", "3D Reconstruction"], default_index=0, parent=self.center_region)
+        # Primary Segmented Toggle: 3D Reconstruction | Polyground
+        from preferences_dialog import load_preferences
+        init_tab = load_preferences().get("startup_tab", "3D Reconstruction")
+        default_idx = 0 if init_tab == "3D Reconstruction" else 1
+
+        self.tab_segmented = SegmentedControl(["3D Reconstruction", "Polyground"], default_index=default_idx, parent=self.center_region)
         self.tab_segmented.index_changed.connect(self.tab_switch_requested.emit)
         center_layout.addWidget(self.tab_segmented)
 
@@ -360,27 +342,7 @@ class PolygroundChromeBar(QFrame):
         """)
         self.preset_combo.currentTextChanged.connect(self.layout_preset_changed.emit)
         right_layout.addWidget(self.preset_combo)
-
-        # Save State Indicator
-        self.save_indicator = SaveStateIndicator(self.right_region)
-        right_layout.addWidget(self.save_indicator)
-
-        # Profile Icon
-        profile_icon = QLabel(" P ", self.right_region)
-        profile_icon.setFixedSize(24, 24)
-        profile_icon.setAlignment(Qt.AlignCenter)
-        profile_icon.setStyleSheet("""
-            QLabel {
-                background-color: #2B2B2B;
-                color: #00E676;
-                font-weight: bold;
-                font-size: 11px;
-                border: 1px solid #00E676;
-                border-radius: 12px;
-            }
-        """)
-        profile_icon.setToolTip("ProximaXR Profile")
-        right_layout.addWidget(profile_icon)
+        self.save_indicator = None
 
         # Initial layout update
         self._update_region_geometries()
@@ -438,6 +400,16 @@ class PolygroundChromeBar(QFrame):
 
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(24, 24, 24, 24)
+
+    @property
+    def mode_notch(self):
+        """Dynamic reference to the Object Mode notch widget inside ViewportDockContainer."""
+        win = self.window()
+        if win and hasattr(win, "polyground_workspace") and win.polyground_workspace:
+            vp = getattr(win.polyground_workspace, "viewport_container", None)
+            if vp and hasattr(vp, "mode_notch"):
+                return vp.mode_notch
+        return None
         layout.setSpacing(10)
 
         brand = QLabel("✦ PROXIMAP", dialog)

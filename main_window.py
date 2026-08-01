@@ -251,12 +251,31 @@ class ViewerLoadWorker(QThread):
             mode      = self.mode
             points = colors = faces = texcoords = texture_path = None
 
+            # If given a .mvs project file, resolve to corresponding .ply / .obj geometry file
+            if file_path.lower().endswith(".mvs"):
+                mvs_dir = os.path.dirname(file_path)
+                base = os.path.splitext(os.path.basename(file_path))[0]
+                candidates = [base + ".ply", base + "_mesh.ply", "scene_dense.ply", "scene_dense_refcloud.ply", "scene.ply"]
+                for cand in candidates:
+                    cand_path = os.path.join(mvs_dir, cand)
+                    if os.path.exists(cand_path):
+                        file_path = cand_path
+                        break
+
+            ext = os.path.splitext(file_path)[1].lower()
+
             if mode == 1:
                 # Dense Point Cloud
-                ext = os.path.splitext(file_path)[1].lower()
                 if ext == '.ply':
-                    import struct
                     points, colors, _ = _read_ply_static(file_path)
+                    # If fast PLY static reader returned empty, try point_cloud_io fallback
+                    if (points is None or len(points) == 0) and os.path.exists(file_path):
+                        import point_cloud_io
+                        res = point_cloud_io.load_point_cloud(file_path)
+                        if res.success and res.cloud is not None:
+                            points = np.asarray(res.cloud.points, dtype=np.float32)
+                            colors = (np.asarray(res.cloud.colors) * 255).astype(np.uint8) \
+                                     if res.has_colors else np.full((len(points), 3), 180, np.uint8)
                 else:
                     import point_cloud_io
                     res = point_cloud_io.load_point_cloud(file_path)
@@ -266,9 +285,15 @@ class ViewerLoadWorker(QThread):
                                  if res.has_colors else np.full((len(points), 3), 180, np.uint8)
 
             elif mode == 2:
-                ext = os.path.splitext(file_path)[1].lower()
                 if ext == '.ply':
                     points, colors, faces = _read_ply_static(file_path)
+                    if (points is None or len(points) == 0) and os.path.exists(file_path):
+                        import point_cloud_io
+                        res = point_cloud_io.load_point_cloud(file_path)
+                        if res.success and res.cloud is not None:
+                            points = np.asarray(res.cloud.points, dtype=np.float32)
+                            colors = (np.asarray(res.cloud.colors) * 255).astype(np.uint8) \
+                                     if res.has_colors else np.full((len(points), 3), 180, np.uint8)
                 elif ext not in ('.obj', '.ply'):
                     import point_cloud_io
                     res = point_cloud_io.load_point_cloud(file_path)
@@ -566,30 +591,12 @@ class ViewerWrapperWidget(QFrame):
         self.control_bar = QFrame(self)
         self.control_bar.setFixedHeight(50)
         self.control_bar.setStyleSheet("background-color: #242424; border-bottom: 1px solid #2B2B2B; border-top-left-radius: 8px; border-top-right-radius: 8px;")
+        self.control_bar.hide()
         control_layout = QHBoxLayout(self.control_bar)
         control_layout.setContentsMargins(10, 5, 10, 5)
         
-        # Dropdown File Menu
+        # Dropdown File Menu (kept for menu action mapping)
         self.file_menu_btn = QPushButton("File ▾", self.control_bar)
-        self.file_menu_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 11px;
-                padding: 4px 10px;
-                font-weight: normal;
-                background-color: #333333;
-                color: #ffffff;
-                border: 1px solid #444444;
-                border-radius: 4px;
-                margin-left: 0px;
-            }
-            QPushButton:hover {
-                background-color: #444444;
-                border-color: #00E676;
-            }
-            QPushButton::menu-indicator {
-                image: none;
-            }
-        """)
         self.file_menu = QMenu(self)
         self.file_menu.setStyleSheet("""
             QMenu {
@@ -644,70 +651,24 @@ class ViewerWrapperWidget(QFrame):
         
         self.file_menu_btn.setMenu(self.file_menu)
         
-        # Dropdown to choose camera tracking style
-        self.cam_select = QComboBox(self.control_bar)
-        self.cam_select.setMinimumWidth(150)
+        # Dropdown to choose camera tracking style (Arcball & Turntable)
+        self.cam_select = QComboBox(self)
         self.cam_select.addItems([
             "Arcball Camera",
-            "Turntable Camera",
-            "Fly Camera",
-            "Pan-Zoom Camera",
-            "Magnify Camera"
+            "Turntable Camera"
         ])
+        self.cam_select.hide()
         
         # Checkbox to toggle controls display overlay
-        self.show_controls_cb = QCheckBox("Show Controls", self.control_bar)
-        self.show_controls_cb.setStyleSheet("""
-            QCheckBox {
-                color: #ffffff;
-                font-size: 11px;
-                margin-left: 10px;
-                margin-right: 10px;
-            }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-            }
-        """)
+        self.show_controls_cb = QCheckBox("Show Controls", self)
+        self.show_controls_cb.hide()
         
-        # Dropdown to choose MVS scene mode
-        self.mode_select = QComboBox(self.control_bar)
-        self.mode_select.setMinimumWidth(200)
-        self.mode_select.addItems([
-            "Sparse Point Cloud & Cameras",
-            "Dense Point Cloud",
-            "Textured Mesh"
-        ])
+        # Action buttons (kept for action mapping)
+        self.bg_btn = QPushButton("BG Color", self)
+        self.bg_btn.hide()
         
-        # Action buttons
-        self.bg_btn = QPushButton("BG Color", self.control_bar)
-        self.bg_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 11px;
-                padding: 4px 8px;
-                font-weight: normal;
-                background-color: #333333;
-                color: #ffffff;
-                border: 1px solid #444444;
-            }
-            QPushButton:hover {
-                background-color: #444444;
-                border-color: #00E676;
-            }
-        """)
-        
-        self.reload_btn = QPushButton("Reload", self.control_bar)
-        self.reload_btn.setStyleSheet("font-size: 11px; padding: 4px 8px; font-weight: normal;")
-        
-        control_layout.addWidget(self.file_menu_btn)
-        control_layout.addStretch()
-        control_layout.addWidget(self.cam_select)
-        control_layout.addWidget(self.show_controls_cb)
-        control_layout.addWidget(self.mode_select)
-        control_layout.addWidget(self.bg_btn)
-        control_layout.addWidget(self.reload_btn)
-        
-        layout.addWidget(self.control_bar)
+        self.reload_btn = QPushButton("Reload", self)
+        self.reload_btn.hide()
         
         # Container for the embedded window
         self.container_area = QWidget(self)
@@ -723,21 +684,63 @@ class ViewerWrapperWidget(QFrame):
         
         layout.addWidget(self.container_area)
         
+        # Mode Selector Notch anchored floating over top-left corner of 3D Reconstruction Viewport
+        self.mode_notch = QComboBox(self.container_area)
+        self.mode_notch.addItems([
+            "Sparse Point Cloud & Cameras",
+            "Dense Point Cloud",
+            "Textured Mesh"
+        ])
+        self.mode_notch.setFixedHeight(26)
+        self.mode_notch.setCursor(Qt.PointingHandCursor)
+        self.mode_notch.setStyleSheet("""
+            QComboBox {
+                background-color: rgba(28, 28, 28, 230);
+                color: #FFFFFF;
+                font-weight: bold;
+                font-size: 11px;
+                border: 1px solid rgba(80, 80, 80, 200);
+                border-radius: 4px;
+                padding: 2px 10px;
+                min-width: 170px;
+            }
+            QComboBox:hover {
+                border-color: #00E676;
+                background-color: rgba(40, 40, 40, 250);
+            }
+            QComboBox::drop-down {
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 16px;
+                border-left: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #1E1E1E;
+                color: #CCCCCC;
+                selection-background-color: #00E676;
+                selection-color: #121212;
+                border: 1px solid #3A3A3A;
+                outline: 0;
+            }
+        """)
+        self.mode_notch.show()
+        
+        # Backward compatibility alias
+        self.mode_select = self.mode_notch
+        
         # Setup actions
         self.reload_btn.clicked.connect(self._on_reload_clicked)
-        self.mode_select.currentIndexChanged.connect(self._on_mode_changed)
+        self.mode_notch.currentIndexChanged.connect(self._on_mode_changed)
         self.cam_select.currentIndexChanged.connect(self.camera_changed.emit)
         
         self.current_mvs_dir = None
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        w = self.width()
-            
-        if w < 600:
-            self.show_controls_cb.setText("Controls")
-            self.cam_select.setMinimumWidth(100)
-            self.mode_select.setMinimumWidth(140)
+        if hasattr(self, "mode_notch") and self.mode_notch:
+            margin = 12
+            self.mode_notch.move(margin, margin)
+            self.mode_notch.raise_()
             self.bg_btn.setText("Color")
         else:
             self.show_controls_cb.setText("Show Controls")
@@ -812,6 +815,14 @@ class ViewerWrapperWidget(QFrame):
         if index == 0:
             return os.path.join(self.current_mvs_dir, "scene.mvs")
         elif index == 1:
+            for candidate in [
+                "scene_dense.ply",
+                "scene_dense_refcloud.ply",
+                "scene_dense.mvs"
+            ]:
+                path = os.path.join(self.current_mvs_dir, candidate)
+                if os.path.exists(path):
+                    return path
             return os.path.join(self.current_mvs_dir, "scene_dense.mvs")
         elif index == 2:
             # We want to load the textured mesh.
@@ -2267,25 +2278,181 @@ class MainWindow(QMainWindow):
         placeholder_layout.addWidget(loading_container, 0, Qt.AlignCenter)
         placeholder_layout.addStretch()
         
-        # Add pages to StackedWidget: Page 0 = Polyground, Page 1 = 3D Reconstruction
-        self.page_stack.addWidget(self.mesh_editor_placeholder)
+        # Add pages to StackedWidget: Page 0 = 3D Reconstruction, Page 1 = Polyground
         self.page_stack.addWidget(reconstruction_tab)
+        self.page_stack.addWidget(self.mesh_editor_placeholder)
         
         self.chrome_bar.tab_switch_requested.connect(self._on_chrome_tab_switch)
         self.chrome_bar.mode_changed.connect(self._on_mode_changed)
         
-        # Lazy load Polyground on startup (since active by default)
+        # Set initial page stack & chrome menus based on user preference (Default: 3D Reconstruction)
+        from preferences_dialog import load_preferences
+        init_tab = load_preferences().get("startup_tab", "3D Reconstruction")
+        init_idx = 0 if init_tab == "3D Reconstruction" else 1
+        self.page_stack.setCurrentIndex(init_idx)
+        self._update_chrome_menus_for_tab(init_idx)
+
+        # Lazy load Polyground workspace on startup
         QTimer.singleShot(50, self._load_mesh_editor)
         
         self._set_process_btn_state("idle")
 
     def _on_chrome_tab_switch(self, index: int):
+        # On Linux, the VisPy OpenGL canvas is a native X11 window that the
+        # compositor continues drawing for 1-2 frames after Qt hides it — so
+        # simply hiding it or deferring by one tick isn't enough. The robust fix
+        # is to place an opaque cover widget OVER the page_stack area for the
+        # duration of the transition so there is nothing for the X11 compositor
+        # to bleed through onto.
+        self._show_tab_switch_cover()
+        # Give the cover one paint pass to flush, then do the actual switch.
+        QTimer.singleShot(32, lambda: self._do_tab_switch(index))
+
+    def _show_tab_switch_cover(self):
+        """Place a solid opaque cover over the page_stack to block OpenGL bleed-through."""
+        from PySide6.QtWidgets import QFrame
+        if not hasattr(self, "_tab_cover") or self._tab_cover is None:
+            self._tab_cover = QFrame(self.page_stack)
+            self._tab_cover.setStyleSheet("background-color: #111111;")
+            self._tab_cover.setAttribute(Qt.WA_OpaquePaintEvent, True)
+        # Resize cover to exactly match the page_stack geometry and bring to front
+        self._tab_cover.setGeometry(self.page_stack.rect())
+        self._tab_cover.raise_()
+        self._tab_cover.show()
+
+    def _hide_tab_switch_cover(self):
+        """Remove the transition cover after the switch is complete."""
+        if hasattr(self, "_tab_cover") and self._tab_cover is not None:
+            self._tab_cover.hide()
+
+    def _do_tab_switch(self, index: int):
+        # Index 0 = 3D Reconstruction, Index 1 = Polyground
+        # Hide OpenGL canvas before switching to Polyground (Index 1) as an extra precaution
+        if index == 1 and hasattr(self, "canvas") and self.canvas and self.canvas.native:
+            self.canvas.native.hide()
+
         self.page_stack.setCurrentIndex(index)
-        if index == 0 and getattr(self, "mesh_editor_tab", None) is None:
+        self._update_chrome_menus_for_tab(index)
+
+        # Restore canvas visibility when switching to 3D Reconstruction tab (Index 0)
+        if index == 0 and hasattr(self, "canvas") and self.canvas and self.canvas.native:
+            self.canvas.native.show()
+
+        # Remove the cover after the new page has had one frame to paint
+        QTimer.singleShot(32, self._hide_tab_switch_cover)
+
+        if index == 1 and getattr(self, "mesh_editor_tab", None) is None:
             if not getattr(self, "_mesh_editor_loading", False):
                 self._mesh_editor_loading = True
                 QApplication.setOverrideCursor(Qt.WaitCursor)
                 QTimer.singleShot(100, self._load_mesh_editor)
+
+    def _update_chrome_menus_for_tab(self, index: int):
+        if not hasattr(self, "chrome_bar") or not self.chrome_bar:
+            return
+
+        if index == 0:
+            # 3D Reconstruction Tab (Index 0): Hide Mode Notch & Setup Reconstruction Menus
+            if hasattr(self.chrome_bar, "mode_notch") and self.chrome_bar.mode_notch:
+                self.chrome_bar.mode_notch.setVisible(False)
+            self._setup_reconstruction_menu_actions()
+        elif index == 1:
+            # Polyground Workspace Tab (Index 1): Show Mode Notch (Object/Edit) & Polyground Menus
+            if hasattr(self.chrome_bar, "mode_notch") and self.chrome_bar.mode_notch:
+                self.chrome_bar.mode_notch.setVisible(True)
+            self._setup_window_menu()
+            self._setup_chrome_menu_actions()
+
+    def _setup_reconstruction_menu_actions(self):
+        if not hasattr(self, "chrome_bar") or not self.chrome_bar:
+            return
+
+        vw = getattr(self, "viewer_widget", None)
+
+        # 1. File Menu for 3D Reconstruction
+        file_menu = self.chrome_bar.file_menu
+        file_menu.clear()
+
+        a_new = file_menu.addAction("New Project")
+        a_new.setShortcut("Ctrl+N")
+        if vw and hasattr(vw, "action_new"):
+            a_new.triggered.connect(vw.action_new.trigger)
+
+        file_menu.addSeparator()
+
+        a_save = file_menu.addAction("Save Project (.pxm)")
+        if vw and hasattr(vw, "action_save"):
+            a_save.triggered.connect(vw.action_save.trigger)
+
+        a_load = file_menu.addAction("Load Project (.pxm)")
+        if vw and hasattr(vw, "action_load"):
+            a_load.triggered.connect(vw.action_load.trigger)
+
+        # "Recover Last Session" option (Only present in 3D Reconstruction tab!)
+        a_recover = file_menu.addAction("Recover Last Session")
+        if vw and hasattr(vw, "action_recover"):
+            a_recover.triggered.connect(vw.action_recover.trigger)
+
+        file_menu.addSeparator()
+
+        a_export_dense = file_menu.addAction("Export Dense Point Cloud")
+        if vw and hasattr(vw, "action_export_dense"):
+            a_export_dense.triggered.connect(vw.action_export_dense.trigger)
+            a_export_dense.setEnabled(vw.action_export_dense.isEnabled())
+
+        a_export_sparse = file_menu.addAction("Export Sparse Model")
+        if vw and hasattr(vw, "action_export_sparse"):
+            a_export_sparse.triggered.connect(vw.action_export_sparse.trigger)
+            a_export_sparse.setEnabled(vw.action_export_sparse.isEnabled())
+
+        export_mesh = file_menu.addMenu("Export Mesh")
+        a_glb = export_mesh.addAction("GLB (.glb)")
+        a_obj = export_mesh.addAction("OBJ (.obj)")
+        a_usdz = export_mesh.addAction("USDZ (.usdz)")
+
+        if vw:
+            if hasattr(vw, "action_export_glb"):
+                a_glb.triggered.connect(vw.action_export_glb.trigger)
+                a_glb.setEnabled(vw.action_export_glb.isEnabled())
+            if hasattr(vw, "action_export_obj"):
+                a_obj.triggered.connect(vw.action_export_obj.trigger)
+                a_obj.setEnabled(vw.action_export_obj.isEnabled())
+            if hasattr(vw, "action_export_usdz"):
+                a_usdz.triggered.connect(vw.action_export_usdz.trigger)
+                a_usdz.setEnabled(vw.action_export_usdz.isEnabled())
+
+        file_menu.addSeparator()
+
+        a_imp_cloud = file_menu.addAction("Import Point Cloud")
+        if vw and hasattr(vw, "action_import_standalone"):
+            a_imp_cloud.triggered.connect(vw.action_import_standalone.trigger)
+
+        a_mob_imp = file_menu.addAction("Import Images/Videos from Mobile Device")
+        if vw and hasattr(vw, "action_mobile_import"):
+            a_mob_imp.triggered.connect(vw.action_mobile_import.trigger)
+
+        a_mob_exp = file_menu.addAction("Send 3D Model to Mobile")
+        if vw and hasattr(vw, "action_mobile_export"):
+            a_mob_exp.triggered.connect(vw.action_mobile_export.trigger)
+
+        # 2. Edit Menu for 3D Reconstruction
+        edit_menu = self.chrome_bar.edit_menu
+        edit_menu.clear()
+        a_delete_photos = edit_menu.addAction("Delete Selected Photos")
+        if hasattr(self, "photos_widget") and hasattr(self.photos_widget, "_delete_selected"):
+            a_delete_photos.triggered.connect(self.photos_widget._delete_selected)
+
+        edit_menu.addSeparator()
+        a_pref = edit_menu.addAction("Preferences...")
+        a_pref.setShortcut("Ctrl+Alt+P")
+        a_pref.triggered.connect(self._open_preferences_dialog)
+
+        # 3. Window Menu for 3D Reconstruction
+        window_menu = self.chrome_bar.window_menu
+        window_menu.clear()
+        a_reset_view = window_menu.addAction("Reset 3D Viewport")
+        if vw and hasattr(vw, "reset_view"):
+            a_reset_view.triggered.connect(vw.reset_view)
 
     def _on_mode_changed(self, mode: str):
         if hasattr(self, "polyground_workspace") and self.polyground_workspace:
@@ -2304,9 +2471,9 @@ class MainWindow(QMainWindow):
             self.polyground_workspace = PolygroundWorkspace(self.mesh_editor_coordinator, self)
             self.polyground_workspace.initialize()
 
-            # Attach Window menu & File/Edit actions to top chrome bar
-            self._setup_window_menu()
-            self._setup_chrome_menu_actions()
+            # Attach Window menu & File/Edit actions to top chrome bar if Polyground tab is active
+            if self.page_stack.currentIndex() == 1:
+                self._update_chrome_menus_for_tab(1)
 
             # macOS native menu bar shim if on Darwin
             self.chrome_bar.attach_native_mac_menu(self)
@@ -2409,12 +2576,30 @@ class MainWindow(QMainWindow):
         if hasattr(ed, '_on_delete_selected_mesh'):
             a_del.triggered.connect(ed._on_delete_selected_mesh)
 
+        edit_menu.addSeparator()
+        a_pref = edit_menu.addAction("Preferences...")
+        a_pref.setShortcut("Ctrl+Alt+P")
+        if hasattr(ed, '_open_preferences'):
+            a_pref.triggered.connect(ed._open_preferences)
+        else:
+            a_pref.triggered.connect(self._open_preferences_dialog)
+
         # 3. Help Menu
         help_menu = self.chrome_bar.help_menu
         help_menu.clear()
 
         a_docs = help_menu.addAction("Proximap Documentation")
         a_docs.triggered.connect(lambda: QMessageBox.information(self, "Documentation", "Visit https://proximaxr.space for documentation."))
+
+    def _open_preferences_dialog(self):
+        try:
+            from preferences_dialog import PreferencesDialog
+            ed = getattr(self, 'mesh_editor_coordinator', self)
+            addon_mgr = getattr(ed, 'addon_manager', None)
+            dlg = PreferencesDialog(addon_mgr, ed, self)
+            dlg.exec()
+        except Exception as e:
+            print(f"[WARNING] Could not open preferences dialog: {e}")
 
         a_shortcuts = help_menu.addAction("Keyboard Shortcuts")
         a_shortcuts.triggered.connect(lambda: QMessageBox.information(self, "Shortcuts", "Translate: W | Rotate: E | Scale: R\nUndo: Ctrl+Z | Redo: Ctrl+Y | Delete: Del"))
