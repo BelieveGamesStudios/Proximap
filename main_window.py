@@ -253,6 +253,9 @@ class ViewerLoadWorker(QThread):
 
             if mode == 1:
                 # Dense Point Cloud
+                ply_path = file_path.replace(".mvs", ".ply")
+                if os.path.exists(ply_path):
+                    file_path = ply_path
                 ext = os.path.splitext(file_path)[1].lower()
                 if ext == '.ply':
                     import struct
@@ -287,96 +290,177 @@ def _read_ply_static(path):
     import numpy as np, struct
     if not os.path.exists(path):
         return np.zeros((0,3), np.float32), np.zeros((0,3), np.uint8), None
-    with open(path, 'rb') as f:
-        header_lines = []
-        while True:
-            line = f.readline().decode('utf-8', errors='ignore').strip()
-            header_lines.append(line)
-            if line == 'end_header':
-                break
-        num_vertices = num_faces = 0
-        format_type = None
-        vertex_properties = []
-        element_type = None
-        for line in header_lines:
-            parts = line.split()
-            if not parts: continue
-            if parts[0] == 'format':  format_type = parts[1]
-            elif parts[0] == 'element':
-                element_type = parts[1]
-                if element_type == 'vertex': num_vertices = int(parts[2])
-                elif element_type == 'face': num_faces    = int(parts[2])
-            elif parts[0] == 'property' and element_type == 'vertex':
-                if parts[1] == 'list':
-                    vertex_properties.append((parts[4], 'list', True, parts[2], parts[3]))
+    try:
+        with open(path, 'rb') as f:
+            header_lines = []
+            while True:
+                line = f.readline().decode('utf-8', errors='ignore').strip()
+                header_lines.append(line)
+                if line == 'end_header':
+                    break
+            num_vertices = num_faces = 0
+            format_type = None
+            vertex_properties = []
+            element_type = None
+            for line in header_lines:
+                parts = line.split()
+                if not parts: continue
+                if parts[0] == 'format':  format_type = parts[1]
+                elif parts[0] == 'element':
+                    element_type = parts[1]
+                    if element_type == 'vertex': num_vertices = int(parts[2])
+                    elif element_type == 'face': num_faces    = int(parts[2])
+                elif parts[0] == 'property' and element_type == 'vertex':
+                    if parts[1] == 'list':
+                        vertex_properties.append((parts[4], 'list', True, parts[2], parts[3]))
+                    else:
+                        vertex_properties.append((parts[2], parts[1], False, None, None))
+            type_map = {
+                'char':(np.int8,1),'uchar':(np.uint8,1),'short':(np.int16,2),'ushort':(np.uint16,2),
+                'int':(np.int32,4),'uint':(np.uint32,4),'float':(np.float32,4),'double':(np.float64,8),
+                'int8':(np.int8,1),'uint8':(np.uint8,1),'int16':(np.int16,2),'uint16':(np.uint16,2),
+                'int32':(np.int32,4),'uint32':(np.uint32,4),'float32':(np.float32,4),'float64':(np.float64,8)
+            }
+            type_char_map = {
+                'char': 'b', 'uchar': 'B', 'short': 'h', 'ushort': 'H',
+                'int': 'i', 'uint': 'I', 'float': 'f', 'double': 'd',
+                'int8': 'b', 'uint8': 'B', 'int16': 'h', 'uint16': 'H',
+                'int32': 'i', 'uint32': 'I', 'float32': 'f', 'float64': 'd'
+            }
+            type_sizes = {'b': 1, 'B': 1, 'h': 2, 'H': 2, 'i': 4, 'I': 4, 'f': 4, 'd': 8}
+
+            has_list = any(p[2] for p in vertex_properties)
+            points = np.zeros((num_vertices, 3), dtype=np.float32)
+            colors = None
+            faces  = None
+            prop_names = [p[0] for p in vertex_properties]
+            has_color  = all(c in prop_names for c in ('red','green','blue')) or all(c in prop_names for c in ('r','g','b'))
+            if has_color:
+                colors = np.zeros((num_vertices, 3), dtype=np.uint8)
+
+            if 'binary' in (format_type or ''):
+                if has_list:
+                    fixed_properties = []
+                    list_properties = []
+                    for p in vertex_properties:
+                        if p[2]: list_properties.append(p)
+                        else:
+                            if not list_properties: fixed_properties.append(p)
+
+                    fmt_chars = [type_char_map[t] for name, t, _, _, _ in fixed_properties if t in type_char_map]
+                    fixed_size = sum(type_sizes[c] for c in fmt_chars)
+                    endian_flag = '>' if 'big' in format_type else '<'
+                    fixed_struct = struct.Struct(endian_flag + ''.join(fmt_chars))
+
+                    names = [p[0] for p in fixed_properties]
+                    x_idx = names.index('x') if 'x' in names else -1
+                    y_idx = names.index('y') if 'y' in names else -1
+                    z_idx = names.index('z') if 'z' in names else -1
+
+                    r_name = 'red' if 'red' in names else ('r' if 'r' in names else None)
+                    g_name = 'green' if 'green' in names else ('g' if 'g' in names else None)
+                    b_name = 'blue' if 'blue' in names else ('b' if 'b' in names else None)
+
+                    r_idx = names.index(r_name) if r_name else -1
+                    g_idx = names.index(g_name) if g_name else -1
+                    b_idx = names.index(b_name) if b_name else -1
+
+                    data = f.read()
+                    offset = 0
+
+                    for i in range(num_vertices):
+                        val = fixed_struct.unpack_from(data, offset)
+                        if x_idx != -1: points[i, 0] = val[x_idx]
+                        if y_idx != -1: points[i, 1] = val[y_idx]
+                        if z_idx != -1: points[i, 2] = val[z_idx]
+
+                        if has_color and colors is not None:
+                            if r_idx != -1: colors[i, 0] = val[r_idx]
+                            if g_idx != -1: colors[i, 1] = val[g_idx]
+                            if b_idx != -1: colors[i, 2] = val[b_idx]
+
+                        offset += fixed_size
+
+                        for name, _, _, count_type, item_type in list_properties:
+                            c_char = type_char_map[count_type]
+                            c_size = type_sizes[c_char]
+                            count = struct.unpack_from(endian_flag + c_char, data, offset)[0]
+                            offset += c_size
+
+                            i_char = type_char_map[item_type]
+                            i_size = type_sizes[i_char]
+                            offset += count * i_size
+
+                    if num_faces > 0 and len(data) > offset:
+                        try:
+                            faces_list = []
+                            count_fmt = endian_flag + 'B'
+                            while offset < len(data) and len(faces_list) < num_faces:
+                                cnt = struct.unpack_from(count_fmt, data, offset)[0]
+                                offset += 1
+                                idxs = list(struct.unpack_from(f'{endian_flag}{cnt}I', data, offset))
+                                offset += 4 * cnt
+                                if len(idxs) == 3: faces_list.append(idxs)
+                            if faces_list: faces = np.array(faces_list, dtype=np.int32)
+                        except Exception: pass
                 else:
-                    vertex_properties.append((parts[2], parts[1], False, None, None))
-        type_map = {
-            'char':(np.int8,1),'uchar':(np.uint8,1),'short':(np.int16,2),'ushort':(np.uint16,2),
-            'int':(np.int32,4),'uint':(np.uint32,4),'float':(np.float32,4),'double':(np.float64,8),
-            'int8':(np.int8,1),'uint8':(np.uint8,1),'int16':(np.int16,2),'uint16':(np.uint16,2),
-            'int32':(np.int32,4),'uint32':(np.uint32,4),'float32':(np.float32,4),'float64':(np.float64,8)
-        }
-        has_list = any(p[2] for p in vertex_properties)
-        points = np.zeros((num_vertices, 3), dtype=np.float32)
-        colors = None
-        faces  = None
-        prop_names = [p[0] for p in vertex_properties]
-        has_color  = all(c in prop_names for c in ('red','green','blue'))
-        if has_color:
-            colors = np.zeros((num_vertices, 3), dtype=np.uint8)
-        if 'binary' in (format_type or ''):
-            fixed_props = [p for p in vertex_properties if not p[2]]
-            stride = sum(type_map[p[1]][1] for p in fixed_props if p[1] in type_map)
-            raw = f.read(stride * num_vertices)
-            offset = 0
-            col_offsets = {}
-            for p in fixed_props:
-                if p[1] in type_map:
-                    col_offsets[p[0]] = offset
-                    offset += type_map[p[1]][1]
-            dt_fields = []
-            for p in fixed_props:
-                if p[1] in type_map:
-                    dt_fields.append((p[0], type_map[p[1]][0]))
-            if dt_fields:
-                dt = np.dtype(dt_fields)
-                arr = np.frombuffer(raw, dtype=dt)
-                if 'x' in arr.dtype.names: points[:,0] = arr['x'].astype(np.float32)
-                if 'y' in arr.dtype.names: points[:,1] = arr['y'].astype(np.float32)
-                if 'z' in arr.dtype.names: points[:,2] = arr['z'].astype(np.float32)
-                if has_color and colors is not None:
-                    if 'red'   in arr.dtype.names: colors[:,0] = arr['red']
-                    if 'green' in arr.dtype.names: colors[:,1] = arr['green']
-                    if 'blue'  in arr.dtype.names: colors[:,2] = arr['blue']
-            if num_faces > 0:
-                faces_list = []
-                count_fmt = '>B' if 'big' in (format_type or '') else '<B'
-                idx_fmt   = '>I' if 'big' in (format_type or '') else '<I'
-                for _ in range(num_faces):
-                    cnt = struct.unpack(count_fmt, f.read(1))[0]
-                    idxs = list(struct.unpack(f'<{cnt}I', f.read(4*cnt)))
-                    if len(idxs) == 3: faces_list.append(idxs)
-                if faces_list: faces = np.array(faces_list, dtype=np.int32)
-        else:
-            for i in range(num_vertices):
-                vals = f.readline().decode('utf-8', errors='ignore').split()
-                if len(vals) >= 3:
-                    points[i] = [float(vals[0]), float(vals[1]), float(vals[2])]
-                    if has_color and colors is not None and len(vals) >= 6:
-                        ri = prop_names.index('red')   if 'red'   in prop_names else 3
-                        gi = prop_names.index('green') if 'green' in prop_names else 4
-                        bi = prop_names.index('blue')  if 'blue'  in prop_names else 5
-                        try: colors[i] = [int(vals[ri]), int(vals[gi]), int(vals[bi])]
-                        except: pass
-            if num_faces > 0:
-                faces_list = []
-                for _ in range(num_faces):
+                    fixed_props = [p for p in vertex_properties if not p[2]]
+                    stride = sum(type_map[p[1]][1] for p in fixed_props if p[1] in type_map)
+                    raw = f.read(stride * num_vertices)
+                    offset = 0
+                    col_offsets = {}
+                    for p in fixed_props:
+                        if p[1] in type_map:
+                            col_offsets[p[0]] = offset
+                            offset += type_map[p[1]][1]
+                    dt_fields = []
+                    for p in fixed_props:
+                        if p[1] in type_map:
+                            dt_fields.append((p[0], type_map[p[1]][0]))
+                    if dt_fields:
+                        dt = np.dtype(dt_fields)
+                        arr = np.frombuffer(raw, dtype=dt)
+                        if 'x' in arr.dtype.names: points[:,0] = arr['x'].astype(np.float32)
+                        if 'y' in arr.dtype.names: points[:,1] = arr['y'].astype(np.float32)
+                        if 'z' in arr.dtype.names: points[:,2] = arr['z'].astype(np.float32)
+                        if has_color and colors is not None:
+                            r_key = 'red' if 'red' in arr.dtype.names else 'r'
+                            g_key = 'green' if 'green' in arr.dtype.names else 'g'
+                            b_key = 'blue' if 'blue' in arr.dtype.names else 'b'
+                            if r_key in arr.dtype.names: colors[:,0] = arr[r_key]
+                            if g_key in arr.dtype.names: colors[:,1] = arr[g_key]
+                            if b_key in arr.dtype.names: colors[:,2] = arr[b_key]
+                    if num_faces > 0:
+                        faces_list = []
+                        count_fmt = '>B' if 'big' in (format_type or '') else '<B'
+                        idx_fmt   = '>I' if 'big' in (format_type or '') else '<I'
+                        for _ in range(num_faces):
+                            cnt = struct.unpack(count_fmt, f.read(1))[0]
+                            idxs = list(struct.unpack(f'<{cnt}I', f.read(4*cnt)))
+                            if len(idxs) == 3: faces_list.append(idxs)
+                        if faces_list: faces = np.array(faces_list, dtype=np.int32)
+            else:
+                for i in range(num_vertices):
                     vals = f.readline().decode('utf-8', errors='ignore').split()
-                    if vals and int(vals[0]) == 3 and len(vals) >= 4:
-                        faces_list.append([int(vals[1]), int(vals[2]), int(vals[3])])
-                if faces_list: faces = np.array(faces_list, dtype=np.int32)
-    return points, colors, faces
+                    if len(vals) >= 3:
+                        points[i] = [float(vals[0]), float(vals[1]), float(vals[2])]
+                        if has_color and colors is not None and len(vals) >= 6:
+                            ri = prop_names.index('red') if 'red' in prop_names else (prop_names.index('r') if 'r' in prop_names else 3)
+                            gi = prop_names.index('green') if 'green' in prop_names else (prop_names.index('g') if 'g' in prop_names else 4)
+                            bi = prop_names.index('blue') if 'blue' in prop_names else (prop_names.index('b') if 'b' in prop_names else 5)
+                            try: colors[i] = [int(vals[ri]), int(vals[gi]), int(vals[bi])]
+                            except: pass
+                if num_faces > 0:
+                    faces_list = []
+                    for _ in range(num_faces):
+                        vals = f.readline().decode('utf-8', errors='ignore').split()
+                        if vals and int(vals[0]) == 3 and len(vals) >= 4:
+                            faces_list.append([int(vals[1]), int(vals[2]), int(vals[3])])
+                    if faces_list: faces = np.array(faces_list, dtype=np.int32)
+        return points, colors, faces
+    except Exception as e:
+        print(f"[ERROR] Failed to parse PLY in _read_ply_static ({path}): {e}")
+        return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8), None
 
 
 class ModelServerHandler(http.server.BaseHTTPRequestHandler):
@@ -4530,23 +4614,59 @@ class MainWindow(QMainWindow):
         
         if mode == 0:
             # Sparse Point Cloud & Cameras
-            output_dir = get_reconstruction_out_dir()
-            points_bin = os.path.join(output_dir, "colmap", "sparse", "points3D.bin")
-            if not os.path.exists(points_bin):
-                points_bin = os.path.join(output_dir, "colmap", "sparse", "0", "points3D.bin")
+            mvs_dir = self.viewer_widget.current_mvs_dir
+            if not mvs_dir and file_path:
+                mvs_dir = os.path.dirname(file_path) if os.path.basename(file_path).endswith(('.mvs', '.ply', '.obj')) else file_path
+            if not mvs_dir:
+                mvs_dir = os.path.join(get_reconstruction_out_dir(), "mvs")
                 
-            if os.path.exists(points_bin):
+            output_dir = os.path.dirname(mvs_dir) if os.path.basename(mvs_dir) == 'mvs' else mvs_dir
+            
+            points_bin_candidates = [
+                os.path.join(output_dir, "colmap", "sparse", "points3D.bin"),
+                os.path.join(output_dir, "colmap", "sparse", "0", "points3D.bin"),
+                os.path.join(mvs_dir, "points3D.bin"),
+                os.path.join(output_dir, "points3D.bin"),
+                os.path.join(output_dir, "colmap", "sparse", "points3D.txt"),
+                os.path.join(output_dir, "colmap", "sparse", "0", "points3D.txt"),
+            ]
+            points_bin = None
+            for p in points_bin_candidates:
+                if os.path.exists(p):
+                    points_bin = p
+                    break
+                    
+            if points_bin and points_bin.endswith(".bin"):
                 points, colors = self._read_points3d_binary(points_bin)
             else:
-                scene_ply = os.path.join(output_dir, "mvs", "scene.ply")
-                if os.path.exists(scene_ply):
-                    points, colors, _ = self._read_ply(scene_ply)
+                scene_ply_candidates = [
+                    os.path.join(mvs_dir, "scene.ply"),
+                    os.path.join(output_dir, "scene.ply"),
+                    os.path.join(mvs_dir, "scene_dense.ply"),
+                    os.path.join(output_dir, "scene_dense.ply"),
+                ]
+                for sp in scene_ply_candidates:
+                    if os.path.exists(sp):
+                        pts, cls, _ = self._read_ply(sp)
+                        if pts is not None and len(pts) > 0:
+                            points, colors = pts, cls
+                            break
                     
-            images_bin = os.path.join(output_dir, "colmap", "sparse", "images.bin")
-            if not os.path.exists(images_bin):
-                images_bin = os.path.join(output_dir, "colmap", "sparse", "0", "images.bin")
-                
-            if os.path.exists(images_bin):
+            images_bin_candidates = [
+                os.path.join(output_dir, "colmap", "sparse", "images.bin"),
+                os.path.join(output_dir, "colmap", "sparse", "0", "images.bin"),
+                os.path.join(mvs_dir, "images.bin"),
+                os.path.join(output_dir, "images.bin"),
+                os.path.join(output_dir, "colmap", "sparse", "images.txt"),
+                os.path.join(output_dir, "colmap", "sparse", "0", "images.txt"),
+            ]
+            images_bin = None
+            for i in images_bin_candidates:
+                if os.path.exists(i):
+                    images_bin = i
+                    break
+                    
+            if images_bin and images_bin.endswith(".bin"):
                 cameras_data = self._read_images_binary(images_bin)
                 if cameras_data:
                     self._draw_cameras(cameras_data)
@@ -4647,6 +4767,9 @@ class MainWindow(QMainWindow):
                 edge_width=0
             )
             
+        elif hasattr(self, 'cameras_visual') and self.cameras_visual is not None:
+            # Cameras exist even if sparse points array is empty
+            pass
         else:
             self.canvas.native.hide()
             self.viewer_widget.fallback_label.setText("No valid 3D points or faces could be parsed.")
@@ -4660,17 +4783,19 @@ class MainWindow(QMainWindow):
         self.viewer_widget.fallback_label.hide()
         
         # Center and zoom camera
-        bbox_min = np.min(points, axis=0)
-        bbox_max = np.max(points, axis=0)
-        center = (bbox_min + bbox_max) / 2.0
-        scale = np.max(bbox_max - bbox_min)
-        
-        self.view.camera.center = center
-        self.view.camera.distance = max(0.1, scale * 1.5)
-        # Apply turntable elevation/azimuth if selected
-        if self.viewer_widget.cam_select.currentIndex() == 1:
-            self.view.camera.elevation = 30
-            self.view.camera.azimuth = 45
+        ref_pts = points if (points is not None and len(points) > 0) else None
+        if ref_pts is not None:
+            bbox_min = np.min(ref_pts, axis=0)
+            bbox_max = np.max(ref_pts, axis=0)
+            center = (bbox_min + bbox_max) / 2.0
+            scale = np.max(bbox_max - bbox_min)
+            
+            self.view.camera.center = center
+            self.view.camera.distance = max(0.1, scale * 1.5)
+            # Apply turntable elevation/azimuth if selected
+            if self.viewer_widget.cam_select.currentIndex() == 1:
+                self.view.camera.elevation = 30
+                self.view.camera.azimuth = 45
             
         self.canvas.update()
 

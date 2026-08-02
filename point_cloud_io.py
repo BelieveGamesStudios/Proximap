@@ -225,38 +225,93 @@ def _read_ply_pure_numpy(path: str):
                 else:
                     vertex_properties.append((parts[2], parts[1], False, None, None))
 
-        type_map = {
-            'char': (np.int8, 1), 'uchar': (np.uint8, 1), 'short': (np.int16, 2), 'ushort': (np.uint16, 2),
-            'int': (np.int32, 4), 'uint': (np.uint32, 4), 'float': (np.float32, 4), 'double': (np.float64, 8),
-            'int8': (np.int8, 1), 'uint8': (np.uint8, 1), 'int16': (np.int16, 2), 'uint16': (np.uint16, 2),
-            'int32': (np.int32, 4), 'uint32': (np.uint32, 4), 'float32': (np.float32, 4), 'float64': (np.float64, 8)
+        type_char_map = {
+            'char': 'b', 'uchar': 'B', 'short': 'h', 'ushort': 'H',
+            'int': 'i', 'uint': 'I', 'float': 'f', 'double': 'd',
+            'int8': 'b', 'uint8': 'B', 'int16': 'h', 'uint16': 'H',
+            'int32': 'i', 'uint32': 'I', 'float32': 'f', 'float64': 'd'
         }
+        type_sizes = {'b': 1, 'B': 1, 'h': 2, 'H': 2, 'i': 4, 'I': 4, 'f': 4, 'd': 8}
+        has_list = any(p[2] for p in vertex_properties)
+
         points = np.zeros((num_vertices, 3), dtype=np.float32)
         prop_names = [p[0] for p in vertex_properties]
         has_color = all(c in prop_names for c in ('red', 'green', 'blue')) or all(c in prop_names for c in ('r', 'g', 'b'))
         colors = np.zeros((num_vertices, 3), dtype=np.uint8) if has_color else None
 
         if 'binary' in (format_type or ''):
-            fixed_props = [p for p in vertex_properties if not p[2]]
-            stride = sum(type_map[p[1]][1] for p in fixed_props if p[1] in type_map)
-            raw = f.read(stride * num_vertices)
-            dt_fields = []
-            for p in fixed_props:
-                if p[1] in type_map:
-                    dt_fields.append((p[0], type_map[p[1]][0]))
-            if dt_fields:
-                dt = np.dtype(dt_fields)
-                arr = np.frombuffer(raw, dtype=dt)
-                if 'x' in arr.dtype.names: points[:, 0] = arr['x'].astype(np.float32)
-                if 'y' in arr.dtype.names: points[:, 1] = arr['y'].astype(np.float32)
-                if 'z' in arr.dtype.names: points[:, 2] = arr['z'].astype(np.float32)
-                if has_color and colors is not None:
-                    r_key = 'red' if 'red' in arr.dtype.names else 'r'
-                    g_key = 'green' if 'green' in arr.dtype.names else 'g'
-                    b_key = 'blue' if 'blue' in arr.dtype.names else 'b'
-                    if r_key in arr.dtype.names: colors[:, 0] = arr[r_key]
-                    if g_key in arr.dtype.names: colors[:, 1] = arr[g_key]
-                    if b_key in arr.dtype.names: colors[:, 2] = arr[b_key]
+            if has_list:
+                fixed_properties = []
+                list_properties = []
+                for p in vertex_properties:
+                    if p[2]: list_properties.append(p)
+                    else:
+                        if not list_properties: fixed_properties.append(p)
+
+                fmt_chars = [type_char_map[t] for name, t, _, _, _ in fixed_properties if t in type_char_map]
+                fixed_size = sum(type_sizes[c] for c in fmt_chars)
+                endian_flag = '>' if 'big' in (format_type or '') else '<'
+                fixed_struct = struct.Struct(endian_flag + ''.join(fmt_chars))
+
+                names = [p[0] for p in fixed_properties]
+                x_idx = names.index('x') if 'x' in names else -1
+                y_idx = names.index('y') if 'y' in names else -1
+                z_idx = names.index('z') if 'z' in names else -1
+
+                r_name = 'red' if 'red' in names else ('r' if 'r' in names else None)
+                g_name = 'green' if 'green' in names else ('g' if 'g' in names else None)
+                b_name = 'blue' if 'blue' in names else ('b' if 'b' in names else None)
+
+                r_idx = names.index(r_name) if r_name else -1
+                g_idx = names.index(g_name) if g_name else -1
+                b_idx = names.index(b_name) if b_name else -1
+
+                data = f.read()
+                offset = 0
+
+                for i in range(num_vertices):
+                    val = fixed_struct.unpack_from(data, offset)
+                    if x_idx != -1: points[i, 0] = val[x_idx]
+                    if y_idx != -1: points[i, 1] = val[y_idx]
+                    if z_idx != -1: points[i, 2] = val[z_idx]
+
+                    if has_color and colors is not None:
+                        if r_idx != -1: colors[i, 0] = val[r_idx]
+                        if g_idx != -1: colors[i, 1] = val[g_idx]
+                        if b_idx != -1: colors[i, 2] = val[b_idx]
+
+                    offset += fixed_size
+
+                    for name, _, _, count_type, item_type in list_properties:
+                        c_char = type_char_map[count_type]
+                        c_size = type_sizes[c_char]
+                        count = struct.unpack_from(endian_flag + c_char, data, offset)[0]
+                        offset += c_size
+
+                        i_char = type_char_map[item_type]
+                        i_size = type_sizes[i_char]
+                        offset += count * i_size
+            else:
+                fixed_props = [p for p in vertex_properties if not p[2]]
+                stride = sum(type_map[p[1]][1] for p in fixed_props if p[1] in type_map)
+                raw = f.read(stride * num_vertices)
+                dt_fields = []
+                for p in fixed_props:
+                    if p[1] in type_map:
+                        dt_fields.append((p[0], type_map[p[1]][0]))
+                if dt_fields:
+                    dt = np.dtype(dt_fields)
+                    arr = np.frombuffer(raw, dtype=dt)
+                    if 'x' in arr.dtype.names: points[:, 0] = arr['x'].astype(np.float32)
+                    if 'y' in arr.dtype.names: points[:, 1] = arr['y'].astype(np.float32)
+                    if 'z' in arr.dtype.names: points[:, 2] = arr['z'].astype(np.float32)
+                    if has_color and colors is not None:
+                        r_key = 'red' if 'red' in arr.dtype.names else 'r'
+                        g_key = 'green' if 'green' in arr.dtype.names else 'g'
+                        b_key = 'blue' if 'blue' in arr.dtype.names else 'b'
+                        if r_key in arr.dtype.names: colors[:, 0] = arr[r_key]
+                        if g_key in arr.dtype.names: colors[:, 1] = arr[g_key]
+                        if b_key in arr.dtype.names: colors[:, 2] = arr[b_key]
         else:
             for i in range(num_vertices):
                 vals = f.readline().decode('utf-8', errors='ignore').split()
