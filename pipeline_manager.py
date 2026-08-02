@@ -52,8 +52,8 @@ class PipelineWorker(QThread):
 
     def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, mapper_mode: str = "incremental", ref_cloud_path: str = None, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, resume_from_step: str = None, parent=None):
         super().__init__(parent)
-        self.image_dir = image_dir
-        self.output_dir = output_dir
+        self.image_dir = os.path.abspath(image_dir) if image_dir else image_dir
+        self.output_dir = os.path.abspath(output_dir) if output_dir else output_dir
         self.quality_preset = quality_preset
         self.gpu_mode = gpu_mode
         self.has_plain_surfaces = has_plain_surfaces
@@ -490,8 +490,8 @@ class PipelineWorker(QThread):
                 except Exception as e:
                     self.log_message.emit(f"[WARNING] Failed to clean output folder: {e}")
 
-        colmap_out = self._to_colmap_path(os.path.join(self.output_dir, "colmap"))
-        mvs_out = self._to_colmap_path(os.path.join(self.output_dir, "mvs"))
+        colmap_out = self._to_colmap_path(os.path.abspath(os.path.join(self.output_dir, "colmap")))
+        mvs_out = self._to_colmap_path(os.path.abspath(os.path.join(self.output_dir, "mvs")))
         os.makedirs(colmap_out, exist_ok=True)
         os.makedirs(mvs_out, exist_ok=True)
         os.makedirs(os.path.join(colmap_out, "sparse"), exist_ok=True)
@@ -641,7 +641,8 @@ class PipelineWorker(QThread):
 
         colmap_exe = os.path.join(base_dir, self.toolchain_map["colmap"]["colmap"])
         colmap_env = self._get_colmap_env()
-        database_path = self._to_colmap_path(os.path.join(colmap_out, "database.db"))
+        database_path = self._to_colmap_path(os.path.abspath(os.path.join(colmap_out, "database.db")))
+        os.makedirs(os.path.dirname(database_path), exist_ok=True)
         working_image_dir = self._to_colmap_path(working_image_dir)
         if os.path.exists(database_path):
             if resume_requested and is_checkpoint_valid:
@@ -815,6 +816,11 @@ class PipelineWorker(QThread):
 
             # Step 3: SIFT matching
             self.status_changed.emit("Step 3/9: Matching SIFT Features...")
+            os.makedirs(os.path.dirname(database_path), exist_ok=True)
+            if not os.path.exists(database_path):
+                self.log_message.emit(f"[WARNING] COLMAP database missing prior to matching: {database_path}. Initializing database schema...")
+                self._create_colmap_db_schema(database_path)
+
             self._image_names_map = self._get_image_names_from_db(database_path)
 
             cmd_match_gpu = [
@@ -886,6 +892,10 @@ class PipelineWorker(QThread):
                 except Exception as e:
                     self.log_message.emit(f"[WARNING] Failed to clean sparse folder: {e}")
             os.makedirs(sparse_dir, exist_ok=True)
+            os.makedirs(os.path.dirname(database_path), exist_ok=True)
+            if not os.path.exists(database_path):
+                self.log_message.emit(f"[WARNING] COLMAP database missing prior to mapping: {database_path}. Initializing database schema...")
+                self._create_colmap_db_schema(database_path)
 
             cmd_incremental = [
                 colmap_exe, "mapper",
