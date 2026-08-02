@@ -122,6 +122,8 @@ class MeshEditorWidget(QWidget):
         # Initialize Add-on Manager for Mesh Editor
         self.addon_manager = AddonManager(self)
         self.addon_manager.initialize_addons(self)
+        self.addon_manager.addon_state_changed.connect(lambda *_: self.update_addon_panels())
+        self.update_addon_panels()
 
 
     def _init_ui(self):
@@ -373,18 +375,37 @@ class MeshEditorWidget(QWidget):
         properties_vlayout.addLayout(grid_layout)
         scroll_layout.addWidget(self.properties_box, stretch=0)
         
-        # SECTION 3: Add-on Tools Container
+        # SECTION 3: Add-on Tools Container (Expandable & Collapsible)
+        self._is_addon_section_expanded = True
         self.addon_box = QFrame(scroll_content)
         self.addon_box.setObjectName("StepBox")
         addon_vlayout = QVBoxLayout(self.addon_box)
+        addon_vlayout.setContentsMargins(10, 10, 10, 10)
+        addon_vlayout.setSpacing(6)
         
-        addon_title = QLabel("Add-on Tools", self.addon_box)
-        addon_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #00E676;")
-        addon_vlayout.addWidget(addon_title)
+        # Collapsible header trigger button
+        self.btn_addon_toggle = QPushButton("▼  Add-on Tools", self.addon_box)
+        self.btn_addon_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_addon_toggle.setStyleSheet("""
+            QPushButton {
+                font-weight: bold;
+                font-size: 14px;
+                color: #00E676;
+                text-align: left;
+                background-color: transparent;
+                border: none;
+                padding: 2px 0px;
+            }
+            QPushButton:hover {
+                color: #66FFA6;
+            }
+        """)
+        self.btn_addon_toggle.clicked.connect(self._toggle_addon_section)
+        addon_vlayout.addWidget(self.btn_addon_toggle)
         
         self.addon_container = QWidget(self.addon_box)
         self.addon_container_layout = QVBoxLayout(self.addon_container)
-        self.addon_container_layout.setContentsMargins(0, 0, 0, 0)
+        self.addon_container_layout.setContentsMargins(0, 4, 0, 0)
         self.addon_container_layout.setSpacing(6)
         addon_vlayout.addWidget(self.addon_container)
         
@@ -1532,6 +1553,14 @@ class MeshEditorWidget(QWidget):
         dlg = PreferencesDialog(self.addon_manager, self, self)
         dlg.exec()
 
+    def _toggle_addon_section(self):
+        self._is_addon_section_expanded = not getattr(self, "_is_addon_section_expanded", True)
+        self.addon_container.setVisible(self._is_addon_section_expanded)
+        if self._is_addon_section_expanded:
+            self.btn_addon_toggle.setText("▼  Add-on Tools")
+        else:
+            self.btn_addon_toggle.setText("▶  Add-on Tools")
+
     def update_addon_panels(self):
         if not hasattr(self, "addon_container_layout"):
             return
@@ -1552,6 +1581,28 @@ class MeshEditorWidget(QWidget):
             w = addon_inst.get_panel_widget(self.addon_container)
             if w:
                 self.addon_container_layout.addWidget(w)
+                panel_added = True
+            else:
+                # Add-on is active but doesn't supply a custom widget -> show active badge
+                badge = QFrame(self.addon_container)
+                badge.setStyleSheet("""
+                    QFrame {
+                        background-color: #121212;
+                        border: 1px solid #333333;
+                        border-radius: 6px;
+                        padding: 6px;
+                    }
+                    QLabel {
+                        color: #e0e0e0;
+                        font-size: 11px;
+                    }
+                """)
+                b_layout = QHBoxLayout(badge)
+                b_layout.setContentsMargins(8, 4, 8, 4)
+                lbl_name = QLabel(f"✓ {addon_inst.addon_name} <span style='color: #00E676;'>(Active)</span>", badge)
+                lbl_name.setTextFormat(Qt.TextFormat.RichText)
+                b_layout.addWidget(lbl_name)
+                self.addon_container_layout.addWidget(badge)
                 panel_added = True
 
         if not panel_added:

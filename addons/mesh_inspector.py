@@ -127,7 +127,7 @@ class MeshInspectorAddon(ProximapAddon):
 
         selected_objs = self.mesh_editor.viewport.scene.selected_objects
         if not selected_objs:
-            self._reset_labels("No selection")
+            self._reset_labels("Select a mesh")
             return
 
         total_verts = 0
@@ -136,21 +136,43 @@ class MeshInspectorAddon(ProximapAddon):
         max_bound = np.array([float('-inf'), float('-inf'), float('-inf')])
 
         for obj in selected_objs:
-            if hasattr(obj, "mesh_data") and obj.mesh_data is not None:
-                verts = obj.mesh_data.vertices
-                faces = obj.mesh_data.faces
-                total_verts += len(verts)
-                total_faces += len(faces)
+            # Case 1: Proximap Scene Object with obj.mesh
+            if hasattr(obj, "mesh") and obj.mesh is not None:
+                mesh = obj.mesh
+                if hasattr(mesh, "vertices") and mesh.vertices is not None and len(mesh.vertices) > 0:
+                    verts_count = len(mesh.vertices) // 3 if mesh.vertices.ndim == 1 else len(mesh.vertices)
+                    indices = getattr(mesh, "indices", None)
+                    faces_count = (len(indices) // 3 if (indices is not None and indices.ndim == 1) else len(indices)) if indices is not None else 0
 
-                if len(verts) > 0:
-                    # Apply local matrix transformation for scale/bounding calculation
-                    scale = np.array(obj.scale)
-                    scaled_verts = verts * scale
+                    total_verts += verts_count
+                    total_faces += faces_count
+
+                    if hasattr(obj, "get_world_aabb"):
+                        w_min, w_max = obj.get_world_aabb()
+                        min_bound = np.minimum(min_bound, w_min)
+                        max_bound = np.maximum(max_bound, w_max)
+                    else:
+                        scaled_verts = mesh.vertices.reshape(-1, 3) * np.array(getattr(obj, "scale", [1, 1, 1]))
+                        min_bound = np.minimum(min_bound, scaled_verts.min(axis=0))
+                        max_bound = np.maximum(max_bound, scaled_verts.max(axis=0))
+
+            # Case 2: obj has mesh_data attribute
+            elif hasattr(obj, "mesh_data") and obj.mesh_data is not None:
+                verts = obj.mesh_data.vertices
+                faces = getattr(obj.mesh_data, "faces", getattr(obj.mesh_data, "indices", None))
+                verts_count = len(verts) // 3 if verts.ndim == 1 else len(verts)
+                faces_count = (len(faces) // 3 if (faces is not None and faces.ndim == 1) else len(faces)) if faces is not None else 0
+                total_verts += verts_count
+                total_faces += faces_count
+
+                if verts_count > 0:
+                    scale = np.array(getattr(obj, "scale", [1, 1, 1]))
+                    scaled_verts = (verts.reshape(-1, 3) if verts.ndim == 1 else verts) * scale
                     min_bound = np.minimum(min_bound, scaled_verts.min(axis=0))
                     max_bound = np.maximum(max_bound, scaled_verts.max(axis=0))
 
         if total_verts == 0 or np.isinf(min_bound[0]):
-            self._reset_labels()
+            self._reset_labels("Select a mesh")
             return
 
         dims = max_bound - min_bound
