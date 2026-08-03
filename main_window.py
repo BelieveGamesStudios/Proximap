@@ -2009,17 +2009,29 @@ class MainWindow(QMainWindow):
         custom_grid.addWidget(lbl_matches, 2, 0)
         custom_grid.addWidget(self.custom_matches_spin, 2, 1)
 
+        # Exhaustive Block Size
+        lbl_block_size = QLabel("Exhaustive Block Size:", self.custom_settings_container)
+        lbl_block_size.setStyleSheet(lbl_style)
+        self.custom_block_size_spin = QSpinBox(self.custom_settings_container)
+        self.custom_block_size_spin.setRange(5, 200)
+        self.custom_block_size_spin.setSingleStep(5)
+        self.custom_block_size_spin.setValue(50)
+        self.custom_block_size_spin.setToolTip("Block size for COLMAP exhaustive_matcher. Lower values (e.g. 20) reduce RAM consumption during matrix matching.")
+        self.custom_block_size_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_block_size, 3, 0)
+        custom_grid.addWidget(self.custom_block_size_spin, 3, 1)
+
         # Guided Matching
         self.custom_guided_check = QCheckBox("Use Guided Matching", self.custom_settings_container)
         self.custom_guided_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
         self.custom_guided_check.setChecked(True)
-        custom_grid.addWidget(self.custom_guided_check, 3, 0, 1, 2)
+        custom_grid.addWidget(self.custom_guided_check, 4, 0, 1, 2)
 
         # Bundle Adjuster
         self.custom_ba_check = QCheckBox("Run Extra Bundle Adjuster", self.custom_settings_container)
         self.custom_ba_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
         self.custom_ba_check.setChecked(False)
-        custom_grid.addWidget(self.custom_ba_check, 4, 0, 1, 2)
+        custom_grid.addWidget(self.custom_ba_check, 5, 0, 1, 2)
 
 
 
@@ -3479,6 +3491,7 @@ class MainWindow(QMainWindow):
             custom_params = {
                 "colmap_max_num_features": self.custom_features_spin.value(),
                 "colmap_max_num_matches": self.custom_matches_spin.value(),
+                "colmap_block_size": self.custom_block_size_spin.value(),
                 "guided_matching": "1" if self.custom_guided_check.isChecked() else "0",
                 "run_bundle_adjuster": self.custom_ba_check.isChecked(),
                 "densify_res": str(self.custom_densify_res_combo.currentIndex()),

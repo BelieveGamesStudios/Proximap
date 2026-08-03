@@ -903,14 +903,22 @@ class PipelineWorker(QThread):
 
             elif matching_mode == "exhaustive_blocked":
                 matcher_cmd = "exhaustive_matcher"
-                extra_args = ["--ExhaustiveMatching.block_size", "20"]
+                block_size_val = "20"
+                if self.custom_params and "colmap_block_size" in self.custom_params:
+                    block_size_val = str(self.custom_params["colmap_block_size"])
+                extra_args = ["--ExhaustiveMatching.block_size", block_size_val]
                 self.log_message.emit(
-                    f"[MEMORY OPTIMIZATION] Using exhaustive_matcher with reduced block size (20) "
+                    f"[MEMORY OPTIMIZATION] Using exhaustive_matcher with reduced block size ({block_size_val}) "
                     f"to prevent RAM saturation during matrix matching."
                 )
             else:
                 matcher_cmd = "exhaustive_matcher"
-                extra_args = []
+                if self.custom_params and "colmap_block_size" in self.custom_params:
+                    block_size_val = str(self.custom_params["colmap_block_size"])
+                    extra_args = ["--ExhaustiveMatching.block_size", block_size_val]
+                    self.log_message.emit(f"[INFO] Using exhaustive_matcher with custom block size ({block_size_val}).")
+                else:
+                    extra_args = []
 
             cmd_match_gpu = [
                 colmap_exe, matcher_cmd,
