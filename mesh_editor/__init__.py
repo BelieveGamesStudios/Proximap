@@ -101,8 +101,111 @@ class MeshImportProgressDialog(QDialog):
         layout.addWidget(self.label)
         layout.addWidget(self.progress)
 
+class CollapsibleAddonPanel(QFrame):
+    """Collapsible card container for an individual add-on in the sidebar."""
+    def __init__(self, addon_name: str, content_widget: QWidget, parent=None, is_expanded: bool = True, on_toggle_callback=None):
+        super().__init__(parent)
+        self.addon_name = addon_name
+        self.content_widget = content_widget
+        self.is_expanded = is_expanded
+        self.on_toggle_callback = on_toggle_callback
+
+        self.setObjectName("CollapsibleAddonPanel")
+        self.setStyleSheet("""
+            QFrame#CollapsibleAddonPanel {
+                background-color: #121212;
+                border: 1px solid #333333;
+                border-radius: 6px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Header button displaying toggle arrow and add-on name
+        self.btn_toggle = QPushButton(self)
+        self.btn_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_toggle.clicked.connect(self._toggle_collapse)
+        layout.addWidget(self.btn_toggle)
+
+        # Body container holding the inner content widget
+        self.body_container = QWidget(self)
+        body_layout = QVBoxLayout(self.body_container)
+        body_layout.setContentsMargins(6, 0, 6, 6)
+        body_layout.setSpacing(0)
+        if self.content_widget:
+            body_layout.addWidget(self.content_widget)
+        layout.addWidget(self.body_container)
+
+        self._update_ui_state()
+
+    def _toggle_collapse(self):
+        self.is_expanded = not self.is_expanded
+        self._update_ui_state()
+        if self.on_toggle_callback:
+            self.on_toggle_callback(self.is_expanded)
+
+    def _update_ui_state(self):
+        icon = "▼" if self.is_expanded else "▶"
+        self.btn_toggle.setText(f"{icon}  {self.addon_name}")
+        self.body_container.setVisible(self.is_expanded)
+
+        if self.is_expanded:
+            self.btn_toggle.setStyleSheet("""
+                QPushButton {
+                    font-weight: bold;
+                    font-size: 12px;
+                    color: #00E676;
+                    text-align: left;
+                    background-color: #1A1A1A;
+                    border: none;
+                    border-top-left-radius: 5px;
+                    border-top-right-radius: 5px;
+                    border-bottom-left-radius: 0px;
+                    border-bottom-right-radius: 0px;
+                    padding: 8px 10px;
+                }
+                QPushButton:hover {
+                    color: #66FFA6;
+                    background-color: #242424;
+                }
+            """)
+        else:
+            self.btn_toggle.setStyleSheet("""
+                QPushButton {
+                    font-weight: bold;
+                    font-size: 12px;
+                    color: #00E676;
+                    text-align: left;
+                    background-color: #1A1A1A;
+                    border: none;
+                    border-radius: 5px;
+                    padding: 8px 10px;
+                }
+                QPushButton:hover {
+                    color: #66FFA6;
+                    background-color: #242424;
+                }
+            """)
+
+
 class MeshEditorWidget(QWidget):
     """The main wrapper widget for the Mesh Editor tab."""
+    selection_changed = Signal(object)  # Unified selection signal: Emits active Object (or None) whenever selection changes anywhere
+
+    @property
+    def active_object(self) -> Object | None:
+        if hasattr(self, "viewport") and self.viewport and hasattr(self.viewport, "scene"):
+            return self.viewport.scene.active_object
+        return None
+
+    @property
+    def selected_objects(self) -> list:
+        if hasattr(self, "viewport") and self.viewport and hasattr(self.viewport, "scene"):
+            return self.viewport.scene.selected_objects
+        return []
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("MeshEditorWidget")
@@ -113,6 +216,7 @@ class MeshEditorWidget(QWidget):
         self._last_spinbox_pos = None
         self._last_spinbox_rot = None
         self._last_spinbox_scale = None
+        self._addon_collapse_states = {}
         
         # Build UI layout
         self._init_ui()
@@ -844,6 +948,9 @@ class MeshEditorWidget(QWidget):
             else:
                 self._set_properties_enabled(False)
 
+        # Emit unified selection signal for top-level subscribers and add-ons
+        self.selection_changed.emit(selected_obj)
+
     def _on_viewport_transform_changed(self, obj: Object):
         # Update inputs dynamically from gizmo dragging without loops
         if obj:
@@ -889,6 +996,9 @@ class MeshEditorWidget(QWidget):
         self._update_outliner_highlights()
         self.viewport.update()
 
+        # Emit selection signals so viewport listeners (addons) and MeshEditorWidget subscribers receive callback
+        self.viewport.selection_changed.emit(active_obj)
+
     def push_command(self, cmd: BaseCommand):
         """Public API for registering custom commands into the Undo/Redo stack (supports addons)."""
         self.undo_stack.push(cmd)
@@ -899,7 +1009,7 @@ class MeshEditorWidget(QWidget):
         if label:
             self._populate_outliner()
             active = self.viewport.scene.active_object
-            self._on_viewport_selection_changed(active)
+            self.viewport.selection_changed.emit(active)
             self._update_undo_redo_actions()
             self.viewport.update()
 
@@ -908,7 +1018,7 @@ class MeshEditorWidget(QWidget):
         if label:
             self._populate_outliner()
             active = self.viewport.scene.active_object
-            self._on_viewport_selection_changed(active)
+            self.viewport.selection_changed.emit(active)
             self._update_undo_redo_actions()
             self.viewport.update()
 
@@ -1574,36 +1684,50 @@ class MeshEditorWidget(QWidget):
         if not hasattr(self, "addon_manager"):
             return
 
+        if not hasattr(self, "_addon_collapse_states"):
+            self._addon_collapse_states = {}
+
         # Get active add-on panel widgets
         active_instances = self.addon_manager.get_enabled_instances()
         panel_added = False
         for addon_inst in active_instances:
+            addon_id = getattr(addon_inst, "addon_id", "unknown")
+            addon_name = getattr(addon_inst, "addon_name", "Add-on")
+            is_expanded = self._addon_collapse_states.get(addon_id, True)
+
             w = addon_inst.get_panel_widget(self.addon_container)
-            if w:
-                self.addon_container_layout.addWidget(w)
-                panel_added = True
-            else:
+            if w is None:
                 # Add-on is active but doesn't supply a custom widget -> show active badge
-                badge = QFrame(self.addon_container)
-                badge.setStyleSheet("""
+                w = QFrame(self.addon_container)
+                w.setStyleSheet("""
                     QFrame {
-                        background-color: #121212;
-                        border: 1px solid #333333;
-                        border-radius: 6px;
-                        padding: 6px;
+                        background-color: transparent;
+                        border: none;
+                        padding: 4px;
                     }
                     QLabel {
                         color: #e0e0e0;
                         font-size: 11px;
                     }
                 """)
-                b_layout = QHBoxLayout(badge)
-                b_layout.setContentsMargins(8, 4, 8, 4)
-                lbl_name = QLabel(f"✓ {addon_inst.addon_name} <span style='color: #00E676;'>(Active)</span>", badge)
+                b_layout = QHBoxLayout(w)
+                b_layout.setContentsMargins(4, 4, 4, 4)
+                lbl_name = QLabel(f"✓ {addon_name} <span style='color: #00E676;'>(Active)</span>", w)
                 lbl_name.setTextFormat(Qt.TextFormat.RichText)
                 b_layout.addWidget(lbl_name)
-                self.addon_container_layout.addWidget(badge)
-                panel_added = True
+
+            def make_cb(aid):
+                return lambda exp: self._addon_collapse_states.update({aid: exp})
+
+            collapsible_card = CollapsibleAddonPanel(
+                addon_name=addon_name,
+                content_widget=w,
+                parent=self.addon_container,
+                is_expanded=is_expanded,
+                on_toggle_callback=make_cb(addon_id)
+            )
+            self.addon_container_layout.addWidget(collapsible_card)
+            panel_added = True
 
         if not panel_added:
             lbl_hint = QLabel("<i>No active add-ons. Manage in Edit → Preferences</i>", self.addon_container)

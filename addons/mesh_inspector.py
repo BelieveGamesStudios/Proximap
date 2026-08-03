@@ -16,7 +16,7 @@ from addons.addon_base import ProximapAddon
 
 class MeshInspectorAddon(ProximapAddon):
     addon_id = "mesh_inspector"
-    addon_name = "Mesh Inspector & Statistics"
+    addon_name = "🔍 Mesh Inspector"
     addon_version = "1.0.0"
     addon_description = "Calculates vertex counts, face counts, and bounding dimensions for selected meshes in the Mesh Editor."
     addon_author = "Proximap Team"
@@ -29,20 +29,39 @@ class MeshInspectorAddon(ProximapAddon):
 
     def register(self, mesh_editor) -> None:
         super().register(mesh_editor)
-        if hasattr(mesh_editor, "viewport") and hasattr(mesh_editor.viewport, "selection_changed"):
+        if hasattr(mesh_editor, "selection_changed"):
+            try:
+                mesh_editor.selection_changed.connect(self.update_stats)
+            except Exception:
+                pass
+        elif hasattr(mesh_editor, "viewport") and hasattr(mesh_editor.viewport, "selection_changed"):
             try:
                 mesh_editor.viewport.selection_changed.connect(self.update_stats)
+            except Exception:
+                pass
+
+        if hasattr(mesh_editor, "viewport") and hasattr(mesh_editor.viewport, "transform_changed"):
+            try:
                 mesh_editor.viewport.transform_changed.connect(self.update_stats)
             except Exception:
                 pass
 
     def unregister(self, mesh_editor) -> None:
-        if self.mesh_editor and hasattr(self.mesh_editor, "viewport"):
-            try:
-                self.mesh_editor.viewport.selection_changed.disconnect(self.update_stats)
-                self.mesh_editor.viewport.transform_changed.disconnect(self.update_stats)
-            except Exception:
-                pass
+        if self.mesh_editor:
+            if hasattr(self.mesh_editor, "selection_changed"):
+                try:
+                    self.mesh_editor.selection_changed.disconnect(self.update_stats)
+                except Exception:
+                    pass
+            if hasattr(self.mesh_editor, "viewport"):
+                try:
+                    self.mesh_editor.viewport.selection_changed.disconnect(self.update_stats)
+                except Exception:
+                    pass
+                try:
+                    self.mesh_editor.viewport.transform_changed.disconnect(self.update_stats)
+                except Exception:
+                    pass
         super().unregister(mesh_editor)
 
     def get_panel_widget(self, parent: Optional[QWidget] = None) -> Optional[QWidget]:
@@ -53,10 +72,9 @@ class MeshInspectorAddon(ProximapAddon):
         panel.setObjectName("MeshInspectorPanel")
         panel.setStyleSheet("""
             QFrame#MeshInspectorPanel {
-                background-color: #121212;
-                border: 1px solid #333333;
-                border-radius: 6px;
-                padding: 8px;
+                background-color: transparent;
+                border: none;
+                padding: 0px;
             }
             QLabel {
                 color: #e0e0e0;
@@ -65,12 +83,8 @@ class MeshInspectorAddon(ProximapAddon):
         """)
 
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
-
-        hdr_label = QLabel("🔍 Mesh Inspector", panel)
-        hdr_label.setStyleSheet("color: #00E676; font-weight: bold; font-size: 12px;")
-        layout.addWidget(hdr_label)
 
         grid = QGridLayout()
         grid.setSpacing(4)

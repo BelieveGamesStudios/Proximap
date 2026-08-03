@@ -1886,16 +1886,12 @@ class MainWindow(QMainWindow):
             "Force CPU Fallback"
         ])
         
-        self.plain_surfaces_checkbox = QCheckBox("Plain/smooth surfaces  (Neural matching)", step2_box)
+        self.plain_surfaces_checkbox = QCheckBox("Plain/smooth surfaces  (GLOMAP Mapper)", step2_box)
         self.plain_surfaces_checkbox.setChecked(False)
         self.plain_surfaces_checkbox.setToolTip(
-            "Enables SuperPoint + LightGlue neural feature detection and matching\n"
-            "for plain, reflective, or textureless surfaces where standard SIFT fails.\n\n"
-            "Replaces both feature extraction and matching with a learned detector\n"
-            "that finds keypoints SIFT cannot detect on low-contrast regions.\n\n"
-            "GPU (CUDA) strongly recommended — CPU-only mode is significantly slower.\n"
-            "Not available at Preview quality (SIFT fallback is used instead).\n"
-            "Guided matching is disabled in this mode (SIFT-only concept)."
+            "Optimizes feature extraction parameters for plain, smooth, or reflective surfaces\n"
+            "and automatically uses GLOMAP global mapper for camera pose estimation.\n\n"
+            "Dynamically throttles feature and match limits based on dataset size and system memory pressure."
         )
         
         # Advanced Options Collapsible Panel
@@ -3346,20 +3342,12 @@ class MainWindow(QMainWindow):
 
     def _on_plain_surfaces_toggled(self, state):
         """
-        When neural matching (SP+LG) is active, guided matching is a SIFT-only concept
-        and has no effect. Grey out the custom guided matching checkbox so it is visibly
-        inactive rather than silently ignored.
+        When plain surfaces is selected, feature extraction and matching are optimized,
+        and GLOMAP global mapper is forced.
         """
-        neural_active = bool(state)
         if hasattr(self, "custom_guided_check"):
-            self.custom_guided_check.setEnabled(not neural_active)
-            if neural_active:
-                self.custom_guided_check.setToolTip(
-                    "Guided matching is a SIFT-only option and is disabled\n"
-                    "when 'Plain/smooth surfaces (Neural matching)' is active."
-                )
-            else:
-                self.custom_guided_check.setToolTip("")
+            self.custom_guided_check.setEnabled(True)
+            self.custom_guided_check.setToolTip("")
 
 
     def _on_mesh_mode_changed(self, index):
