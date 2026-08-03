@@ -61,11 +61,13 @@ New-Item -ItemType Directory -Force -Path $distOpenMvsDir | Out-Null
 Write-Host "[4/5] Selectively copying backend toolchain dependencies..." -ForegroundColor Yellow
 
 # Copy COLMAP dependencies
-Write-Host "  Copying COLMAP binaries..." -ForegroundColor DarkGray
+Write-Host "  Copying COLMAP binaries and vocabulary trees..." -ForegroundColor DarkGray
 # - DLLs
 Copy-Item -Path "backend_bin/colmap/*.dll" -Destination $distColmapDir
 # - Executable
 Copy-Item -Path "backend_bin/colmap/colmap.exe" -Destination $distColmapDir
+# - Vocab trees (.bin)
+Get-ChildItem -Path "backend_bin/colmap/*.bin" -ErrorAction SilentlyContinue | Copy-Item -Destination $distColmapDir
 # - Plugins folder (Qt plugins)
 if (Test-Path "backend_bin/colmap/plugins") {
     Copy-Item -Path "backend_bin/colmap/plugins" -Destination $distColmapDir -Recurse

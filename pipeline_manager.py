@@ -43,6 +43,20 @@ def get_base_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_default_vocab_tree_path() -> str | None:
+    base_dir = get_base_dir()
+    colmap_dir = os.path.join(base_dir, "backend_bin", "colmap")
+    primary_file = os.path.join(colmap_dir, "vocab_tree_flickr100K_words32K.bin")
+    if os.path.exists(primary_file):
+        return primary_file
+    
+    if os.path.exists(colmap_dir):
+        for f in os.listdir(colmap_dir):
+            if f.startswith("vocab_tree") and f.endswith(".bin"):
+                return os.path.join(colmap_dir, f)
+    return None
+
+
 class PipelineWorker(QThread):
     """
     Worker thread that executes the photogrammetry toolchain step-by-step.
@@ -910,9 +924,8 @@ class PipelineWorker(QThread):
                 matcher_cmd = "vocab_tree_matcher"
                 vocab_path = self.custom_params.get("vocab_tree_path", "") if self.custom_params else ""
                 if not vocab_path or not os.path.exists(vocab_path):
-                    default_vocab = os.path.join(base_dir, "backend_bin", "colmap", "vocab_tree.bin")
-                    if os.path.exists(default_vocab):
-                        vocab_path = default_vocab
+                    vocab_path = get_default_vocab_tree_path() or ""
+
                 if vocab_path and os.path.exists(vocab_path):
                     extra_args = ["--VocabTreeMatching.vocab_tree_path", vocab_path]
                     self.log_message.emit(f"[INFO] Using vocab_tree_matcher with vocabulary tree: {vocab_path}")

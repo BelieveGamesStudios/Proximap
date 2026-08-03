@@ -2012,7 +2012,11 @@ class MainWindow(QMainWindow):
         vocab_layout.setSpacing(4)
 
         self.vocab_path_edit = QLineEdit(self.vocab_tree_widget)
-        self.vocab_path_edit.setPlaceholderText("Path to vocab_tree.bin...")
+        from pipeline_manager import get_default_vocab_tree_path
+        def_vocab = get_default_vocab_tree_path()
+        if def_vocab:
+            self.vocab_path_edit.setText(def_vocab)
+        self.vocab_path_edit.setPlaceholderText("Path to vocab_tree.bin (leave empty for bundled default)...")
         self.vocab_path_edit.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px; font-size: 10px;")
         
         self.vocab_browse_btn = QPushButton("Browse...", self.vocab_tree_widget)
@@ -2093,7 +2097,7 @@ class MainWindow(QMainWindow):
         # OpenMVS section
         openmvs_sec = QLabel("OpenMVS Settings", self.custom_settings_container)
         openmvs_sec.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676; margin-top: 4px; border: none; background: transparent;")
-        custom_grid.addWidget(openmvs_sec, 6, 0, 1, 2)
+        custom_grid.addWidget(openmvs_sec, 8, 0, 1, 2)
 
         # Densification Resolution
         lbl_densify_res = QLabel("Densification Res:", self.custom_settings_container)
@@ -2107,8 +2111,8 @@ class MainWindow(QMainWindow):
         ])
         self.custom_densify_res_combo.setCurrentIndex(1)
         self.custom_densify_res_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_densify_res, 7, 0)
-        custom_grid.addWidget(self.custom_densify_res_combo, 7, 1)
+        custom_grid.addWidget(lbl_densify_res, 9, 0)
+        custom_grid.addWidget(self.custom_densify_res_combo, 9, 1)
 
         # Max Views for Densification
         lbl_densify_views = QLabel("Max Densify Views:", self.custom_settings_container)
@@ -2117,8 +2121,8 @@ class MainWindow(QMainWindow):
         self.custom_densify_views_spin.setRange(1, 16)
         self.custom_densify_views_spin.setValue(4)
         self.custom_densify_views_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_densify_views, 8, 0)
-        custom_grid.addWidget(self.custom_densify_views_spin, 8, 1)
+        custom_grid.addWidget(lbl_densify_views, 10, 0)
+        custom_grid.addWidget(self.custom_densify_views_spin, 10, 1)
 
         # Mesh Refinement Scales
         lbl_refine_scales = QLabel("Mesh Refinement Scales:", self.custom_settings_container)
@@ -2127,8 +2131,8 @@ class MainWindow(QMainWindow):
         self.custom_refine_scales_spin.setRange(1, 5)
         self.custom_refine_scales_spin.setValue(2)
         self.custom_refine_scales_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_refine_scales, 9, 0)
-        custom_grid.addWidget(self.custom_refine_scales_spin, 9, 1)
+        custom_grid.addWidget(lbl_refine_scales, 11, 0)
+        custom_grid.addWidget(self.custom_refine_scales_spin, 11, 1)
 
         # Texturing Resolution
         lbl_texture_res = QLabel("Texturing Res:", self.custom_settings_container)
@@ -2142,8 +2146,8 @@ class MainWindow(QMainWindow):
         ])
         self.custom_texture_res_combo.setCurrentIndex(1)
         self.custom_texture_res_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_texture_res, 10, 0)
-        custom_grid.addWidget(self.custom_texture_res_combo, 10, 1)
+        custom_grid.addWidget(lbl_texture_res, 12, 0)
+        custom_grid.addWidget(self.custom_texture_res_combo, 12, 1)
         
         advanced_layout.addWidget(self.custom_settings_toggle)
         advanced_layout.addWidget(self.mapper_label)
@@ -3375,6 +3379,12 @@ class MainWindow(QMainWindow):
             self.lbl_vocab.setVisible(is_vocab)
         if hasattr(self, 'vocab_tree_widget'):
             self.vocab_tree_widget.setVisible(is_vocab)
+            if is_vocab and hasattr(self, 'vocab_path_edit'):
+                if not self.vocab_path_edit.text().strip():
+                    from pipeline_manager import get_default_vocab_tree_path
+                    def_path = get_default_vocab_tree_path()
+                    if def_path:
+                        self.vocab_path_edit.setText(def_path)
 
     def _browse_vocab_tree_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
