@@ -1,6 +1,6 @@
 """
 pg_workspace.py - Qt Advanced Docking System (QADS) workspace container for Polyground.
-Hosts the CDockManager, dock widgets (Viewport, Outliner, Properties, Timeline, ToolShelf),
+Hosts the CDockManager, dock widgets (Viewport, Outliner, Properties, ToolShelf),
 and manages layout persistence.
 """
 
@@ -11,7 +11,6 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame, QComboB
 import PySide6QtAds as ads
 
 from mesh_editor.pg_panels import OutlinerPanel, PropertiesPanel, StatsChip, ToolShelfWidget
-from mesh_editor.pg_timeline import TimelineWidget
 
 
 class ViewportDockContainer(QWidget):
@@ -176,12 +175,7 @@ class PolygroundWorkspace(QWidget):
         properties_dock = ads.CDockWidget("Properties", self)
         properties_dock.setWidget(properties_panel)
 
-        # 4. Timeline Dock
-        self.timeline_widget = TimelineWidget(parent=self)
-        timeline_dock = ads.CDockWidget("Timeline", self)
-        timeline_dock.setWidget(self.timeline_widget)
-
-        # 5. Tool Shelf Dock
+        # 4. Tool Shelf Dock
         self.tool_shelf_widget = ToolShelfWidget(parent=self)
         tool_shelf_dock = ads.CDockWidget("Tool Shelf", self)
         tool_shelf_dock.setWidget(self.tool_shelf_widget)
@@ -191,7 +185,6 @@ class PolygroundWorkspace(QWidget):
             "viewport": viewport_dock,
             "outliner": outliner_dock,
             "properties": properties_dock,
-            "timeline": timeline_dock,
             "tool_shelf": tool_shelf_dock
         }
 
@@ -207,7 +200,6 @@ class PolygroundWorkspace(QWidget):
         viewport_dock = self.docks["viewport"]
         outliner_dock = self.docks["outliner"]
         properties_dock = self.docks["properties"]
-        timeline_dock = self.docks["timeline"]
         tool_shelf_dock = self.docks["tool_shelf"]
 
         # Set central widget
@@ -216,7 +208,6 @@ class PolygroundWorkspace(QWidget):
         # Add side and bottom docks
         outliner_area = self.dock_manager.addDockWidget(ads.RightDockWidgetArea, outliner_dock, central_area)
         self.dock_manager.addDockWidget(ads.BottomDockWidgetArea, properties_dock, outliner_area)
-        self.dock_manager.addDockWidget(ads.BottomDockWidgetArea, timeline_dock, central_area)
         self.dock_manager.addDockWidget(ads.LeftDockWidgetArea, tool_shelf_dock, central_area)
 
         tool_shelf_dock.toggleView(False)
