@@ -43,17 +43,36 @@ def get_base_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def is_valid_faiss_vocab_tree(file_path: str) -> bool:
+    """
+    Check if a vocabulary tree binary file is in the FAISS format (file_version == 1)
+    required by COLMAP 3.10+ (May 2025+).
+    Legacy FLANN index files start with uint32 file_version == 32762 (0x7ffa).
+    """
+    if not file_path or not os.path.exists(file_path):
+        return False
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(4)
+            if len(header) < 4:
+                return False
+            import struct
+            version = struct.unpack('<I', header)[0]
+            return version == 1
+    except Exception:
+        return False
+
+
 def get_default_vocab_tree_path() -> str | None:
     base_dir = get_base_dir()
     colmap_dir = os.path.join(base_dir, "backend_bin", "colmap")
-    primary_file = os.path.join(colmap_dir, "vocab_tree_flickr100K_words32K.bin")
-    if os.path.exists(primary_file):
-        return primary_file
     
     if os.path.exists(colmap_dir):
         for f in os.listdir(colmap_dir):
-            if f.startswith("vocab_tree") and f.endswith(".bin"):
-                return os.path.join(colmap_dir, f)
+            if f.endswith(".bin"):
+                cand = os.path.join(colmap_dir, f)
+                if is_valid_faiss_vocab_tree(cand):
+                    return cand
     return None
 
 
@@ -921,17 +940,25 @@ class PipelineWorker(QThread):
                 )
 
             elif matching_mode == "vocab_tree":
-                matcher_cmd = "vocab_tree_matcher"
                 vocab_path = self.custom_params.get("vocab_tree_path", "") if self.custom_params else ""
                 if not vocab_path or not os.path.exists(vocab_path):
                     vocab_path = get_default_vocab_tree_path() or ""
 
                 if vocab_path and os.path.exists(vocab_path):
-                    extra_args = ["--VocabTreeMatching.vocab_tree_path", vocab_path]
-                    self.log_message.emit(f"[INFO] Using vocab_tree_matcher with vocabulary tree: {vocab_path}")
+                    if is_valid_faiss_vocab_tree(vocab_path):
+                        matcher_cmd = "vocab_tree_matcher"
+                        extra_args = ["--VocabTreeMatching.vocab_tree_path", vocab_path]
+                        self.log_message.emit(f"[INFO] Using vocab_tree_matcher with FAISS vocabulary tree: {vocab_path}")
+                    else:
+                        self.log_message.emit(
+                            f"[WARNING] Vocabulary tree file '{os.path.basename(vocab_path)}' is in legacy FLANN index format (COLMAP 3.10+ requires FAISS index). "
+                            "Automatically falling back to exhaustive_matcher."
+                        )
+                        matcher_cmd = "exhaustive_matcher"
+                        extra_args = []
                 else:
                     self.log_message.emit(
-                        "[WARNING] Vocabulary tree file not found or invalid path. Falling back to exhaustive_matcher."
+                        "[WARNING] Vocabulary tree file not found or invalid FAISS path. Falling back to exhaustive_matcher."
                     )
                     matcher_cmd = "exhaustive_matcher"
                     extra_args = []
@@ -985,7 +1012,22 @@ class PipelineWorker(QThread):
                 cmd_match_gpu, cmd_match_cpu, timeout=7200.0, env=colmap_env,
                 line_parser=self._parse_matching_line
             ):
-                return False
+                if matcher_cmd == "vocab_tree_matcher":
+                    self.log_message.emit(
+                        "[WARNING] vocab_tree_matcher failed during execution. Retrying automatically with exhaustive_matcher..."
+                    )
+                    matcher_cmd = "exhaustive_matcher"
+                    cmd_match_gpu = [arg for arg in cmd_match_gpu if not arg.startswith("--VocabTreeMatching")]
+                    cmd_match_cpu = [arg for arg in cmd_match_cpu if not arg.startswith("--VocabTreeMatching")]
+                    cmd_match_gpu[1] = "exhaustive_matcher"
+                    cmd_match_cpu[1] = "exhaustive_matcher"
+                    if not self._run_with_gpu_fallback(
+                        cmd_match_gpu, cmd_match_cpu, timeout=7200.0, env=colmap_env,
+                        line_parser=self._parse_matching_line
+                    ):
+                        return False
+                else:
+                    return False
 
             db_stats = self._query_colmap_database_stats(database_path)
             if self._total_images > 1 and db_stats["num_pairs"] == 0:
