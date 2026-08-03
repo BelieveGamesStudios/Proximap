@@ -5371,8 +5371,9 @@ class MobileQRDialog(QDialog):
     def __init__(self, urls: list, mode: str = "import", parent=None):
         super().__init__(parent)
         self.mode = mode
+        self.urls = urls
         self.setWindowTitle("Mobile Device Bridge — " + ("Import Media" if mode == "import" else "Download 3D Model"))
-        self.setFixedSize(420, 520)
+        self.setFixedSize(420, 560 if len(urls) > 1 else 520)
         self.setModal(True)
         self.setStyleSheet("""
             QDialog {
@@ -5387,30 +5388,16 @@ class MobileQRDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         title = QLabel("📱 Scan with your Mobile Phone", self)
         title.setStyleSheet("font-size: 16px; font-weight: bold; color: #00E676;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
-        # Get active network Wi-Fi SSID if possible
-        wifi_ssid = None
-        if os.name == "nt":
-            try:
-                import subprocess
-                res = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", "(Get-NetConnectionProfile).Name"],
-                    capture_output=True,
-                    text=True,
-                    timeout=2
-                )
-                if res.returncode == 0:
-                    lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
-                    if lines:
-                        wifi_ssid = lines[0]
-            except Exception:
-                pass
+        # Get active network Wi-Fi / Hotspot SSID if possible
+        from mobile_bridge_server import get_wifi_ssid
+        wifi_ssid = get_wifi_ssid()
 
         if wifi_ssid:
             network_msg = f"\nMake sure your phone is connected to the same Wi-Fi: '{wifi_ssid}'"
@@ -5427,9 +5414,42 @@ class MobileQRDialog(QDialog):
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(desc)
 
+        # Network Selector Dropdown if multiple IPs available
+        if len(urls) > 1:
+            url_select_box = QFrame(self)
+            url_select_box.setStyleSheet("background-color: #1E1E1E; border: 1px solid #333333; border-radius: 6px; padding: 4px 8px;")
+            url_select_layout = QHBoxLayout(url_select_box)
+            url_select_layout.setContentsMargins(4, 2, 4, 2)
+            
+            lbl_ip_select = QLabel("Network Adapter / IP:", url_select_box)
+            lbl_ip_select.setStyleSheet("font-size: 11px; color: #888888;")
+            url_select_layout.addWidget(lbl_ip_select)
+            
+            self.url_combo = QComboBox(url_select_box)
+            self.url_combo.setStyleSheet("""
+                QComboBox {
+                    background-color: #292929;
+                    color: #00E676;
+                    font-weight: bold;
+                    border: 1px solid #444;
+                    border-radius: 4px;
+                    padding: 4px 8px;
+                }
+                QComboBox QAbstractItemView {
+                    background-color: #1E1E1E;
+                    color: #00E676;
+                    selection-background-color: #333333;
+                }
+            """)
+            for u in urls:
+                self.url_combo.addItem(u)
+            self.url_combo.currentTextChanged.connect(self._on_url_selected)
+            url_select_layout.addWidget(self.url_combo, stretch=1)
+            layout.addWidget(url_select_box)
+
         # QR Code Image Label
         self.qr_label = QLabel(self)
-        self.qr_label.setFixedSize(240, 240)
+        self.qr_label.setFixedSize(220, 220)
         self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.qr_label.setStyleSheet("background-color: #ffffff; border-radius: 8px; padding: 10px;")
         
@@ -5450,12 +5470,12 @@ class MobileQRDialog(QDialog):
         
         lbl_type = QLabel("Or type this URL into your phone browser:", url_box)
         lbl_type.setStyleSheet("font-size: 11px; color: #888888;")
-        lbl_url = QLabel(primary_url, url_box)
-        lbl_url.setStyleSheet("font-size: 13px; font-weight: bold; color: #00E676;")
-        lbl_url.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_url = QLabel(primary_url, url_box)
+        self.lbl_url.setStyleSheet("font-size: 13px; font-weight: bold; color: #00E676;")
+        self.lbl_url.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         
         url_layout.addWidget(lbl_type)
-        url_layout.addWidget(lbl_url)
+        url_layout.addWidget(self.lbl_url)
         layout.addWidget(url_box)
 
         # Status text
@@ -5484,6 +5504,11 @@ class MobileQRDialog(QDialog):
         btn_layout.addWidget(self.cancel_btn)
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
+
+    def _on_url_selected(self, new_url: str):
+        if new_url:
+            self._set_qr_url(new_url)
+            self.lbl_url.setText(new_url)
 
     def _set_qr_url(self, url: str):
         try:
@@ -5637,7 +5662,7 @@ class MobileImportSetupDialog(QDialog):
     def check_network(self):
         import psutil
         import socket
-        import subprocess
+        from mobile_bridge_server import get_wifi_ssid
         
         # 1. Get active network connections from psutil
         stats = psutil.net_if_stats()
@@ -5645,38 +5670,26 @@ class MobileImportSetupDialog(QDialog):
         active_nets = []
         
         for name, stat in stats.items():
+            name_lower = name.lower()
+            if name_lower in ("lo", "loopback"):
+                continue
             if stat.isup and name in addrs:
                 for addr in addrs[name]:
                     if addr.family == socket.AF_INET:
                         ip = addr.address
-                        if ip and ip != "127.0.0.1" and not ip.startswith("169.254"):
-                            name_lower = name.lower()
+                        if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
                             if any(x in name_lower for x in ["wi-fi", "wifi", "wlan", "wireless", "802.11"]):
                                 conn_type = "Wi-Fi"
-                            elif any(x in name_lower for x in ["local area connection*", "direct"]):
+                            elif any(x in name_lower for x in ["local area connection*", "direct", "ap", "hotspot", "tether"]):
                                 conn_type = "Wi-Fi Hotspot"
-                            elif any(x in name_lower for x in ["ethernet", "lan"]):
+                            elif any(x in name_lower for x in ["ethernet", "lan", "eth", "en"]):
                                 conn_type = "Ethernet"
                             else:
                                 conn_type = "LAN"
                             active_nets.append((name, ip, conn_type))
                             
-        # 2. Try to get Wi-Fi network name / SSID (Windows)
-        wifi_ssid = None
-        if os.name == "nt":
-            try:
-                res = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", "(Get-NetConnectionProfile).Name"],
-                    capture_output=True,
-                    text=True,
-                    timeout=2
-                )
-                if res.returncode == 0:
-                    lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
-                    if lines:
-                        wifi_ssid = lines[0]
-            except Exception:
-                pass
+        # 2. Try to get Wi-Fi network / Hotspot name across OSes
+        wifi_ssid = get_wifi_ssid()
                 
         # 3. Format description message
         if not active_nets:
