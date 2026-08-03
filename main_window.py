@@ -3466,7 +3466,7 @@ class MainWindow(QMainWindow):
                 return
             
             n_images = len(self.image_list)
-            if n_images > 80 and budget.available_gb < 6.0:
+            if not self.custom_settings_toggle.isChecked() and n_images > 80 and budget.available_gb < 6.0:
                 reply = QMessageBox.information(
                     self,
                     "Memory Safeguard Advisory",
