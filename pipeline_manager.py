@@ -30,8 +30,11 @@ import sys
 import json
 import time
 import shutil
+import gc
+import psutil
 from PySide6.QtCore import QThread, Signal
-from hardware_profiler import run_safe_subprocess
+from hardware_profiler import run_safe_subprocess, get_memory_budget, get_recommended_matching_mode
+
 
 
 def get_base_dir():
@@ -326,6 +329,7 @@ class PipelineWorker(QThread):
             )
             _active_subprocesses.add(proc)
             start_time = time.time()
+            last_mem_check = time.time()
 
             log_handle = None
             if is_openmvs:
@@ -368,6 +372,24 @@ class PipelineWorker(QThread):
                         log_handle.close()
                         self.log_message.emit(f"[TIMEOUT] Process timed out after {timeout}s")
                         return False
+
+                    # Memory watchdog check
+                    if time.time() - last_mem_check > 4.0:
+                        last_mem_check = time.time()
+                        vm = psutil.virtual_memory()
+                        if vm.percent > 96.0 or vm.available < (500 * 1024 * 1024):
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=2.0)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                            log_handle.close()
+                            self.log_message.emit(
+                                f"[CRITICAL OOM GUARD] System RAM usage reached {vm.percent:.1f}% "
+                                f"({vm.available / (1024**2):.0f} MB available). "
+                                f"Terminated {exe_name} to prevent system lockup/crash."
+                            )
+                            return False
 
                     line = log_handle.readline()
                     if not line:
@@ -433,7 +455,25 @@ class PipelineWorker(QThread):
                         self.log_message.emit(f"[TIMEOUT] Process timed out after {timeout}s")
                         return False
 
+                    # Memory watchdog check
+                    if time.time() - last_mem_check > 4.0:
+                        last_mem_check = time.time()
+                        vm = psutil.virtual_memory()
+                        if vm.percent > 96.0 or vm.available < (500 * 1024 * 1024):
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=2.0)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                            self.log_message.emit(
+                                f"[CRITICAL OOM GUARD] System RAM usage reached {vm.percent:.1f}% "
+                                f"({vm.available / (1024**2):.0f} MB available). "
+                                f"Terminated {exe_name} to prevent system lockup/crash."
+                            )
+                            return False
+
                     line = proc.stdout.readline()
+
                     if not line:
                         if proc.poll() is not None:
                             break
@@ -496,11 +536,31 @@ class PipelineWorker(QThread):
         os.makedirs(mvs_out, exist_ok=True)
         os.makedirs(os.path.join(colmap_out, "sparse"), exist_ok=True)
 
-        num_threads = os.cpu_count() or 4
+        mem_budget = get_memory_budget()
+        self.log_message.emit(
+            f"[MEMORY] Dynamic Available RAM: {mem_budget.available_gb:.2f} GB | "
+            f"Swap Used: {mem_budget.swap_used_gb:.2f}/{mem_budget.swap_total_gb:.2f} GB | "
+            f"Pressure Level: {mem_budget.pressure_level.upper()}"
+        )
+
+        if mem_budget.available_gb < 1.5 and mem_budget.swap_used_gb > (mem_budget.swap_total_gb * 0.85):
+            self.log_message.emit(
+                "[CRITICAL] Available system memory is below 1.5 GB and swap memory is near exhaustion. "
+                "Aborting reconstruction to prevent system crash."
+            )
+            return False
+
+        pressure_mode = (mem_budget.pressure_level != "ok")
+        num_threads = mem_budget.safe_thread_count
+        self.log_message.emit(
+            f"[MEMORY] Budgeted parallel worker threads: {num_threads} (Host Logical CPUs: {os.cpu_count() or 4})"
+        )
 
         # --- GPU / CUDA Environment (used mainly by OpenMVS) ---
         env = os.environ.copy()
+        env["OMP_NUM_THREADS"] = str(num_threads)
         if self.gpu_mode == "force_cpu":
+
             self.log_message.emit("[INFO] Hardware Acceleration: Forcing CPU fallback.")
             env["CUDA_VISIBLE_DEVICES"] = ""
         elif self.gpu_mode == "force_gpu":
@@ -584,9 +644,16 @@ class PipelineWorker(QThread):
             refine_res     = "0"
             texture_res    = "0"
 
+        # Dynamic memory pressure caps
+        if pressure_mode and not self.custom_params:
+            self.log_message.emit("[MEMORY WARN] High memory pressure detected! Applying dynamic safety caps to feature & match thresholds.")
+            colmap_max_num_features = min(colmap_max_num_features, 6144)
+            colmap_max_num_matches = min(colmap_max_num_matches, 8192)
+
         # Override presets with custom parameters if custom overrides checkbox was checked
         if self.custom_params:
             self.log_message.emit("[INFO] Custom parameter overrides enabled. Overriding quality preset configuration.")
+
             if "colmap_max_num_features" in self.custom_params:
                 colmap_max_num_features = self.custom_params["colmap_max_num_features"]
             if "colmap_max_num_matches" in self.custom_params:
@@ -823,24 +890,48 @@ class PipelineWorker(QThread):
 
             self._image_names_map = self._get_image_names_from_db(database_path)
 
+            curr_avail_gb = get_memory_budget().available_gb
+            matching_mode = get_recommended_matching_mode(self._total_images, curr_avail_gb)
+
+            if matching_mode == "sequential":
+                matcher_cmd = "sequential_matcher"
+                extra_args = ["--SequentialMatching.overlap", "15", "--SequentialMatching.loop_detection", "0"]
+                self.log_message.emit(
+                    f"[MEMORY OPTIMIZATION] Activated sequential_matcher for {self._total_images} images "
+                    f"({curr_avail_gb:.1f} GB RAM available). Prevents memory exhaustion while matching overlapping frames."
+                )
+
+            elif matching_mode == "exhaustive_blocked":
+                matcher_cmd = "exhaustive_matcher"
+                extra_args = ["--ExhaustiveMatching.block_size", "20"]
+                self.log_message.emit(
+                    f"[MEMORY OPTIMIZATION] Using exhaustive_matcher with reduced block size (20) "
+                    f"to prevent RAM saturation during matrix matching."
+                )
+            else:
+                matcher_cmd = "exhaustive_matcher"
+                extra_args = []
+
             cmd_match_gpu = [
-                colmap_exe, "exhaustive_matcher",
+                colmap_exe, matcher_cmd,
                 "--database_path", database_path,
                 "--SiftMatching.use_gpu", "1",
                 "--SiftMatching.guided_matching", guided_matching,
                 "--SiftMatching.max_ratio", nndr_ratio,
                 "--SiftMatching.max_num_matches", str(colmap_max_num_matches),
                 "--SiftMatching.num_threads", str(num_threads),
-            ]
+            ] + extra_args
+
             cmd_match_cpu = [
-                colmap_exe, "exhaustive_matcher",
+                colmap_exe, matcher_cmd,
                 "--database_path", database_path,
                 "--SiftMatching.use_gpu", "0",
                 "--SiftMatching.guided_matching", guided_matching,
                 "--SiftMatching.max_ratio", nndr_ratio,
                 "--SiftMatching.max_num_matches", str(colmap_max_num_matches),
                 "--SiftMatching.num_threads", str(num_threads),
-            ]
+            ] + extra_args
+
             self._match_counts = []
             if not self._run_with_gpu_fallback(
                 cmd_match_gpu, cmd_match_cpu, timeout=7200.0, env=colmap_env,
@@ -1515,7 +1606,15 @@ class PipelineWorker(QThread):
                     f" ({pair_idx + 1}/{num_pairs})"
                 )
 
+                del feats0, feats1, result
+                if pair_idx % 25 == 0:
+                    if device.type == "cuda":
+                        import torch
+                        torch.cuda.empty_cache()
+                    gc.collect()
+
             conn.commit()
+
         except Exception as e:
             self.log_message.emit(f"[ERROR] SP+LG: Database transaction failed: {e}")
             return False

@@ -2381,26 +2381,42 @@ class MainWindow(QMainWindow):
 
     def _update_system_badge(self):
         """Calculates system resource quality badge and updates style dynamically."""
-        if self.total_ram_gb >= 8.0:
-            status_text = "SYSTEM READY (Optimal RAM)"
-            badge_color = "#00E676"  # Bright green
-            text_color = "#121212"
-        elif self.total_ram_gb >= 4.0:
-            status_text = "SYSTEM WARN (Low Memory Mode)"
-            badge_color = "#FFD700"  # Yellow
-            text_color = "#121212"
-        else:
-            status_text = "SYSTEM INSUFFICIENT (Below 4GB)"
-            badge_color = "#D50000"  # Deep red
-            text_color = "#ffffff"
+        try:
+            budget = hardware_profiler.get_memory_budget()
+            avail_gb = budget.available_gb
+            swap_used = budget.swap_used_gb
+            swap_total = budget.swap_total_gb
             
-        # Append GPU status details
-        gpu_info = "dGPU Active" if self.dgpu_detected else "iGPU Fallback Active"
-        self.badge.setText(f"{status_text}\n{gpu_info}")
-        self.badge.setStyleSheet(
-            f"background-color: {badge_color}; color: {text_color}; "
-            "font-weight: bold; border-radius: 4px; padding: 6px; font-size: 11px;"
-        )
+            if budget.pressure_level == "ok":
+                status_text = f"SYSTEM READY ({avail_gb:.1f}GB RAM Free)"
+                badge_color = "#00E676"  # Bright green
+                text_color = "#121212"
+            elif budget.pressure_level == "warn":
+                status_text = f"SYSTEM WARN ({avail_gb:.1f}GB RAM Free)"
+                badge_color = "#FFD700"  # Yellow
+                text_color = "#121212"
+            else:
+                status_text = f"SYSTEM INSUFFICIENT ({avail_gb:.1f}GB RAM Free)"
+                badge_color = "#D50000"  # Deep red
+                text_color = "#ffffff"
+                
+            gpu_info = "dGPU Active" if self.dgpu_detected else "iGPU Fallback Active"
+            if swap_used > 1.5 and swap_total > 0:
+                gpu_info += f" · Swap: {swap_used:.1f}/{swap_total:.1f}GB"
+                
+            self.badge.setText(f"{status_text}\n{gpu_info}")
+            self.badge.setStyleSheet(
+                f"background-color: {badge_color}; color: {text_color}; "
+                "font-weight: bold; border-radius: 4px; padding: 6px; font-size: 11px;"
+            )
+        except Exception:
+            # Fallback if profiler not fully ready
+            self.badge.setText(f"SYSTEM READY\n{'dGPU Active' if self.dgpu_detected else 'iGPU Fallback Active'}")
+            self.badge.setStyleSheet(
+                "background-color: #00E676; color: #121212; "
+                "font-weight: bold; border-radius: 4px; padding: 6px; font-size: 11px;"
+            )
+
 
     def _set_process_btn_state(self, state: str):
         """
@@ -3338,9 +3354,39 @@ class MainWindow(QMainWindow):
         if not self.standalone_cloud_path and not self.image_list:
             QMessageBox.warning(self, "No Images Found", "No images or video frames were found for this reconstruction session. Please import images or videos to proceed.")
             return
+
+        # Pre-flight dynamic memory guard & advisory
+        try:
+            budget = hardware_profiler.get_memory_budget()
+            if budget.available_gb < 1.5 and budget.swap_used_gb > (budget.swap_total_gb * 0.85):
+                QMessageBox.critical(
+                    self,
+                    "Critically Low System Memory",
+                    f"Available System RAM ({budget.available_gb:.1f} GB) and Swap Memory are critically low.\n\n"
+                    "Please close background applications (such as browsers or video editors) to free memory before starting reconstruction."
+                )
+                return
+            
+            n_images = len(self.image_list)
+            if n_images > 80 and budget.available_gb < 6.0:
+                reply = QMessageBox.information(
+                    self,
+                    "Memory Safeguard Advisory",
+                    f"Your scan contains {n_images} images with {budget.available_gb:.1f} GB available RAM.\n\n"
+                    "Proximap will automatically activate Sequential Feature Matching and dynamic thread management "
+                    "to protect system stability and prevent memory crashes.\n\n"
+                    "Do you wish to proceed?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                if reply != QMessageBox.Yes:
+                    return
+        except Exception:
+            pass
             
         # Terminate any active viewer to prevent lock conflict on MVS files during reconstruction
         self._terminate_viewer()
+
         
         self._set_process_btn_state("progress")
         self.browse_btn.setEnabled(False)
