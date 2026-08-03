@@ -893,13 +893,40 @@ class PipelineWorker(QThread):
             curr_avail_gb = get_memory_budget().available_gb
             matching_mode = get_recommended_matching_mode(self._total_images, curr_avail_gb)
 
+            # Override matching_mode if user explicitly chose a matcher type in custom_params
+            if self.custom_params and "colmap_matcher_type" in self.custom_params:
+                user_matcher = self.custom_params["colmap_matcher_type"]
+                if user_matcher in ["exhaustive", "sequential", "vocab_tree", "spatial"]:
+                    matching_mode = user_matcher
+
             if matching_mode == "sequential":
                 matcher_cmd = "sequential_matcher"
                 extra_args = ["--SequentialMatching.overlap", "15", "--SequentialMatching.loop_detection", "0"]
                 self.log_message.emit(
-                    f"[MEMORY OPTIMIZATION] Activated sequential_matcher for {self._total_images} images "
-                    f"({curr_avail_gb:.1f} GB RAM available). Prevents memory exhaustion while matching overlapping frames."
+                    f"[INFO] Using sequential_matcher for {self._total_images} images."
                 )
+
+            elif matching_mode == "vocab_tree":
+                matcher_cmd = "vocab_tree_matcher"
+                vocab_path = self.custom_params.get("vocab_tree_path", "") if self.custom_params else ""
+                if not vocab_path or not os.path.exists(vocab_path):
+                    default_vocab = os.path.join(base_dir, "backend_bin", "colmap", "vocab_tree.bin")
+                    if os.path.exists(default_vocab):
+                        vocab_path = default_vocab
+                if vocab_path and os.path.exists(vocab_path):
+                    extra_args = ["--VocabTreeMatching.vocab_tree_path", vocab_path]
+                    self.log_message.emit(f"[INFO] Using vocab_tree_matcher with vocabulary tree: {vocab_path}")
+                else:
+                    self.log_message.emit(
+                        "[WARNING] Vocabulary tree file not found or invalid path. Falling back to exhaustive_matcher."
+                    )
+                    matcher_cmd = "exhaustive_matcher"
+                    extra_args = []
+
+            elif matching_mode == "spatial":
+                matcher_cmd = "spatial_matcher"
+                extra_args = []
+                self.log_message.emit("[INFO] Using spatial_matcher for GPS-based camera pose matching.")
 
             elif matching_mode == "exhaustive_blocked":
                 matcher_cmd = "exhaustive_matcher"

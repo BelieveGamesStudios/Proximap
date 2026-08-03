@@ -1987,6 +1987,61 @@ class MainWindow(QMainWindow):
         colmap_sec.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676; margin-top: 4px; border: none; background: transparent;")
         custom_grid.addWidget(colmap_sec, 0, 0, 1, 2)
 
+        # Matcher Type
+        lbl_matcher_type = QLabel("Matcher Type:", self.custom_settings_container)
+        lbl_matcher_type.setStyleSheet(lbl_style)
+        self.custom_matcher_combo = QComboBox(self.custom_settings_container)
+        self.custom_matcher_combo.addItems([
+            "Auto-Select (Hardware Profiler)",
+            "Exhaustive (Full pair matching)",
+            "Sequential (Ordered/Video frames)",
+            "Vocabulary Tree (Large dataset scale)",
+            "Spatial (GPS position based)"
+        ])
+        self.custom_matcher_combo.setCurrentIndex(0)
+        self.custom_matcher_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        self.custom_matcher_combo.currentIndexChanged.connect(self._on_matcher_type_changed)
+        custom_grid.addWidget(lbl_matcher_type, 1, 0)
+        custom_grid.addWidget(self.custom_matcher_combo, 1, 1)
+
+        # Vocab Tree File Selection Row (hidden by default)
+        self.vocab_tree_widget = QWidget(self.custom_settings_container)
+        self.vocab_tree_widget.setStyleSheet("border: none; background: transparent; padding: 0;")
+        vocab_layout = QHBoxLayout(self.vocab_tree_widget)
+        vocab_layout.setContentsMargins(0, 0, 0, 0)
+        vocab_layout.setSpacing(4)
+
+        self.vocab_path_edit = QLineEdit(self.vocab_tree_widget)
+        self.vocab_path_edit.setPlaceholderText("Path to vocab_tree.bin...")
+        self.vocab_path_edit.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px; font-size: 10px;")
+        
+        self.vocab_browse_btn = QPushButton("Browse...", self.vocab_tree_widget)
+        self.vocab_browse_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2D2D2D;
+                color: #CCCCCC;
+                border: 1px solid #444444;
+                border-radius: 3px;
+                padding: 2px 6px;
+                font-size: 10px;
+            }
+            QPushButton:hover {
+                background-color: #3D3D3D;
+                color: #00E676;
+            }
+        """)
+        self.vocab_browse_btn.clicked.connect(self._browse_vocab_tree_file)
+        
+        vocab_layout.addWidget(self.vocab_path_edit, stretch=1)
+        vocab_layout.addWidget(self.vocab_browse_btn)
+
+        self.lbl_vocab = QLabel("Vocab Tree File:", self.custom_settings_container)
+        self.lbl_vocab.setStyleSheet(lbl_style)
+        custom_grid.addWidget(self.lbl_vocab, 2, 0)
+        custom_grid.addWidget(self.vocab_tree_widget, 2, 1)
+        self.lbl_vocab.setVisible(False)
+        self.vocab_tree_widget.setVisible(False)
+
         # SIFT Max Features
         lbl_features = QLabel("SIFT Max Features:", self.custom_settings_container)
         lbl_features.setStyleSheet(lbl_style)
@@ -1995,8 +2050,8 @@ class MainWindow(QMainWindow):
         self.custom_features_spin.setSingleStep(1000)
         self.custom_features_spin.setValue(8000)
         self.custom_features_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_features, 1, 0)
-        custom_grid.addWidget(self.custom_features_spin, 1, 1)
+        custom_grid.addWidget(lbl_features, 3, 0)
+        custom_grid.addWidget(self.custom_features_spin, 3, 1)
 
         # Exhaustive Max Matches
         lbl_matches = QLabel("Max Num Matches:", self.custom_settings_container)
@@ -2006,32 +2061,32 @@ class MainWindow(QMainWindow):
         self.custom_matches_spin.setSingleStep(4096)
         self.custom_matches_spin.setValue(16384)
         self.custom_matches_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_matches, 2, 0)
-        custom_grid.addWidget(self.custom_matches_spin, 2, 1)
+        custom_grid.addWidget(lbl_matches, 4, 0)
+        custom_grid.addWidget(self.custom_matches_spin, 4, 1)
 
         # Exhaustive Block Size
-        lbl_block_size = QLabel("Exhaustive Block Size:", self.custom_settings_container)
-        lbl_block_size.setStyleSheet(lbl_style)
+        self.lbl_block_size = QLabel("Exhaustive Block Size:", self.custom_settings_container)
+        self.lbl_block_size.setStyleSheet(lbl_style)
         self.custom_block_size_spin = QSpinBox(self.custom_settings_container)
         self.custom_block_size_spin.setRange(5, 200)
         self.custom_block_size_spin.setSingleStep(5)
         self.custom_block_size_spin.setValue(50)
         self.custom_block_size_spin.setToolTip("Block size for COLMAP exhaustive_matcher. Lower values (e.g. 20) reduce RAM consumption during matrix matching.")
         self.custom_block_size_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_block_size, 3, 0)
-        custom_grid.addWidget(self.custom_block_size_spin, 3, 1)
+        custom_grid.addWidget(self.lbl_block_size, 5, 0)
+        custom_grid.addWidget(self.custom_block_size_spin, 5, 1)
 
         # Guided Matching
         self.custom_guided_check = QCheckBox("Use Guided Matching", self.custom_settings_container)
         self.custom_guided_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
         self.custom_guided_check.setChecked(True)
-        custom_grid.addWidget(self.custom_guided_check, 4, 0, 1, 2)
+        custom_grid.addWidget(self.custom_guided_check, 6, 0, 1, 2)
 
         # Bundle Adjuster
         self.custom_ba_check = QCheckBox("Run Extra Bundle Adjuster", self.custom_settings_container)
         self.custom_ba_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
         self.custom_ba_check.setChecked(False)
-        custom_grid.addWidget(self.custom_ba_check, 5, 0, 1, 2)
+        custom_grid.addWidget(self.custom_ba_check, 7, 0, 1, 2)
 
 
 
@@ -3309,6 +3364,27 @@ class MainWindow(QMainWindow):
     def _on_poisson_depth_changed(self, value):
         self.poisson_depth_label.setText(f"Poisson Depth: {value}")
 
+    def _on_matcher_type_changed(self, index: int):
+        is_exhaustive = (index in (0, 1))  # Auto-Select or Exhaustive
+        is_vocab = (index == 3)
+        if hasattr(self, 'lbl_block_size'):
+            self.lbl_block_size.setVisible(is_exhaustive)
+        if hasattr(self, 'custom_block_size_spin'):
+            self.custom_block_size_spin.setVisible(is_exhaustive)
+        if hasattr(self, 'lbl_vocab'):
+            self.lbl_vocab.setVisible(is_vocab)
+        if hasattr(self, 'vocab_tree_widget'):
+            self.vocab_tree_widget.setVisible(is_vocab)
+
+    def _browse_vocab_tree_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Vocabulary Tree File", self.last_accessed_dir,
+            "Binary Vocab Tree (*.bin *.fbow);;All Files (*)"
+        )
+        if file_path:
+            self.vocab_path_edit.setText(file_path)
+            self.last_accessed_dir = os.path.dirname(file_path)
+
     def _on_custom_settings_toggled(self, checked):
         self.mapper_label.setEnabled(checked)
         self.mapper_combo.setEnabled(checked)
@@ -3486,9 +3562,20 @@ class MainWindow(QMainWindow):
         mesh_mode = "poisson" if self.mesh_mode_combo.currentIndex() == 1 else "default"
         poisson_depth = self.poisson_depth_slider.value()
 
+        matcher_type_map = {
+            0: "auto",
+            1: "exhaustive",
+            2: "sequential",
+            3: "vocab_tree",
+            4: "spatial"
+        }
+        selected_matcher = matcher_type_map.get(self.custom_matcher_combo.currentIndex(), "auto")
+
         custom_params = None
         if self.custom_settings_toggle.isChecked():
             custom_params = {
+                "colmap_matcher_type": selected_matcher,
+                "vocab_tree_path": self.vocab_path_edit.text().strip(),
                 "colmap_max_num_features": self.custom_features_spin.value(),
                 "colmap_max_num_matches": self.custom_matches_spin.value(),
                 "colmap_block_size": self.custom_block_size_spin.value(),
