@@ -16,7 +16,7 @@ from addons.addon_base import ProximapAddon
 
 class MeshInspectorAddon(ProximapAddon):
     addon_id = "mesh_inspector"
-    addon_name = "🔍 Mesh Inspector"
+    addon_name = "Mesh Inspector"
     addon_version = "1.0.0"
     addon_description = "Calculates vertex counts, face counts, and bounding dimensions for selected meshes in the Mesh Editor."
     addon_author = "Proximap Team"

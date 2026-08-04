@@ -899,7 +899,7 @@ class PipelineWorker(QThread):
                 cmd_extract_cpu.extend(additional_flags)
             self._feature_counts = []
             if not self._run_with_gpu_fallback(
-                cmd_extract_gpu, cmd_extract_cpu, timeout=7200.0, env=colmap_env,
+                cmd_extract_gpu, cmd_extract_cpu, timeout=14400.0, env=colmap_env,
                 line_parser=self._parse_feature_extraction_line
             ):
                 return False
@@ -1024,7 +1024,7 @@ class PipelineWorker(QThread):
 
             self._match_counts = []
             if not self._run_with_gpu_fallback(
-                cmd_match_gpu, cmd_match_cpu, timeout=7200.0, env=colmap_env,
+                cmd_match_gpu, cmd_match_cpu, timeout=14400.0, env=colmap_env,
                 line_parser=self._parse_matching_line
             ):
                 if matcher_cmd == "vocab_tree_matcher":
@@ -1037,7 +1037,7 @@ class PipelineWorker(QThread):
                     cmd_match_gpu[1] = "exhaustive_matcher"
                     cmd_match_cpu[1] = "exhaustive_matcher"
                     if not self._run_with_gpu_fallback(
-                        cmd_match_gpu, cmd_match_cpu, timeout=7200.0, env=colmap_env,
+                        cmd_match_gpu, cmd_match_cpu, timeout=14400.0, env=colmap_env,
                         line_parser=self._parse_matching_line
                     ):
                         return False
@@ -1057,7 +1057,7 @@ class PipelineWorker(QThread):
                 self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_distance", "0.9")
                 self._using_gpu_sift = False
                 if not self._run_process_realtime(
-                    relaxed_cpu_match, timeout=7200.0, env=colmap_env,
+                    relaxed_cpu_match, timeout=14400.0, env=colmap_env,
                     line_parser=self._parse_matching_line
                 ):
                     return False
@@ -1119,7 +1119,7 @@ class PipelineWorker(QThread):
                     "--GlobalMapper.num_threads", str(num_threads),
                     "--GlobalMapper.ba_num_iterations", str(ba_global_max_refinements),
                 ]
-                ok = self._run_process_realtime(cmd_global, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line)
+                ok = self._run_process_realtime(cmd_global, timeout=14400.0, env=colmap_env, line_parser=self._parse_mapper_line)
                 if not ok or not self._select_best_sparse_model(sparse_dir):
                     self.log_message.emit("[WARNING] GLOMAP global_mapper failed or produced no model. Falling back to COLMAP incremental mapper...")
                     if os.path.exists(sparse_dir):
@@ -1128,11 +1128,11 @@ class PipelineWorker(QThread):
                         except Exception:
                             pass
                     os.makedirs(sparse_dir, exist_ok=True)
-                    if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
+                    if not self._run_process_realtime(cmd_incremental, timeout=14400.0, env=colmap_env, line_parser=self._parse_mapper_line):
                         return False
             else:
                 self.status_changed.emit("Step 4/9: Estimating Camera Poses (SfM)...")
-                if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
+                if not self._run_process_realtime(cmd_incremental, timeout=14400.0, env=colmap_env, line_parser=self._parse_mapper_line):
                     return False
 
             best_model_dir = self._to_colmap_path(self._select_best_sparse_model(sparse_dir)) if self._select_best_sparse_model(sparse_dir) else None

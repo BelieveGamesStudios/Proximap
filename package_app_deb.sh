@@ -60,6 +60,7 @@ python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all pyrr --collect-all OpenGL --collect-all torch \
     --collect-all lightglue --collect-all qrcode --collect-all scipy \
     --collect-all skimage --collect-all open3d \
+    --exclude-module triton --exclude-module torch.testing --exclude-module torch.include \
     --add-data "mesh_editor/shaders:mesh_editor/shaders" \
     main_window.py
 
@@ -68,6 +69,13 @@ if [ ! -d "dist/Proximap" ]; then
     exit 1
 fi
 echo "  PyInstaller compilation successful."
+
+echo "  Pruning unnecessary PyTorch & CUDA build bloat (Triton, C++ headers, test suites)..."
+rm -rf dist/Proximap/_internal/triton 2>/dev/null || true
+rm -rf dist/Proximap/_internal/torch/testing 2>/dev/null || true
+rm -rf dist/Proximap/_internal/torch/include 2>/dev/null || true
+rm -rf dist/Proximap/_internal/nvidia/nccl 2>/dev/null || true
+find dist/Proximap/_internal -name "*.a" -delete 2>/dev/null || true
 
 # 4. Construct Debian package folder structure
 echo "[3/6] Setting up Debian package directory hierarchy..."
@@ -175,6 +183,7 @@ chmod 644 "${CONTROL_DIR}/control"
 DEB_FILE="${DISPLAY_NAME}_${VERSION}_${ARCH}.deb"
 echo "[6/6] Building native .deb package: ${DEB_FILE}..."
 dpkg-deb -z1 --root-owner-group --build "$DEB_DIR" "$DEB_FILE"
+rm -rf "$DEB_DIR"
 
 echo "Creating portable distribution ZIP..."
 ZIP_FILE="Proximap_Linux_Release.zip"
