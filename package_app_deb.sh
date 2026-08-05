@@ -60,8 +60,10 @@ python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all pyrr --collect-all OpenGL --collect-all torch \
     --collect-all lightglue --collect-all qrcode --collect-all scipy \
     --collect-all skimage --collect-all open3d \
+    --collect-all mesh_editor --collect-all addons \
     --exclude-module triton --exclude-module torch.testing --exclude-module torch.include \
     --add-data "mesh_editor/shaders:mesh_editor/shaders" \
+    --add-data "addons:addons" \
     main_window.py
 
 if [ ! -d "dist/Proximap" ]; then
@@ -133,6 +135,13 @@ if [ -d "models" ]; then
 fi
 if [ -d "public" ]; then
     cp -r "public" "$OPT_DIR/"
+fi
+if [ -d "addons" ]; then
+    cp -r "addons" "$OPT_DIR/"
+fi
+if [ -d "mesh_editor" ]; then
+    mkdir -p "$OPT_DIR/mesh_editor"
+    cp -r mesh_editor/* "$OPT_DIR/mesh_editor/" 2>/dev/null || true
 fi
 
 # Set executable permissions

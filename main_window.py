@@ -2442,9 +2442,125 @@ class MainWindow(QMainWindow):
                 layout = QVBoxLayout(self.mesh_editor_placeholder)
                 layout.setContentsMargins(0, 0, 0, 0)
                 layout.addWidget(self.mesh_editor_tab)
+        except Exception as e:
+            import traceback
+            err_msg = f"Failed to load Mesh Editor:\n{str(e)}\n\n{traceback.format_exc()}"
+            print(f"[ERROR] {err_msg}")
+            
+            layout = self.mesh_editor_placeholder.layout()
+            if layout:
+                while layout.count():
+                    child = layout.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
+            else:
+                layout = QVBoxLayout(self.mesh_editor_placeholder)
+            
+            err_container = QWidget(self.mesh_editor_placeholder)
+            err_container.setFixedWidth(540)
+            err_layout = QVBoxLayout(err_container)
+            err_layout.setSpacing(12)
+            err_layout.setAlignment(Qt.AlignCenter)
+            
+            err_title = QLabel("Error Loading Mesh Editor", err_container)
+            err_title.setStyleSheet("color: #FF5252; font-size: 16px; font-weight: bold;")
+            err_title.setAlignment(Qt.AlignCenter)
+            
+            err_box = QTextEdit(err_container)
+            err_box.setPlainText(f"{str(e)}\n\n{traceback.format_exc()}")
+            err_box.setReadOnly(True)
+            err_box.setMaximumHeight(180)
+            err_box.setStyleSheet("""
+                QTextEdit {
+                    background-color: #1A1A1A;
+                    color: #FF8A80;
+                    border: 1px solid #FF5252;
+                    border-radius: 6px;
+                    font-family: monospace;
+                    font-size: 11px;
+                    padding: 8px;
+                }
+            """)
+            
+            retry_btn = QPushButton("Retry Loading", err_container)
+            retry_btn.setCursor(Qt.PointingHandCursor)
+            retry_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #00E676;
+                    color: #121212;
+                    font-weight: bold;
+                    font-size: 13px;
+                    border-radius: 4px;
+                    padding: 8px 20px;
+                }
+                QPushButton:hover {
+                    background-color: #00FF87;
+                }
+            """)
+            retry_btn.clicked.connect(self._retry_load_mesh_editor)
+            
+            err_layout.addWidget(err_title)
+            err_layout.addWidget(err_box)
+            err_layout.addWidget(retry_btn, 0, Qt.AlignCenter)
+            
+            layout.addStretch()
+            layout.addWidget(err_container, 0, Qt.AlignCenter)
+            layout.addStretch()
         finally:
             QApplication.restoreOverrideCursor()
             self._mesh_editor_loading = False
+
+    def _retry_load_mesh_editor(self):
+        layout = self.mesh_editor_placeholder.layout()
+        if layout:
+            while layout.count():
+                child = layout.takeAt(0)
+                if child.widget():
+                    child.widget().deleteLater()
+        else:
+            layout = QVBoxLayout(self.mesh_editor_placeholder)
+            
+        loading_container = QWidget(self.mesh_editor_placeholder)
+        loading_container.setFixedWidth(320)
+        loading_layout = QVBoxLayout(loading_container)
+        loading_layout.setSpacing(12)
+        loading_layout.setAlignment(Qt.AlignCenter)
+        
+        self.loading_msg_label = QLabel("Opening Mesh Editor...", loading_container)
+        self.loading_msg_label.setStyleSheet("color: #ffffff; font-size: 15px; font-weight: bold;")
+        self.loading_msg_label.setAlignment(Qt.AlignCenter)
+        
+        self.loading_progress = QProgressBar(loading_container)
+        self.loading_progress.setRange(0, 0)
+        self.loading_progress.setTextVisible(False)
+        self.loading_progress.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #3A3A3A;
+                background-color: #222222;
+                height: 6px;
+                border-radius: 3px;
+            }
+            QProgressBar::chunk {
+                background-color: #00E676;
+                border-radius: 3px;
+            }
+        """)
+        
+        self.loading_sub_label = QLabel("Initializing 3D viewport and mesh utilities...", loading_container)
+        self.loading_sub_label.setStyleSheet("color: #737373; font-size: 11px;")
+        self.loading_sub_label.setAlignment(Qt.AlignCenter)
+        
+        loading_layout.addWidget(self.loading_msg_label)
+        loading_layout.addWidget(self.loading_progress)
+        loading_layout.addWidget(self.loading_sub_label)
+        
+        layout.addStretch()
+        layout.addWidget(loading_container, 0, Qt.AlignCenter)
+        layout.addStretch()
+        
+        self._mesh_editor_loading = True
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QTimer.singleShot(100, self._load_mesh_editor)
 
     def _update_system_badge(self):
         """Calculates system resource quality badge and updates style dynamically."""

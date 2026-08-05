@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import numpy as np
 import pyrr
@@ -109,9 +110,17 @@ class MeshEditorViewport(QOpenGLWidget):
         # Initialize OpenGL context
         print("[Viewport] Initializing OpenGL...")
         
-        # Load Shaders from disk
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        shaders_dir = os.path.join(base_dir, "shaders")
+        # Load Shaders from disk with PyInstaller frozen bundle support
+        if getattr(sys, 'frozen', False):
+            meipass = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+            shaders_dir = os.path.join(meipass, "mesh_editor", "shaders")
+            if not os.path.exists(shaders_dir):
+                shaders_dir = os.path.join(os.path.dirname(sys.executable), "mesh_editor", "shaders")
+            if not os.path.exists(shaders_dir):
+                shaders_dir = os.path.join(meipass, "shaders")
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            shaders_dir = os.path.join(base_dir, "shaders")
         
         with open(os.path.join(shaders_dir, "object.vert"), "r") as f:
             obj_vert_src = f.read()

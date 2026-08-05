@@ -44,7 +44,9 @@ python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all numpy --collect-all rembg --collect-all scipy \
     --collect-all pymatting --collect-all vispy --collect-all imgui_bundle \
     --collect-all trimesh --collect-all pyrr --collect-all cv2 \
+    --collect-all mesh_editor --collect-all addons \
     --add-data "mesh_editor/shaders:mesh_editor/shaders" \
+    --add-data "addons:addons" \
     --copy-metadata pymatting main_window.py
 
 if [ ! -d "dist/Proximap.app" ]; then

@@ -18,10 +18,13 @@ def get_user_addons_dir() -> str:
 
 def get_builtin_addons_dir() -> str:
     if getattr(sys, 'frozen', False):
-        base_dir = os.path.dirname(sys.executable)
+        meipass = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+        builtin_dir = os.path.join(meipass, "addons")
+        if not os.path.exists(builtin_dir):
+            builtin_dir = os.path.join(os.path.dirname(sys.executable), "addons")
     else:
         base_dir = os.path.dirname(os.path.abspath(__file__))
-    builtin_dir = os.path.join(base_dir, "addons")
+        builtin_dir = os.path.join(base_dir, "addons")
     os.makedirs(builtin_dir, exist_ok=True)
     return builtin_dir
 
