@@ -26,17 +26,28 @@ float getGrid(vec2 coord, float scale, float width) {
 }
 
 void main() {
+    float dz = farPoint.z - nearPoint.z;
+    if (abs(dz) < 1e-7) {
+        discard;
+    }
+    
     // Intersect ray (nearPoint -> farPoint) with horizontal plane Z=0
-    float t = -nearPoint.z / (farPoint.z - nearPoint.z);
+    float t = -nearPoint.z / dz;
     if (t < 0.0) {
-        discard; // Plane is behind the camera
+        discard; // Plane is behind the camera near plane
     }
     
     vec3 fragPos3D = nearPoint + t * (farPoint - nearPoint);
     
     // Write accurate depth for standard depth buffer comparisons (so meshes occlude the grid)
     vec4 clipSpacePos = proj * view * vec4(fragPos3D, 1.0);
+    if (clipSpacePos.w <= 0.0) {
+        discard;
+    }
     float depth = clipSpacePos.z / clipSpacePos.w;
+    if (depth < -1.0 || depth > 1.0) {
+        discard;
+    }
     // Convert NDC depth [-1, 1] to window space depth [0, 1]
     gl_FragDepth = (depth + 1.0) * 0.5;
     

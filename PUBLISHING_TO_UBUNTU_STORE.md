@@ -79,11 +79,11 @@ Make sure you have already built your PyInstaller binary into `dist/Proximap`:
 ./package_app_deb.sh   # or your build script
 ```
 
-Then build the `.snap` package:
+Then build the `.snap` package directly without requiring LXD containers:
 ```bash
-snapcraft
+snapcraft pack --destructive-mode
 ```
-This produces `proximap_1.4.0_amd64.snap`.
+This produces `proximap-photogrammetry-app_1.4.0_amd64.snap`.
 
 ---
 
@@ -91,12 +91,12 @@ This produces `proximap_1.4.0_amd64.snap`.
 
 Install your `.snap` package locally to test execution:
 ```bash
-sudo snap install --dangerous proximap_1.4.0_amd64.snap
+sudo snap install --dangerous proximap-photogrammetry-app_1.4.0_amd64.snap
 ```
 
 Launch the app to verify GUI rendering and functionality:
 ```bash
-proximap
+proximap-photogrammetry-app
 ```
 
 ---
@@ -107,12 +107,12 @@ Upload the package to the Snap Store:
 
 1. **Publish to `beta` channel first (recommended for testing)**:
    ```bash
-   snapcraft upload --release=beta proximap_1.4.0_amd64.snap
+   snapcraft upload --release=beta proximap-photogrammetry-app_1.4.0_amd64.snap
    ```
 
 2. **Promote / Release to `stable` channel (Public Store)**:
    ```bash
-   snapcraft upload --release=stable proximap_1.4.0_amd64.snap
+   snapcraft upload --release=stable proximap-photogrammetry-app_1.4.0_amd64.snap
    ```
 
 ---

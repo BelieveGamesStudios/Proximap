@@ -6146,8 +6146,11 @@ if __name__ == "__main__":
 
     from PySide6.QtGui import QSurfaceFormat
     fmt = QSurfaceFormat()
+    fmt.setVersion(3, 3)
+    fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
     fmt.setDepthBufferSize(24)
     fmt.setStencilBufferSize(8)
+    fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
     QSurfaceFormat.setDefaultFormat(fmt)
 
     app = QApplication(sys.argv)

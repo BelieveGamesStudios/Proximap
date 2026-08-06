@@ -28,40 +28,15 @@ if [ -f "$ICON_PATH" ]; then
     ICON_FLAG="--icon=$ICON_PATH"
 fi
 
-# 2.5. Pre-download SuperPoint + LightGlue weights for offline bundling
-echo "[2.5/6] Pre-downloading SuperPoint + LightGlue model weights..."
-WEIGHTS_DIR="$(pwd)/backend_bin/sp_lg_weights"
-mkdir -p "$WEIGHTS_DIR/hub/checkpoints"
-
-SP_PATH="$WEIGHTS_DIR/hub/checkpoints/superpoint_v1.pth"
-LG_PATH="$WEIGHTS_DIR/hub/checkpoints/superpoint_lightglue_v0-1_arxiv.pth"
-
-if [ ! -f "$SP_PATH" ]; then
-    echo "  Downloading SuperPoint weights..."
-    curl -L "https://github.com/cvg/LightGlue/releases/download/v0.1_arxiv/superpoint_v1.pth" -o "$SP_PATH" || true
-fi
-
-if [ ! -f "$LG_PATH" ]; then
-    echo "  Downloading LightGlue weights..."
-    curl -L "https://github.com/cvg/LightGlue/releases/download/v0.1_arxiv/superpoint_lightglue.pth" -o "$LG_PATH" || true
-fi
-
-if [ -f "$SP_PATH" ] && [ -f "$LG_PATH" ]; then
-    echo "  SP+LG Model weights verified in ${WEIGHTS_DIR}."
-else
-    echo "  WARNING: Model weights could not be fully downloaded. Ensure internet connectivity."
-fi
-
 # 3. Run PyInstaller to package the Python GUI
 echo "[2/6] Freezing Python application with PyInstaller..."
 python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all PySide6 --collect-all vispy --collect-all numpy \
     --collect-all pillow --collect-all cv2 --collect-all trimesh \
-    --collect-all pyrr --collect-all OpenGL --collect-all torch \
-    --collect-all lightglue --collect-all qrcode --collect-all scipy \
-    --collect-all skimage --collect-all open3d \
+    --collect-all pyrr --collect-all OpenGL --collect-all qrcode \
+    --collect-all scipy --collect-all skimage --collect-all open3d \
     --collect-all mesh_editor --collect-all addons \
-    --exclude-module triton --exclude-module torch.testing --exclude-module torch.include \
+    --exclude-module lightglue --exclude-module torch --exclude-module torchvision --exclude-module nvidia --exclude-module triton \
     --add-data "mesh_editor/shaders:mesh_editor/shaders" \
     --add-data "addons:addons" \
     main_window.py
@@ -78,6 +53,7 @@ rm -rf dist/Proximap/_internal/torch/testing 2>/dev/null || true
 rm -rf dist/Proximap/_internal/torch/include 2>/dev/null || true
 rm -rf dist/Proximap/_internal/nvidia/nccl 2>/dev/null || true
 find dist/Proximap/_internal -name "*.a" -delete 2>/dev/null || true
+
 
 # 4. Construct Debian package folder structure
 echo "[3/6] Setting up Debian package directory hierarchy..."
