@@ -30,14 +30,50 @@ import sys
 import json
 import time
 import shutil
+import gc
+import psutil
 from PySide6.QtCore import QThread, Signal
-from hardware_profiler import run_safe_subprocess
+from hardware_profiler import run_safe_subprocess, get_memory_budget, get_recommended_matching_mode
+
 
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
+        return getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def is_valid_faiss_vocab_tree(file_path: str) -> bool:
+    """
+    Check if a vocabulary tree binary file is in the FAISS format (file_version == 1)
+    required by COLMAP 3.10+ (May 2025+).
+    Legacy FLANN index files start with uint32 file_version == 32762 (0x7ffa).
+    """
+    if not file_path or not os.path.exists(file_path):
+        return False
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(4)
+            if len(header) < 4:
+                return False
+            import struct
+            version = struct.unpack('<I', header)[0]
+            return version == 1
+    except Exception:
+        return False
+
+
+def get_default_vocab_tree_path() -> str | None:
+    base_dir = get_base_dir()
+    colmap_dir = os.path.join(base_dir, "backend_bin", "colmap")
+    
+    if os.path.exists(colmap_dir):
+        for f in os.listdir(colmap_dir):
+            if f.endswith(".bin"):
+                cand = os.path.join(colmap_dir, f)
+                if is_valid_faiss_vocab_tree(cand):
+                    return cand
+    return None
 
 
 class PipelineWorker(QThread):
@@ -50,18 +86,23 @@ class PipelineWorker(QThread):
     log_message = Signal(str)
     finished = Signal(bool, str)
 
-    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, mapper_mode: str = "incremental", ref_cloud_path: str = None, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, parent=None):
+    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, mapper_mode: str = "incremental", ref_cloud_path: str = None, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, resume_from_step: str = None, parent=None):
         super().__init__(parent)
-        self.image_dir = image_dir
-        self.output_dir = output_dir
+        self.image_dir = os.path.abspath(image_dir) if image_dir else image_dir
+        self.output_dir = os.path.abspath(output_dir) if output_dir else output_dir
         self.quality_preset = quality_preset
         self.gpu_mode = gpu_mode
         self.has_plain_surfaces = has_plain_surfaces
-        self.mapper_mode = mapper_mode
+        # When plain/smooth surfaces is selected, use GLOMAP global mapper instead of incremental mapper
+        if self.has_plain_surfaces:
+            self.mapper_mode = "global"
+        else:
+            self.mapper_mode = mapper_mode
         self.ref_cloud_path = ref_cloud_path
         self.mesh_mode = mesh_mode
         self.poisson_depth = poisson_depth
         self.custom_params = custom_params
+        self.resume_from_step = resume_from_step
         self.is_running = True
         self.toolchain_map = self._load_toolchain_map()
         self.last_output_lines = []
@@ -78,6 +119,75 @@ class PipelineWorker(QThread):
         self._mean_reproj_error = 0.0      # Mean reprojection error
         self._using_gpu_sift = True        # Whether GPU SIFT is being used
         self._depth_map_count = 0          # Number of depth maps computed
+
+    def _get_throttled_sift_limits(self, total_images: int) -> tuple:
+        """
+        Dynamically throttles SIFT Max Features and Max Matches based on:
+        1. Quality preset baseline (preview, medium, high, ultra).
+        2. Dataset size (number of images).
+        3. Dynamic RAM & Swap memory consumption (throttling down once >= 95% swap is consumed to prevent OOM shutdown).
+        """
+        # 1. Preset baseline limits
+        if self.quality_preset == "preview":
+            base_features = 4096
+            base_matches = 16384
+        elif self.quality_preset == "medium":
+            base_features = 8192
+            base_matches = 16384
+        elif self.quality_preset == "high":
+            base_features = 12288
+            base_matches = 32768
+        else:  # ultra
+            base_features = 16384
+            base_matches = 65536
+
+        # 2. Dataset size throttling factor
+        if total_images > 500:
+            dataset_factor = 0.5
+        elif total_images > 250:
+            dataset_factor = 0.65
+        elif total_images > 100:
+            dataset_factor = 0.8
+        else:
+            dataset_factor = 1.0
+
+        max_features = int(base_features * dataset_factor)
+        max_matches = int(base_matches * dataset_factor)
+
+        # 3. Dynamic Swap and Memory Throttling (Keyword: throttle)
+        mem_budget = get_memory_budget()
+        sw = psutil.swap_memory()
+        swap_pct = sw.percent if sw.total > 0 else 0.0
+
+        if swap_pct >= 95.0 or mem_budget.available_gb < 1.5:
+            self.log_message.emit(
+                f"[THROTTLE] High swap/RAM consumption detected (Swap: {swap_pct:.1f}%, Available RAM: {mem_budget.available_gb:.2f} GB). "
+                f"Throttling down Max Matches and SIFT Feature limits to prevent OOM shutdown."
+            )
+            max_features = min(max_features, 3072)
+            max_matches = min(max_matches, 4096)
+        elif swap_pct >= 80.0 or mem_budget.pressure_level != "ok":
+            self.log_message.emit(
+                f"[THROTTLE] System memory pressure detected (Swap: {swap_pct:.1f}%, Available RAM: {mem_budget.available_gb:.2f} GB). "
+                f"Throttling feature and match thresholds."
+            )
+            max_features = min(max_features, 6144)
+            max_matches = min(max_matches, 8192)
+
+        if dataset_factor < 1.0:
+            self.log_message.emit(
+                f"[THROTTLE] Dataset size of {total_images} images detected. "
+                f"Throttling limits to SIFT Max Features: {max_features}, Max Matches: {max_matches}."
+            )
+
+        # Custom parameter overrides take priority if provided
+        if self.custom_params:
+            if "colmap_max_num_features" in self.custom_params:
+                max_features = self.custom_params["colmap_max_num_features"]
+            if "colmap_max_num_matches" in self.custom_params:
+                max_matches = self.custom_params["colmap_max_num_matches"]
+
+        return max_features, max_matches
         self._dense_point_count = 0        # Points in dense cloud
         self._mesh_vertices = 0            # Mesh vertex count
         self._mesh_faces = 0               # Mesh face count
@@ -91,17 +201,23 @@ class PipelineWorker(QThread):
         """Retrieves image IDs to names mapping from COLMAP database."""
         import sqlite3
         image_map = {}
-        if not os.path.exists(db_path):
+        abs_db_path = os.path.abspath(db_path)
+        if not os.path.exists(abs_db_path):
             return image_map
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT image_id, name FROM images ORDER BY image_id")
-            for row in cursor.fetchall():
-                image_map[row[0]] = row[1]
-            conn.close()
-        except Exception as e:
-            self.log_message.emit(f"[WARNING] Could not read COLMAP database for image names: {e}")
+        for attempt in range(3):
+            try:
+                conn = sqlite3.connect(abs_db_path, timeout=10.0)
+                cursor = conn.cursor()
+                cursor.execute("SELECT image_id, name FROM images ORDER BY image_id")
+                for row in cursor.fetchall():
+                    image_map[row[0]] = row[1]
+                conn.close()
+                break
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.3)
+                else:
+                    self.log_message.emit(f"[WARNING] Could not read COLMAP database for image names: {e}")
         return image_map
 
     def _to_colmap_path(self, p: str) -> str:
@@ -120,7 +236,8 @@ class PipelineWorker(QThread):
         return {}
 
     def _normalize_toolchain_map(self, toolchain_map: dict) -> dict:
-        """Resolve Windows .exe mappings to extensionless macOS binaries when present."""
+        """Resolve binary paths appropriately for host platform (Windows vs Linux/macOS)."""
+        import shutil
         if sys.platform == "win32":
             return toolchain_map
 
@@ -132,10 +249,72 @@ class PipelineWorker(QThread):
 
             normalized[group] = {}
             for name, rel_path in binaries.items():
-                mac_rel_path = rel_path[:-4] if rel_path.lower().endswith(".exe") else rel_path
-                mac_abs_path = os.path.join(get_base_dir(), mac_rel_path)
-                normalized[group][name] = mac_rel_path if os.path.exists(mac_abs_path) else rel_path
+                clean_rel_path = rel_path[:-4] if rel_path.lower().endswith(".exe") else rel_path
+                clean_abs_path = os.path.join(get_base_dir(), clean_rel_path)
+
+                if os.path.exists(clean_abs_path):
+                    normalized[group][name] = clean_abs_path
+                elif shutil.which(name):
+                    normalized[group][name] = shutil.which(name)
+                elif shutil.which(os.path.basename(clean_rel_path)):
+                    normalized[group][name] = shutil.which(os.path.basename(clean_rel_path))
+                else:
+                    normalized[group][name] = clean_abs_path
         return normalized
+
+    def _backup_checkpoint(self, step_name: str):
+        try:
+            from main_window import get_backup_dir, save_session_metadata, load_session_metadata
+            backup_dir = get_backup_dir()
+
+            mvs_out = os.path.join(self.output_dir, "mvs")
+            colmap_out = os.path.join(self.output_dir, "colmap")
+            backup_mvs = os.path.join(backup_dir, "mvs")
+            backup_colmap = os.path.join(backup_dir, "colmap")
+
+            os.makedirs(backup_mvs, exist_ok=True)
+            os.makedirs(backup_colmap, exist_ok=True)
+
+            if os.path.exists(mvs_out):
+                for item in os.listdir(mvs_out):
+                    s_path = os.path.join(mvs_out, item)
+                    d_path = os.path.join(backup_mvs, item)
+                    if os.path.isfile(s_path):
+                        shutil.copy2(s_path, d_path)
+                    elif os.path.isdir(s_path):
+                        if os.path.exists(d_path):
+                            shutil.rmtree(d_path)
+                        shutil.copytree(s_path, d_path)
+
+            if os.path.exists(colmap_out):
+                for item in os.listdir(colmap_out):
+                    s_path = os.path.join(colmap_out, item)
+                    d_path = os.path.join(backup_colmap, item)
+                    if os.path.isfile(s_path):
+                        shutil.copy2(s_path, d_path)
+                    elif os.path.isdir(s_path):
+                        if os.path.exists(d_path):
+                            shutil.rmtree(d_path)
+                        shutil.copytree(s_path, d_path)
+
+            existing_meta = load_session_metadata() or {}
+            existing_meta["scan_type"] = "photogrammetry"
+            existing_meta["last_completed_step"] = step_name
+            img_cnt = getattr(self, '_total_images', 0) or len(getattr(self, '_image_names_map', {}))
+            if img_cnt > 0:
+                existing_meta["image_count"] = img_cnt
+            elif "image_count" not in existing_meta:
+                existing_meta["image_count"] = 0
+            existing_meta["quality_preset"] = self.quality_preset
+            existing_meta["gpu_mode"] = self.gpu_mode
+            existing_meta["has_plain_surfaces"] = self.has_plain_surfaces
+            existing_meta["mapper_mode"] = self.mapper_mode
+            existing_meta["mesh_mode"] = self.mesh_mode
+            existing_meta["poisson_depth"] = self.poisson_depth
+            save_session_metadata(existing_meta)
+            self.log_message.emit(f"[BACKUP] Saved checkpoint for '{step_name}'.")
+        except Exception as e:
+            self.log_message.emit(f"[WARNING] Failed to write backup checkpoint: {e}")
 
     def run(self):
         try:
@@ -167,23 +346,21 @@ class PipelineWorker(QThread):
             self.finished.emit(False, str(e))
 
     def _verify_binaries(self) -> bool:
-        """Checks if all required binaries in toolchain_map.json exist."""
+        """Checks if all required binaries in toolchain_map.json exist locally or in system PATH."""
+        import shutil
         if not self.toolchain_map:
             return False
 
-        colmap_map = self.toolchain_map.get("colmap", {})
-        for name, rel_path in colmap_map.items():
-            abs_path = os.path.join(get_base_dir(), rel_path)
-            if not os.path.exists(abs_path):
-                self.log_message.emit(f"Missing COLMAP binary: {name} ({rel_path})")
-                return False
-
-        mvs_map = self.toolchain_map.get("openMVS", {})
-        for name, rel_path in mvs_map.items():
-            abs_path = os.path.join(get_base_dir(), rel_path)
-            if not os.path.exists(abs_path):
-                self.log_message.emit(f"Missing OpenMVS binary: {name} ({rel_path})")
-                return False
+        for group, binaries in self.toolchain_map.items():
+            if not isinstance(binaries, dict):
+                continue
+            for name, binary_path in binaries.items():
+                if not os.path.exists(binary_path) and not shutil.which(binary_path) and not shutil.which(name):
+                    self.log_message.emit(
+                        f"Missing toolchain binary for {sys.platform}: '{name}' ({binary_path}). "
+                        "Please place Linux binary in backend_bin or install system package."
+                    )
+                    return False
 
         return True
 
@@ -220,14 +397,23 @@ class PipelineWorker(QThread):
 
         self.log_message.emit(f"[RUN] {' '.join(cmd)}")
 
-        creationflags = 0
-        if sys.platform == 'win32':
-            creationflags = subprocess.CREATE_NO_WINDOW
-
         # Identify log file if it's an OpenMVS command
         exe_name = os.path.splitext(os.path.basename(cmd[0]))[0]
         # OpenMVS tools: InterfaceCOLMAP, DensifyPointCloud, ReconstructMesh, RefineMesh, TextureMesh
         is_openmvs = exe_name in ["InterfaceCOLMAP", "DensifyPointCloud", "ReconstructMesh", "RefineMesh", "TextureMesh"]
+
+        # Auto-grant execution permissions on Linux/macOS for local binary files
+        if sys.platform != 'win32' and os.path.isfile(cmd[0]):
+            try:
+                st = os.stat(cmd[0])
+                if not (st.st_mode & 0o111):
+                    os.chmod(cmd[0], st.st_mode | 0o111)
+            except Exception as e:
+                self.log_message.emit(f"[WARNING] Could not set +x permissions on {cmd[0]}: {e}")
+
+        creationflags = 0
+        if sys.platform == 'win32':
+            creationflags = subprocess.CREATE_NO_WINDOW
 
         try:
             proc = subprocess.Popen(
@@ -242,6 +428,7 @@ class PipelineWorker(QThread):
             )
             _active_subprocesses.add(proc)
             start_time = time.time()
+            last_mem_check = time.time()
 
             log_handle = None
             if is_openmvs:
@@ -284,6 +471,24 @@ class PipelineWorker(QThread):
                         log_handle.close()
                         self.log_message.emit(f"[TIMEOUT] Process timed out after {timeout}s")
                         return False
+
+                    # Memory watchdog check
+                    if time.time() - last_mem_check > 4.0:
+                        last_mem_check = time.time()
+                        vm = psutil.virtual_memory()
+                        if vm.percent > 96.0 or vm.available < (500 * 1024 * 1024):
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=2.0)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                            log_handle.close()
+                            self.log_message.emit(
+                                f"[CRITICAL OOM GUARD] System RAM usage reached {vm.percent:.1f}% "
+                                f"({vm.available / (1024**2):.0f} MB available). "
+                                f"Terminated {exe_name} to prevent system lockup/crash."
+                            )
+                            return False
 
                     line = log_handle.readline()
                     if not line:
@@ -349,7 +554,25 @@ class PipelineWorker(QThread):
                         self.log_message.emit(f"[TIMEOUT] Process timed out after {timeout}s")
                         return False
 
+                    # Memory watchdog check
+                    if time.time() - last_mem_check > 4.0:
+                        last_mem_check = time.time()
+                        vm = psutil.virtual_memory()
+                        if vm.percent > 96.0 or vm.available < (500 * 1024 * 1024):
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=2.0)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                            self.log_message.emit(
+                                f"[CRITICAL OOM GUARD] System RAM usage reached {vm.percent:.1f}% "
+                                f"({vm.available / (1024**2):.0f} MB available). "
+                                f"Terminated {exe_name} to prevent system lockup/crash."
+                            )
+                            return False
+
                     line = proc.stdout.readline()
+
                     if not line:
                         if proc.poll() is not None:
                             break
@@ -373,6 +596,12 @@ class PipelineWorker(QThread):
 
         except Exception as e:
             self.log_message.emit(f"[ERROR] Failed to run subprocess: {e}")
+            if sys.platform != 'win32' and cmd[0].endswith('.exe'):
+                self.log_message.emit(
+                    "[DIAGNOSTIC] Attempted to run a Windows executable (.exe) on Linux.\n"
+                    "  Please ensure native Linux binaries (or system package e.g. 'sudo apt install colmap')\n"
+                    "  are available."
+                )
             return False
 
     def _run_real_pipeline(self) -> bool:
@@ -382,8 +611,16 @@ class PipelineWorker(QThread):
         """
         base_dir = get_base_dir()
         
+        resume_requested = bool(self.resume_from_step)
+        colmap_dir_check = os.path.join(self.output_dir, "colmap")
+        check_db_path = os.path.join(colmap_dir_check, "database.db")
+        is_checkpoint_valid = self._is_valid_checkpoint(check_db_path)
+
         # Clean up stale reconstruction subdirectories to prevent legacy files impacting new scans
         for subdir in ["colmap", "mvs"]:
+            if subdir == "colmap" and resume_requested and is_checkpoint_valid:
+                self.log_message.emit(f"[RESUME] Preserving valid database checkpoint at: {check_db_path}")
+                continue
             sub_path = os.path.join(self.output_dir, subdir)
             if os.path.exists(sub_path):
                 self.log_message.emit(f"[INFO] Cleaning up stale reconstruction directory: {sub_path}")
@@ -392,17 +629,37 @@ class PipelineWorker(QThread):
                 except Exception as e:
                     self.log_message.emit(f"[WARNING] Failed to clean output folder: {e}")
 
-        colmap_out = self._to_colmap_path(os.path.join(self.output_dir, "colmap"))
-        mvs_out = self._to_colmap_path(os.path.join(self.output_dir, "mvs"))
+        colmap_out = self._to_colmap_path(os.path.abspath(os.path.join(self.output_dir, "colmap")))
+        mvs_out = self._to_colmap_path(os.path.abspath(os.path.join(self.output_dir, "mvs")))
         os.makedirs(colmap_out, exist_ok=True)
         os.makedirs(mvs_out, exist_ok=True)
         os.makedirs(os.path.join(colmap_out, "sparse"), exist_ok=True)
 
-        num_threads = os.cpu_count() or 4
+        mem_budget = get_memory_budget()
+        self.log_message.emit(
+            f"[MEMORY] Dynamic Available RAM: {mem_budget.available_gb:.2f} GB | "
+            f"Swap Used: {mem_budget.swap_used_gb:.2f}/{mem_budget.swap_total_gb:.2f} GB | "
+            f"Pressure Level: {mem_budget.pressure_level.upper()}"
+        )
+
+        if mem_budget.available_gb < 1.5 and mem_budget.swap_used_gb > (mem_budget.swap_total_gb * 0.85):
+            self.log_message.emit(
+                "[CRITICAL] Available system memory is below 1.5 GB and swap memory is near exhaustion. "
+                "Aborting reconstruction to prevent system crash."
+            )
+            return False
+
+        pressure_mode = (mem_budget.pressure_level != "ok")
+        num_threads = mem_budget.safe_thread_count
+        self.log_message.emit(
+            f"[MEMORY] Budgeted parallel worker threads: {num_threads} (Host Logical CPUs: {os.cpu_count() or 4})"
+        )
 
         # --- GPU / CUDA Environment (used mainly by OpenMVS) ---
         env = os.environ.copy()
+        env["OMP_NUM_THREADS"] = str(num_threads)
         if self.gpu_mode == "force_cpu":
+
             self.log_message.emit("[INFO] Hardware Acceleration: Forcing CPU fallback.")
             env["CUDA_VISIBLE_DEVICES"] = ""
         elif self.gpu_mode == "force_gpu":
@@ -418,14 +675,16 @@ class PipelineWorker(QThread):
             else:
                 self.log_message.emit("[INFO] Hardware Acceleration: Dedicated GPU detected. Using CUDA.")
 
+        if self.has_plain_surfaces:
+            self.mapper_mode = "global"
+            self.log_message.emit("[INFO] Plain/Smooth Surfaces option selected: activating GLOMAP global mapper for camera pose estimation.")
+
         # -------------------------------------------------------------------------
         # QUALITY PRESET PARAMETERS
         # -------------------------------------------------------------------------
         if self.quality_preset == "preview":
             max_image_dim  = 1024
             colmap_max_image_size = 1024
-            colmap_max_num_features = 4096
-            colmap_max_num_matches = 16384
             colmap_first_octave = 0
             guided_matching = "0"
             nndr_ratio     = "0.8"
@@ -440,8 +699,6 @@ class PipelineWorker(QThread):
         elif self.quality_preset == "medium":
             max_image_dim  = 2048
             colmap_max_image_size = 2048
-            colmap_max_num_features = 8192
-            colmap_max_num_matches = 16384
             colmap_first_octave = -1
             guided_matching = "1" if self.has_plain_surfaces else "0"
             nndr_ratio     = "0.8"
@@ -456,8 +713,6 @@ class PipelineWorker(QThread):
         elif self.quality_preset == "high":
             max_image_dim  = 3200
             colmap_max_image_size = 3200
-            colmap_max_num_features = 12288
-            colmap_max_num_matches = 32768
             colmap_first_octave = -1
             guided_matching = "1"
             nndr_ratio     = "0.8"
@@ -472,8 +727,6 @@ class PipelineWorker(QThread):
         else:  # ultra
             max_image_dim  = None
             colmap_max_image_size = -1
-            colmap_max_num_features = 16384
-            colmap_max_num_matches = 65536
             colmap_first_octave = -1
             guided_matching = "1"
             nndr_ratio     = "0.8"
@@ -489,10 +742,6 @@ class PipelineWorker(QThread):
         # Override presets with custom parameters if custom overrides checkbox was checked
         if self.custom_params:
             self.log_message.emit("[INFO] Custom parameter overrides enabled. Overriding quality preset configuration.")
-            if "colmap_max_num_features" in self.custom_params:
-                colmap_max_num_features = self.custom_params["colmap_max_num_features"]
-            if "colmap_max_num_matches" in self.custom_params:
-                colmap_max_num_matches = self.custom_params["colmap_max_num_matches"]
             if "guided_matching" in self.custom_params:
                 guided_matching = self.custom_params["guided_matching"]
             if "run_bundle_adjuster" in self.custom_params:
@@ -506,39 +755,65 @@ class PipelineWorker(QThread):
             if "texture_res" in self.custom_params:
                 texture_res = self.custom_params["texture_res"]
 
-        # =========================================================================
-        # STEP 1/9 — Image Preparation
-        # =========================================================================
-        self.status_changed.emit("Step 1/9: Preparing Images...")
-        working_image_dir = self._prepare_images(
-            self.image_dir, self.output_dir, max_image_dim
-        )
-        try:
-            self._total_images = len([
-                f for f in os.listdir(working_image_dir)
-                if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
-            ])
-        except Exception:
-            self._total_images = 0
+        skip_sfm = self.resume_from_step in ["sparse_reconstruction", "dense_reconstruction"]
+        skip_dense = self.resume_from_step == "dense_reconstruction"
+
+        if skip_sfm:
+            self.log_message.emit(f"[RESUME] Resuming session from checkpoint: '{self.resume_from_step}'. Skipping Steps 1-5 (SfM & Sparse Cloud already complete).")
+            self.progress_changed.emit(70)
+            working_image_dir = os.path.join(self.output_dir, "input_images")
+            if not os.path.exists(working_image_dir) or not any(f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff')) for f in (os.listdir(working_image_dir) if os.path.exists(working_image_dir) else [])):
+                working_image_dir = self._prepare_images(
+                    self.image_dir, self.output_dir, max_image_dim
+                )
+            try:
+                self._total_images = len([
+                    f for f in os.listdir(working_image_dir)
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
+                ])
+            except Exception:
+                self._total_images = 0
+        else:
+            # =========================================================================
+            # STEP 1/9 — Image Preparation
+            # =========================================================================
+            self.status_changed.emit("Step 1/9: Preparing Images...")
+            working_image_dir = self._prepare_images(
+                self.image_dir, self.output_dir, max_image_dim
+            )
+            try:
+                self._total_images = len([
+                    f for f in os.listdir(working_image_dir)
+                    if f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
+                ])
+            except Exception:
+                self._total_images = 0
         self.progress_changed.emit(10)
+
+        # Dynamic SIFT parameter throttling based on dataset size, quality preset, and dynamic swap/memory pressure
+        colmap_max_num_features, colmap_max_num_matches = self._get_throttled_sift_limits(self._total_images)
 
         colmap_exe = os.path.join(base_dir, self.toolchain_map["colmap"]["colmap"])
         colmap_env = self._get_colmap_env()
-        database_path = self._to_colmap_path(os.path.join(colmap_out, "database.db"))
+        database_path = self._to_colmap_path(os.path.abspath(os.path.join(colmap_out, "database.db")))
+        os.makedirs(os.path.dirname(database_path), exist_ok=True)
         working_image_dir = self._to_colmap_path(working_image_dir)
         if os.path.exists(database_path):
-            try:
-                os.remove(database_path)
-                self.log_message.emit("[INFO] Cleared stale COLMAP database.")
-            except Exception as e:
-                self.log_message.emit(f"[WARNING] Failed to clear database: {e}")
+            if resume_requested and is_checkpoint_valid:
+                self.log_message.emit("[RESUME] Preserving valid COLMAP database checkpoint for reconstruction.")
+            else:
+                try:
+                    os.remove(database_path)
+                    self.log_message.emit("[INFO] Cleared stale COLMAP database.")
+                except Exception as e:
+                    self.log_message.emit(f"[WARNING] Failed to clear database: {e}")
 
         # =========================================================================
         # STEP 2/9 — Feature Extraction
+        # STEP 3/9 — Feature Matching
         # =========================================================================
-        self.status_changed.emit("Step 2/9: Extracting SIFT Features...")
-        
-        # Determine camera model options based on image dimensions
+
+        # Determine camera-model multiplicity
         single_camera_val = "1"
         try:
             from PIL import Image
@@ -546,8 +821,7 @@ class PipelineWorker(QThread):
             image_extensions = ('.jpg', '.jpeg', '.png', '.tif', '.tiff')
             for filename in os.listdir(working_image_dir):
                 if filename.lower().endswith(image_extensions):
-                    img_path = os.path.join(working_image_dir, filename)
-                    with Image.open(img_path) as img:
+                    with Image.open(os.path.join(working_image_dir, filename)) as img:
                         unique_sizes.add(img.size)
             if len(unique_sizes) > 1:
                 single_camera_val = "0"
@@ -560,296 +834,416 @@ class PipelineWorker(QThread):
         except Exception as e:
             self.log_message.emit(f"[WARNING] Could not check image dimensions: {e}. Defaulting to single camera model.")
 
-        cmd_extract_gpu = [
-            colmap_exe, "feature_extractor",
-            "--database_path", database_path,
-            "--image_path", working_image_dir,
-            "--ImageReader.camera_model", "PINHOLE",
-            "--ImageReader.single_camera", single_camera_val,
-            "--FeatureExtraction.use_gpu", "1",
-            "--FeatureExtraction.max_image_size", str(colmap_max_image_size),
-            "--SiftExtraction.max_num_features", str(colmap_max_num_features),
-            "--SiftExtraction.first_octave", str(colmap_first_octave),
-            "--FeatureExtraction.num_threads", str(num_threads),
-        ]
-        cmd_extract_cpu = [
-            colmap_exe, "feature_extractor",
-            "--database_path", database_path,
-            "--image_path", working_image_dir,
-            "--ImageReader.camera_model", "PINHOLE",
-            "--ImageReader.single_camera", single_camera_val,
-            "--FeatureExtraction.use_gpu", "0",
-            "--FeatureExtraction.max_image_size", str(colmap_max_image_size),
-            "--SiftExtraction.max_num_features", str(colmap_max_num_features),
-            "--SiftExtraction.first_octave", str(colmap_first_octave),
-            "--FeatureExtraction.num_threads", str(num_threads),
-        ]
-        if self.has_plain_surfaces:
-            # Tune SIFT thresholds to detect low-contrast/weak features on smooth surfaces
-            additional_flags = [
-                "--SiftExtraction.peak_threshold", "0.002",
-                "--SiftExtraction.edge_threshold", "15"
+        if resume_requested and is_checkpoint_valid:
+            self.log_message.emit(
+                "[RESUME] Valid checkpoint database detected! "
+                "Skipping Step 2 (Feature Extraction) and Step 3 (Feature Matching)."
+            )
+            db_stats = self._query_colmap_database_stats(database_path)
+            num_registered = db_stats["num_images"]
+            self.log_message.emit(
+                f"[RESUME] Loaded checkpoint database with {num_registered} registered images and {db_stats['num_pairs']} matched pairs."
+            )
+            self._image_names_map = self._get_image_names_from_db(database_path)
+            self._pairs_tested = (num_registered * (num_registered - 1)) // 2 if num_registered > 1 else 0
+            self._pairs_matched = db_stats["num_pairs"]
+            if db_stats["match_counts"]:
+                self._match_counts = db_stats["match_counts"]
+            self._emit_matching_summary(database_path)
+            self.progress_changed.emit(40)
+
+        else:
+            # -----------------------------------------------------------------
+            # SIFT path: existing COLMAP feature_extractor + exhaustive_matcher
+            # -----------------------------------------------------------------
+            self.status_changed.emit("Step 2/9: Extracting SIFT Features...")
+
+            cmd_extract_gpu = [
+                colmap_exe, "feature_extractor",
+                "--database_path", database_path,
+                "--image_path", working_image_dir,
+                "--ImageReader.camera_model", "PINHOLE",
+                "--ImageReader.single_camera", single_camera_val,
+                "--SiftExtraction.use_gpu", "1",
+                "--SiftExtraction.max_image_size", str(colmap_max_image_size),
+                "--SiftExtraction.max_num_features", str(colmap_max_num_features),
+                "--SiftExtraction.first_octave", str(colmap_first_octave),
+                "--SiftExtraction.num_threads", str(num_threads),
             ]
-            cmd_extract_gpu.extend(additional_flags)
-            cmd_extract_cpu.extend(additional_flags)
-        self._feature_counts = []
-        if not self._run_with_gpu_fallback(
-            cmd_extract_gpu, cmd_extract_cpu, timeout=7200.0, env=colmap_env,
-            line_parser=self._parse_feature_extraction_line
-        ):
-            return False
-        
-        # Query database for exact feature counts
-        db_stats = self._query_colmap_database_stats(database_path)
-        if db_stats["feature_counts"]:
-            self._feature_counts = db_stats["feature_counts"]
-        self._emit_feature_summary()
-
-        # Sanity check: Ensure at least 2 images are registered and have features
-        num_registered = db_stats["num_images"]
-        if num_registered < 2:
-            self.log_message.emit(
-                f"[ERROR] Only {num_registered} image(s) successfully registered in the database. "
-                "Reconstruction requires at least 2 registered images. Aborting."
-            )
-            return False
-        elif num_registered < self._total_images:
-            self.log_message.emit(
-                f"[WARNING] Only {num_registered} out of {self._total_images} images successfully registered. "
-                "Some images may be skipped or corrupt."
-            )
-
-        self.progress_changed.emit(25)
-
-        # =========================================================================
-        # STEP 3/9 — Feature Matching
-        # =========================================================================
-        self.status_changed.emit("Step 3/9: Matching SIFT Features...")
-        
-        # Load image names mapping for enhanced log output
-        self._image_names_map = self._get_image_names_from_db(database_path)
-        
-        cmd_match_gpu = [
-            colmap_exe, "exhaustive_matcher",
-            "--database_path", database_path,
-            "--FeatureMatching.use_gpu", "1",
-            "--FeatureMatching.guided_matching", guided_matching,
-            "--SiftMatching.max_ratio", nndr_ratio,
-            "--FeatureMatching.max_num_matches", str(colmap_max_num_matches),
-            "--FeatureMatching.num_threads", str(num_threads),
-        ]
-        cmd_match_cpu = [
-            colmap_exe, "exhaustive_matcher",
-            "--database_path", database_path,
-            "--FeatureMatching.use_gpu", "0",
-            "--FeatureMatching.guided_matching", guided_matching,
-            "--SiftMatching.max_ratio", nndr_ratio,
-            "--FeatureMatching.max_num_matches", str(colmap_max_num_matches),
-            "--FeatureMatching.num_threads", str(num_threads),
-        ]
-        self._match_counts = []
-        if not self._run_with_gpu_fallback(
-            cmd_match_gpu, cmd_match_cpu, timeout=7200.0, env=colmap_env,
-            line_parser=self._parse_matching_line
-        ):
-            return False
-
-        db_stats = self._query_colmap_database_stats(database_path)
-        if self._total_images > 1 and db_stats["num_pairs"] == 0:
-            self.log_message.emit(
-                "[WARNING] Feature matching produced 0 verified pairs. "
-                "Retrying with CPU matcher and relaxed matching thresholds..."
-            )
-            self._clear_colmap_match_tables(database_path)
-            relaxed_cpu_match = list(cmd_match_cpu)
-            self._set_colmap_option(relaxed_cpu_match, "--FeatureMatching.guided_matching", "1")
-            self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_ratio", "0.95")
-            self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_distance", "0.9")
-            self._using_gpu_sift = False
-            if not self._run_process_realtime(
-                relaxed_cpu_match, timeout=7200.0, env=colmap_env,
-                line_parser=self._parse_matching_line
+            cmd_extract_cpu = [
+                colmap_exe, "feature_extractor",
+                "--database_path", database_path,
+                "--image_path", working_image_dir,
+                "--ImageReader.camera_model", "PINHOLE",
+                "--ImageReader.single_camera", single_camera_val,
+                "--SiftExtraction.use_gpu", "0",
+                "--SiftExtraction.max_image_size", str(colmap_max_image_size),
+                "--SiftExtraction.max_num_features", str(colmap_max_num_features),
+                "--SiftExtraction.first_octave", str(colmap_first_octave),
+                "--SiftExtraction.num_threads", str(num_threads),
+            ]
+            if self.has_plain_surfaces:
+                # Preview quality: lower SIFT thresholds as a best-effort fallback
+                additional_flags = [
+                    "--SiftExtraction.peak_threshold", "0.002",
+                    "--SiftExtraction.edge_threshold", "15"
+                ]
+                cmd_extract_gpu.extend(additional_flags)
+                cmd_extract_cpu.extend(additional_flags)
+            self._feature_counts = []
+            if not self._run_with_gpu_fallback(
+                cmd_extract_gpu, cmd_extract_cpu, timeout=14400.0, env=colmap_env,
+                line_parser=self._parse_feature_extraction_line
             ):
                 return False
-            
-        # Query database for exact matching stats
-        db_stats = self._query_colmap_database_stats(database_path)
-        if db_stats["num_images"] > 0:
-            self._pairs_tested = (db_stats["num_images"] * (db_stats["num_images"] - 1)) // 2
-        else:
-            self._pairs_tested = (self._total_images * (self._total_images - 1)) // 2 if self._total_images > 1 else 0
-        self._pairs_matched = db_stats["num_pairs"]
-        if db_stats["match_counts"]:
-            self._match_counts = db_stats["match_counts"]
-            
-        self._emit_matching_summary(database_path)
-        self.progress_changed.emit(40)
 
-        # =========================================================================
-        # STEP 4/9 — Sparse Reconstruction (Mapper)
-        # =========================================================================
-        self._triangulated_points = 0
-        self._registered_count = 0
-        sparse_dir = self._to_colmap_path(os.path.join(colmap_out, "sparse"))
-        if os.path.exists(sparse_dir):
-            try:
-                shutil.rmtree(sparse_dir)
-            except Exception as e:
-                self.log_message.emit(f"[WARNING] Failed to clean sparse folder: {e}")
-        os.makedirs(sparse_dir, exist_ok=True)
+            db_stats = self._query_colmap_database_stats(database_path)
+            if db_stats["feature_counts"]:
+                self._feature_counts = db_stats["feature_counts"]
+            self._emit_feature_summary()
 
-        cmd_incremental = [
-            colmap_exe, "mapper",
-            "--database_path", database_path,
-            "--image_path", working_image_dir,
-            "--output_path", sparse_dir,
-            "--Mapper.ba_global_max_refinements", str(ba_global_max_refinements),
-            "--Mapper.ba_local_max_refinements", "3",
-            "--Mapper.min_num_matches", "15",
-            "--Mapper.init_min_num_inliers", "100",
-            "--Mapper.abs_pose_min_num_inliers", "15",
-            "--Mapper.abs_pose_min_inlier_ratio", "0.25",
-            "--Mapper.num_threads", str(num_threads),
-        ]
+            num_registered = db_stats["num_images"]
+            if num_registered < 2:
+                if len(self._feature_counts) >= 2:
+                    num_registered = len(self._feature_counts)
+                elif self._total_images >= 2:
+                    num_registered = self._total_images
+            if num_registered < 2:
+                self.log_message.emit(
+                    f"[ERROR] Only {num_registered} image(s) successfully registered in the database. "
+                    "Reconstruction requires at least 2 registered images. Aborting."
+                )
+                return False
+            elif num_registered < self._total_images:
+                self.log_message.emit(
+                    f"[WARNING] Only {num_registered} out of {self._total_images} images successfully registered. "
+                    "Some images may be skipped or corrupt."
+                )
 
-        if self.mapper_mode == "global":
-            self.status_changed.emit("Step 4/9: Estimating Camera Poses (GLOMAP Global SfM)...")
-            self.log_message.emit("[INFO] SfM Mapper: GLOMAP global_mapper selected.")
-            cmd_global = [
-                colmap_exe, "global_mapper",
+            self.progress_changed.emit(25)
+
+            # Step 3: SIFT matching
+            self.status_changed.emit("Step 3/9: Matching SIFT Features...")
+            os.makedirs(os.path.dirname(database_path), exist_ok=True)
+            if not os.path.exists(database_path):
+                self.log_message.emit(f"[WARNING] COLMAP database missing prior to matching: {database_path}. Initializing database schema...")
+                self._create_colmap_db_schema(database_path)
+
+            self._image_names_map = self._get_image_names_from_db(database_path)
+
+            curr_avail_gb = get_memory_budget().available_gb
+            matching_mode = get_recommended_matching_mode(self._total_images, curr_avail_gb)
+
+            # Override matching_mode if user explicitly chose a matcher type in custom_params
+            if self.custom_params and "colmap_matcher_type" in self.custom_params:
+                user_matcher = self.custom_params["colmap_matcher_type"]
+                if user_matcher in ["exhaustive", "sequential", "vocab_tree", "spatial"]:
+                    matching_mode = user_matcher
+
+            if matching_mode == "sequential":
+                matcher_cmd = "sequential_matcher"
+                extra_args = ["--SequentialMatching.overlap", "15", "--SequentialMatching.loop_detection", "0"]
+                self.log_message.emit(
+                    f"[INFO] Using sequential_matcher for {self._total_images} images."
+                )
+
+            elif matching_mode == "vocab_tree":
+                vocab_path = self.custom_params.get("vocab_tree_path", "") if self.custom_params else ""
+                if not vocab_path or not os.path.exists(vocab_path):
+                    vocab_path = get_default_vocab_tree_path() or ""
+
+                if vocab_path and os.path.exists(vocab_path):
+                    if is_valid_faiss_vocab_tree(vocab_path):
+                        matcher_cmd = "vocab_tree_matcher"
+                        extra_args = ["--VocabTreeMatching.vocab_tree_path", vocab_path]
+                        self.log_message.emit(f"[INFO] Using vocab_tree_matcher with FAISS vocabulary tree: {vocab_path}")
+                    else:
+                        self.log_message.emit(
+                            f"[WARNING] Vocabulary tree file '{os.path.basename(vocab_path)}' is in legacy FLANN index format (COLMAP 3.10+ requires FAISS index). "
+                            "Automatically falling back to exhaustive_matcher."
+                        )
+                        matcher_cmd = "exhaustive_matcher"
+                        extra_args = []
+                else:
+                    self.log_message.emit(
+                        "[WARNING] Vocabulary tree file not found or invalid FAISS path. Falling back to exhaustive_matcher."
+                    )
+                    matcher_cmd = "exhaustive_matcher"
+                    extra_args = []
+
+            elif matching_mode == "spatial":
+                matcher_cmd = "spatial_matcher"
+                extra_args = []
+                self.log_message.emit("[INFO] Using spatial_matcher for GPS-based camera pose matching.")
+
+            elif matching_mode == "exhaustive_blocked":
+                matcher_cmd = "exhaustive_matcher"
+                block_size_val = "20"
+                if self.custom_params and "colmap_block_size" in self.custom_params:
+                    block_size_val = str(self.custom_params["colmap_block_size"])
+                extra_args = ["--ExhaustiveMatching.block_size", block_size_val]
+                self.log_message.emit(
+                    f"[MEMORY OPTIMIZATION] Using exhaustive_matcher with reduced block size ({block_size_val}) "
+                    f"to prevent RAM saturation during matrix matching."
+                )
+            else:
+                matcher_cmd = "exhaustive_matcher"
+                if self.custom_params and "colmap_block_size" in self.custom_params:
+                    block_size_val = str(self.custom_params["colmap_block_size"])
+                    extra_args = ["--ExhaustiveMatching.block_size", block_size_val]
+                    self.log_message.emit(f"[INFO] Using exhaustive_matcher with custom block size ({block_size_val}).")
+                else:
+                    extra_args = []
+
+            cmd_match_gpu = [
+                colmap_exe, matcher_cmd,
+                "--database_path", database_path,
+                "--SiftMatching.use_gpu", "1",
+                "--SiftMatching.guided_matching", guided_matching,
+                "--SiftMatching.max_ratio", nndr_ratio,
+                "--SiftMatching.max_num_matches", str(colmap_max_num_matches),
+                "--SiftMatching.num_threads", str(num_threads),
+            ] + extra_args
+
+            cmd_match_cpu = [
+                colmap_exe, matcher_cmd,
+                "--database_path", database_path,
+                "--SiftMatching.use_gpu", "0",
+                "--SiftMatching.guided_matching", guided_matching,
+                "--SiftMatching.max_ratio", nndr_ratio,
+                "--SiftMatching.max_num_matches", str(colmap_max_num_matches),
+                "--SiftMatching.num_threads", str(num_threads),
+            ] + extra_args
+
+            self._match_counts = []
+            if not self._run_with_gpu_fallback(
+                cmd_match_gpu, cmd_match_cpu, timeout=14400.0, env=colmap_env,
+                line_parser=self._parse_matching_line
+            ):
+                if matcher_cmd == "vocab_tree_matcher":
+                    self.log_message.emit(
+                        "[WARNING] vocab_tree_matcher failed during execution. Retrying automatically with exhaustive_matcher..."
+                    )
+                    matcher_cmd = "exhaustive_matcher"
+                    cmd_match_gpu = [arg for arg in cmd_match_gpu if not arg.startswith("--VocabTreeMatching")]
+                    cmd_match_cpu = [arg for arg in cmd_match_cpu if not arg.startswith("--VocabTreeMatching")]
+                    cmd_match_gpu[1] = "exhaustive_matcher"
+                    cmd_match_cpu[1] = "exhaustive_matcher"
+                    if not self._run_with_gpu_fallback(
+                        cmd_match_gpu, cmd_match_cpu, timeout=14400.0, env=colmap_env,
+                        line_parser=self._parse_matching_line
+                    ):
+                        return False
+                else:
+                    return False
+
+            db_stats = self._query_colmap_database_stats(database_path)
+            if self._total_images > 1 and db_stats["num_pairs"] == 0:
+                self.log_message.emit(
+                    "[WARNING] Feature matching produced 0 verified pairs. "
+                    "Retrying with CPU matcher and relaxed matching thresholds..."
+                )
+                self._clear_colmap_match_tables(database_path)
+                relaxed_cpu_match = list(cmd_match_cpu)
+                self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.guided_matching", "1")
+                self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_ratio", "0.95")
+                self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_distance", "0.9")
+                self._using_gpu_sift = False
+                if not self._run_process_realtime(
+                    relaxed_cpu_match, timeout=14400.0, env=colmap_env,
+                    line_parser=self._parse_matching_line
+                ):
+                    return False
+
+            db_stats = self._query_colmap_database_stats(database_path)
+            if db_stats["num_images"] > 0:
+                self._pairs_tested = (db_stats["num_images"] * (db_stats["num_images"] - 1)) // 2
+            else:
+                self._pairs_tested = (self._total_images * (self._total_images - 1)) // 2 if self._total_images > 1 else 0
+            self._pairs_matched = db_stats["num_pairs"]
+            if db_stats["match_counts"]:
+                self._match_counts = db_stats["match_counts"]
+            self._emit_matching_summary(database_path)
+            self.progress_changed.emit(40)
+            self._backup_checkpoint("features_extracted")
+
+
+        if not skip_sfm:
+            # =========================================================================
+            # STEP 4/9 — Sparse Reconstruction (Mapper)
+            # =========================================================================
+            self._triangulated_points = 0
+            self._registered_count = 0
+            sparse_dir = self._to_colmap_path(os.path.join(colmap_out, "sparse"))
+            if os.path.exists(sparse_dir):
+                try:
+                    shutil.rmtree(sparse_dir)
+                except Exception as e:
+                    self.log_message.emit(f"[WARNING] Failed to clean sparse folder: {e}")
+            os.makedirs(sparse_dir, exist_ok=True)
+            os.makedirs(os.path.dirname(database_path), exist_ok=True)
+            if not os.path.exists(database_path):
+                self.log_message.emit(f"[WARNING] COLMAP database missing prior to mapping: {database_path}. Initializing database schema...")
+                self._create_colmap_db_schema(database_path)
+
+            cmd_incremental = [
+                colmap_exe, "mapper",
                 "--database_path", database_path,
                 "--image_path", working_image_dir,
                 "--output_path", sparse_dir,
-                "--GlobalMapper.min_num_matches", "15",
-                "--GlobalMapper.num_threads", str(num_threads),
-                "--GlobalMapper.ba_num_iterations", str(ba_global_max_refinements),
+                "--Mapper.ba_global_max_refinements", str(ba_global_max_refinements),
+                "--Mapper.ba_local_max_refinements", "3",
+                "--Mapper.min_num_matches", "15",
+                "--Mapper.init_min_num_inliers", "100",
+                "--Mapper.abs_pose_min_num_inliers", "15",
+                "--Mapper.abs_pose_min_inlier_ratio", "0.25",
+                "--Mapper.num_threads", str(num_threads),
             ]
-            ok = self._run_process_realtime(cmd_global, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line)
-            if not ok or not self._select_best_sparse_model(sparse_dir):
-                self.log_message.emit("[WARNING] GLOMAP global_mapper failed or produced no model. Falling back to COLMAP incremental mapper...")
-                if os.path.exists(sparse_dir):
-                    try:
-                        shutil.rmtree(sparse_dir)
-                    except Exception:
-                        pass
-                os.makedirs(sparse_dir, exist_ok=True)
-                if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
+
+            if self.mapper_mode == "global":
+                self.status_changed.emit("Step 4/9: Estimating Camera Poses (GLOMAP Global SfM)...")
+                self.log_message.emit("[INFO] SfM Mapper: GLOMAP global_mapper selected.")
+                cmd_global = [
+                    colmap_exe, "global_mapper",
+                    "--database_path", database_path,
+                    "--image_path", working_image_dir,
+                    "--output_path", sparse_dir,
+                    "--GlobalMapper.min_num_matches", "15",
+                    "--GlobalMapper.num_threads", str(num_threads),
+                    "--GlobalMapper.ba_num_iterations", str(ba_global_max_refinements),
+                ]
+                ok = self._run_process_realtime(cmd_global, timeout=14400.0, env=colmap_env, line_parser=self._parse_mapper_line)
+                if not ok or not self._select_best_sparse_model(sparse_dir):
+                    self.log_message.emit("[WARNING] GLOMAP global_mapper failed or produced no model. Falling back to COLMAP incremental mapper...")
+                    if os.path.exists(sparse_dir):
+                        try:
+                            shutil.rmtree(sparse_dir)
+                        except Exception:
+                            pass
+                    os.makedirs(sparse_dir, exist_ok=True)
+                    if not self._run_process_realtime(cmd_incremental, timeout=14400.0, env=colmap_env, line_parser=self._parse_mapper_line):
+                        return False
+            else:
+                self.status_changed.emit("Step 4/9: Estimating Camera Poses (SfM)...")
+                if not self._run_process_realtime(cmd_incremental, timeout=14400.0, env=colmap_env, line_parser=self._parse_mapper_line):
                     return False
-        else:
-            self.status_changed.emit("Step 4/9: Estimating Camera Poses (SfM)...")
-            if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
+
+            best_model_dir = self._to_colmap_path(self._select_best_sparse_model(sparse_dir)) if self._select_best_sparse_model(sparse_dir) else None
+            if not best_model_dir:
+                self.log_message.emit(
+                    "[FAILED] SfM registered 0 camera poses. Feature matching produced "
+                    "insufficient geometric correspondences to initialise reconstruction.\n"
+                    "  Suggestions:\n"
+                    "  • Try a higher quality preset (Medium or High)\n"
+                    "  • Ensure images have at least 60% overlap between adjacent shots"
+                )
                 return False
 
-        best_model_dir = self._to_colmap_path(self._select_best_sparse_model(sparse_dir)) if self._select_best_sparse_model(sparse_dir) else None
-        if not best_model_dir:
-            self.log_message.emit(
-                "[FAILED] SfM registered 0 camera poses. Feature matching produced "
-                "insufficient geometric correspondences to initialise reconstruction.\n"
-                "  Suggestions:\n"
-                "  • Try a higher quality preset (Medium or High)\n"
-                "  • Ensure images have at least 60% overlap between adjacent shots"
-            )
-            return False
+            target_model_dir = self._to_colmap_path(os.path.join(sparse_dir, "0"))
+            if os.path.abspath(best_model_dir) != os.path.abspath(target_model_dir):
+                if os.path.exists(target_model_dir):
+                    shutil.rmtree(target_model_dir)
+                try:
+                    shutil.move(best_model_dir, target_model_dir)
+                except Exception as e:
+                    self.log_message.emit(f"[WARNING] Failed to move best model folder: {e}")
 
-        target_model_dir = self._to_colmap_path(os.path.join(sparse_dir, "0"))
-        if os.path.abspath(best_model_dir) != os.path.abspath(target_model_dir):
-            if os.path.exists(target_model_dir):
-                shutil.rmtree(target_model_dir)
+            # Optional bundle adjuster polish pass
+            if run_bundle_adjuster:
+                self.log_message.emit("[INFO] Running extra bundle adjuster refinement...")
+                cmd_ba = [
+                    colmap_exe, "bundle_adjuster",
+                    "--input_path", target_model_dir,
+                    "--output_path", target_model_dir,
+                    "--BundleAdjustmentCeres.max_num_iterations", "100",
+                    "--BundleAdjustment.refine_focal_length", "1",
+                    "--BundleAdjustment.refine_principal_point", "0",
+                    "--BundleAdjustment.refine_extra_params", "1",
+                ]
+                self._run_process_realtime(cmd_ba, timeout=600.0, env=colmap_env, line_parser=self._parse_mapper_line)
+
+            # Get reconstruction statistics
+            self._last_reconstruction_stats = self._run_model_analyzer(target_model_dir)
+            if "images" in self._last_reconstruction_stats:
+                self._registered_count = self._last_reconstruction_stats["images"]
+            if "points" in self._last_reconstruction_stats:
+                self._triangulated_points = self._last_reconstruction_stats["points"]
+            if "mean_error" in self._last_reconstruction_stats:
+                self._mean_reproj_error = self._last_reconstruction_stats["mean_error"]
+
+            self._emit_sfm_summary()
+            self.progress_changed.emit(60)
+
+            # =========================================================================
+            # STEP 5/9 — Export to OpenMVS Format
+            # =========================================================================
+            self.status_changed.emit("Step 5/9: Exporting Scene to OpenMVS...")
+
+            # Copy sparse model files to the parent sparse directory so InterfaceCOLMAP can find them
             try:
-                shutil.move(best_model_dir, target_model_dir)
+                for filename in os.listdir(target_model_dir):
+                    src_file = os.path.join(target_model_dir, filename)
+                    dst_file = os.path.join(sparse_dir, filename)
+                    if os.path.isfile(src_file):
+                        shutil.copy2(src_file, dst_file)
+                self.log_message.emit("[INFO] Copied sparse model files to parent directory for InterfaceCOLMAP.")
             except Exception as e:
-                self.log_message.emit(f"[WARNING] Failed to move best model folder: {e}")
+                self.log_message.emit(f"[WARNING] Failed to copy sparse model files to parent: {e}")
 
-        # Optional bundle adjuster polish pass
-        if run_bundle_adjuster:
-            self.log_message.emit("[INFO] Running extra bundle adjuster refinement...")
-            cmd_ba = [
-                colmap_exe, "bundle_adjuster",
-                "--input_path", target_model_dir,
-                "--output_path", target_model_dir,
-                "--BundleAdjustmentCeres.max_num_iterations", "100",
-                "--BundleAdjustment.refine_focal_length", "1",
-                "--BundleAdjustment.refine_principal_point", "0",
-                "--BundleAdjustment.refine_extra_params", "1",
+            mvs_export_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["InterfaceCOLMAP"])
+            os.makedirs(os.path.join(mvs_out, "images"), exist_ok=True)
+            cmd_export = [
+                mvs_export_exe,
+                "-i", colmap_out,
+                "--image-folder", os.path.join(colmap_out, "images"),
+                "-o", os.path.join(mvs_out, "scene.mvs"),
             ]
-            self._run_process_realtime(cmd_ba, timeout=600.0, env=colmap_env, line_parser=self._parse_mapper_line)
-
-        # Get reconstruction statistics
-        self._last_reconstruction_stats = self._run_model_analyzer(target_model_dir)
-        if "images" in self._last_reconstruction_stats:
-            self._registered_count = self._last_reconstruction_stats["images"]
-        if "points" in self._last_reconstruction_stats:
-            self._triangulated_points = self._last_reconstruction_stats["points"]
-        if "mean_error" in self._last_reconstruction_stats:
-            self._mean_reproj_error = self._last_reconstruction_stats["mean_error"]
-
-        self._emit_sfm_summary()
-        self.progress_changed.emit(60)
-
-        # =========================================================================
-        # STEP 5/9 — Export to OpenMVS Format
-        # =========================================================================
-        self.status_changed.emit("Step 5/9: Exporting Scene to OpenMVS...")
-
-        # Copy sparse model files to the parent sparse directory so InterfaceCOLMAP can find them
-        try:
-            for filename in os.listdir(target_model_dir):
-                src_file = os.path.join(target_model_dir, filename)
-                dst_file = os.path.join(sparse_dir, filename)
-                if os.path.isfile(src_file):
-                    shutil.copy2(src_file, dst_file)
-            self.log_message.emit("[INFO] Copied sparse model files to parent directory for InterfaceCOLMAP.")
-        except Exception as e:
-            self.log_message.emit(f"[WARNING] Failed to copy sparse model files to parent: {e}")
-
-        mvs_export_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["InterfaceCOLMAP"])
-        os.makedirs(os.path.join(mvs_out, "images"), exist_ok=True)
-        cmd_export = [
-            mvs_export_exe,
-            "-i", colmap_out,
-            "--image-folder", os.path.join(colmap_out, "images"),
-            "-o", os.path.join(mvs_out, "scene.mvs"),
-        ]
-        if not self._run_process_realtime(cmd_export, timeout=300.0):
-            return False
-        self.progress_changed.emit(70)
+            if not self._run_process_realtime(cmd_export, timeout=300.0):
+                return False
+            self._backup_checkpoint("sparse_reconstruction")
+            self.progress_changed.emit(70)
 
         # =========================================================================
         # STEP 6/9 — Dense Point Cloud Generation
         # =========================================================================
-        self.status_changed.emit("Step 6/9: Generating Dense Point Cloud...")
-        mvs_densify_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["DensifyPointCloud"])
-
-        sparse_point_count = self._count_scene_points(mvs_out)
-        calibrated_count = self._count_calibrated_images(mvs_out)
-
-        actual_densify_views = densify_views
-        actual_fuse_views = "2"
-        if sparse_point_count < 500 or calibrated_count < 15:
-            actual_densify_views = str(min(int(densify_views), max(2, calibrated_count - 1)))
-            actual_fuse_views = "1"
-            self.log_message.emit(f"[ADAPT] Low sparse data ({sparse_point_count} pts, {calibrated_count} cal imgs). "
-                                   f"Reducing --number-views to {actual_densify_views}, --number-views-fuse to {actual_fuse_views}")
-
-        cmd = [
-            mvs_densify_exe,
-            "scene.mvs",
-            "--resolution-level",    densify_res,
-            "--max-resolution",      max_res,
-            "--number-views",        actual_densify_views,
-            "--number-views-fuse",   actual_fuse_views,
-            "--geometric-iters",     "2",
-            "--estimate-colors",     "2",
-            "--estimate-normals",    "2",
-        ]
-        self._depth_map_count = 0
-        self._dense_point_count = 0
-        densify_ok = self._run_process_realtime(cmd, timeout=7200.0, cwd=mvs_out, env=env, line_parser=self._parse_densify_line)
-        if not densify_ok:
-            self.log_message.emit("[WARNING] DensifyPointCloud failed or returned no points! ReconstructMesh will use sparse cloud.")
+        if skip_dense:
+            self.log_message.emit("[RESUME] Skipping Step 6 (Dense Point Cloud already complete).")
+            self.progress_changed.emit(80)
         else:
-            self._emit_dense_summary()
-        self.progress_changed.emit(80)
+            self.status_changed.emit("Step 6/9: Generating Dense Point Cloud...")
+            mvs_densify_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["DensifyPointCloud"])
+
+            sparse_point_count = self._count_scene_points(mvs_out)
+            calibrated_count = self._count_calibrated_images(mvs_out)
+
+            actual_densify_views = densify_views
+            actual_fuse_views = "2"
+            if sparse_point_count < 500 or calibrated_count < 15:
+                actual_densify_views = str(min(int(densify_views), max(2, calibrated_count - 1)))
+                actual_fuse_views = "1"
+                self.log_message.emit(f"[ADAPT] Low sparse data ({sparse_point_count} pts, {calibrated_count} cal imgs). "
+                                       f"Reducing --number-views to {actual_densify_views}, --number-views-fuse to {actual_fuse_views}")
+
+            cmd = [
+                mvs_densify_exe,
+                "scene.mvs",
+                "--resolution-level",    densify_res,
+                "--max-resolution",      max_res,
+                "--number-views",        actual_densify_views,
+                "--number-views-fuse",   actual_fuse_views,
+                "--geometric-iters",     "2",
+                "--estimate-colors",     "2",
+                "--estimate-normals",    "2",
+            ]
+            self._depth_map_count = 0
+            self._dense_point_count = 0
+            densify_ok = self._run_process_realtime(cmd, timeout=7200.0, cwd=mvs_out, env=env, line_parser=self._parse_densify_line)
+            if not densify_ok:
+                self.log_message.emit("[WARNING] DensifyPointCloud failed or returned no points! ReconstructMesh will use sparse cloud.")
+            else:
+                self._emit_dense_summary()
+            self._backup_checkpoint("dense_reconstruction")
+            self.progress_changed.emit(80)
 
         # =========================================================================
         # STEP 6b — Optional Reference Point Cloud Alignment & Fusion
@@ -990,6 +1384,7 @@ class PipelineWorker(QThread):
             self.log_message.emit("[WARNING] TextureMesh PLY pass failed. Skipping OBJ export pass.")
 
         self.progress_changed.emit(99)
+        self._backup_checkpoint("mesh_reconstruction")
         return True
 
     def _run_simulated_pipeline(self) -> bool:
@@ -1494,6 +1889,96 @@ class PipelineWorker(QThread):
         
         return None
 
+    def _create_colmap_db_schema(self, db_path: str) -> bool:
+        """
+        Creates the standard COLMAP SQLite database schema directly in Python.
+        Ensures compatibility even when 'database_creator' CLI is unavailable or fails.
+        """
+        import sqlite3
+        try:
+            if os.path.exists(db_path):
+                try:
+                    os.remove(db_path)
+                except Exception:
+                    pass
+            os.makedirs(os.path.dirname(db_path), exist_ok=True)
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.executescript("""
+                CREATE TABLE IF NOT EXISTS cameras (
+                    camera_id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    model INTEGER NOT NULL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    params BLOB,
+                    prior_focal_length INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS images (
+                    image_id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                    name TEXT NOT NULL UNIQUE,
+                    camera_id INTEGER NOT NULL,
+                    CONSTRAINT fk_images_camera_id FOREIGN KEY (camera_id) REFERENCES cameras (camera_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS keypoints (
+                    image_id INTEGER PRIMARY KEY NOT NULL,
+                    rows INTEGER NOT NULL,
+                    cols INTEGER NOT NULL,
+                    data BLOB,
+                    CONSTRAINT fk_keypoints_image_id FOREIGN KEY (image_id) REFERENCES images (image_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS descriptors (
+                    image_id INTEGER PRIMARY KEY NOT NULL,
+                    rows INTEGER NOT NULL,
+                    cols INTEGER NOT NULL,
+                    data BLOB,
+                    CONSTRAINT fk_descriptors_image_id FOREIGN KEY (image_id) REFERENCES images (image_id) ON DELETE CASCADE
+                );
+                CREATE TABLE IF NOT EXISTS matches (
+                    pair_id INTEGER PRIMARY KEY NOT NULL,
+                    rows INTEGER NOT NULL,
+                    cols INTEGER NOT NULL,
+                    data BLOB
+                );
+                CREATE TABLE IF NOT EXISTS two_view_geometries (
+                    pair_id INTEGER PRIMARY KEY NOT NULL,
+                    rows INTEGER NOT NULL,
+                    cols INTEGER NOT NULL,
+                    data BLOB,
+                    config INTEGER NOT NULL,
+                    F BLOB,
+                    E BLOB,
+                    H BLOB
+                );
+            """)
+            conn.commit()
+            conn.close()
+            self.log_message.emit("[SP+LG] COLMAP database schema created successfully via Python schema builder.")
+            return True
+        except Exception as e:
+            self.log_message.emit(f"[ERROR] Failed to create COLMAP database schema: {e}")
+            return False
+
+    def _is_valid_checkpoint(self, db_path: str) -> bool:
+        """Checks if a COLMAP database exists and contains valid camera/image registration and verified feature matches."""
+        abs_db_path = os.path.abspath(db_path)
+        if not os.path.exists(abs_db_path):
+            return False
+        import sqlite3, time
+        for attempt in range(3):
+            try:
+                conn = sqlite3.connect(abs_db_path, timeout=10.0)
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM images")
+                num_images = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM two_view_geometries WHERE rows > 0")
+                num_pairs = cur.fetchone()[0]
+                conn.close()
+                return num_images >= 2 and num_pairs >= 1
+            except Exception:
+                if attempt < 2:
+                    time.sleep(0.3)
+        return False
+
     def _query_colmap_database_stats(self, db_path: str) -> dict:
         """Query COLMAP's SQLite database for feature and match statistics."""
         import sqlite3
@@ -1504,28 +1989,38 @@ class PipelineWorker(QThread):
             "match_counts": [],
         }
         
-        try:
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            # Count images
-            cursor.execute("SELECT COUNT(*) FROM images")
-            stats["num_images"] = cursor.fetchone()[0]
-            
-            # Feature counts per image
-            cursor.execute("SELECT image_id, rows FROM keypoints")
-            for row in cursor.fetchall():
-                stats["feature_counts"].append(row[1])
-            
-            # Match counts per pair (from two_view_geometries, which has verified matches)
-            cursor.execute("SELECT pair_id, rows FROM two_view_geometries WHERE rows > 0")
-            for row in cursor.fetchall():
-                stats["num_pairs"] += 1
-                stats["match_counts"].append(row[1])
-            
-            conn.close()
-        except Exception as e:
-            self.log_message.emit(f"[WARNING] Could not read COLMAP database: {e}")
+        abs_db_path = os.path.abspath(db_path)
+        if not os.path.exists(abs_db_path):
+            self.log_message.emit(f"[WARNING] COLMAP database file does not exist: {abs_db_path}")
+            return stats
+
+        for attempt in range(3):
+            try:
+                conn = sqlite3.connect(abs_db_path, timeout=10.0)
+                cursor = conn.cursor()
+                
+                # Count images
+                cursor.execute("SELECT COUNT(*) FROM images")
+                stats["num_images"] = cursor.fetchone()[0]
+                
+                # Feature counts per image
+                cursor.execute("SELECT image_id, rows FROM keypoints")
+                for row in cursor.fetchall():
+                    stats["feature_counts"].append(row[1])
+                
+                # Match counts per pair (from two_view_geometries, which has verified matches)
+                cursor.execute("SELECT pair_id, rows FROM two_view_geometries WHERE rows > 0")
+                for row in cursor.fetchall():
+                    stats["num_pairs"] += 1
+                    stats["match_counts"].append(row[1])
+                
+                conn.close()
+                break
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(0.3)
+                else:
+                    self.log_message.emit(f"[WARNING] Could not read COLMAP database ({abs_db_path}): {e}")
         
         return stats
 
@@ -1537,6 +2032,8 @@ class PipelineWorker(QThread):
         avg = sum(self._feature_counts) / total
         min_f = min(self._feature_counts)
         max_f = max(self._feature_counts)
+
+        compute_label = "GPU (CUDA)" if self._using_gpu_sift else "CPU Fallback"
         
         self.log_message.emit(
             f"\n{'='*60}\n"
@@ -1545,11 +2042,10 @@ class PipelineWorker(QThread):
             f"  Images processed:     {total}\n"
             f"  Features per image:   {avg:,.0f} avg  |  {min_f:,} min  |  {max_f:,} max\n"
             f"  Total features:       {sum(self._feature_counts):,}\n"
-            f"  Compute device:       {'iGPU (OpenGL)' if self._using_gpu_sift else 'CPU (VLFeat)'}\n"
+            f"  Compute device:       {compute_label}\n"
             f"{'='*60}"
         )
         
-        # DIAGNOSTIC: Warn if features are too low
         if avg < 3000:
             self.log_message.emit(
                 "[⚠ DIAGNOSTIC] Average features per image is LOW (<3000). "
@@ -1736,73 +2232,3 @@ class PipelineWorker(QThread):
             return False
 
 
-class BackgroundRemovalWorker(QThread):
-    """
-    Worker thread that executes background removal offline on a list of image files.
-    """
-    progress_changed = Signal(int)
-    status_changed = Signal(str)
-    log_message = Signal(str)
-    finished = Signal(bool, list, str)
-
-    def __init__(self, image_paths: list, parent=None):
-        super().__init__(parent)
-        self.image_paths = image_paths
-        self.is_running = True
-
-    def run(self):
-        try:
-            import rembg
-            from PIL import Image
-        except Exception as e:
-            self.log_message.emit(f"[ERROR] Failed to import rembg or PIL: {e}")
-            self.finished.emit(False, self.image_paths, f"Required dependencies not installed: {e}")
-            return
-
-        updated_paths = []
-        total = len(self.image_paths)
-
-        self.log_message.emit(f"[START] Starting offline background removal for {total} images...")
-        
-        for i, path in enumerate(self.image_paths):
-            if not self.is_running:
-                self.log_message.emit("[INFO] Background removal cancelled.")
-                self.finished.emit(False, self.image_paths, "Background removal cancelled by user.")
-                return
-
-            self.status_changed.emit(f"Removing background: {i+1}/{total}")
-            self.progress_changed.emit(int((i / total) * 100))
-            self.log_message.emit(f"[BG_REMOVE] Processing: {os.path.basename(path)}")
-
-            try:
-                # Open image using Pillow
-                with Image.open(path) as img:
-                    # Run background removal
-                    output = rembg.remove(img)
-
-                    # We must save as PNG to preserve transparency
-                    base, ext = os.path.splitext(path)
-                    new_path = base + ".png"
-
-                    # Save output
-                    output.save(new_path, "PNG")
-
-                    # If the file path changed (e.g. from jpg to png), remove the original file
-                    if os.path.abspath(path) != os.path.abspath(new_path):
-                        if os.path.exists(path):
-                            os.remove(path)
-
-                    updated_paths.append(os.path.normpath(new_path))
-                    self.log_message.emit(f"[BG_REMOVE] Completed and saved as: {os.path.basename(new_path)}")
-
-            except Exception as e:
-                self.log_message.emit(f"[ERROR] Failed to process {os.path.basename(path)}: {e}")
-                # Fallback: keep original path
-                updated_paths.append(path)
-
-        self.progress_changed.emit(100)
-        self.status_changed.emit("Background removal complete!")
-        self.finished.emit(True, updated_paths, f"Successfully removed background of {total} images.")
-
-    def stop(self):
-        self.is_running = False

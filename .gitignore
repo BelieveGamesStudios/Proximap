@@ -15,7 +15,12 @@ backend_bin/
 reconstruction_out/
 *.log
 
-# Final packed distributions
+# Final packed distributions & Snap build artifacts
+*.snap
+.craft/
+parts/
+stage/
+prime/
 Proximap_Commercial_Release.zip
 Proximap_Setup.exe
 Proximap_Mac_Release.zip

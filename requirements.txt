@@ -6,3 +6,10 @@ trimesh
 vispy
 PyOpenGL
 pyrr
+qrcode
+scipy
+scikit-image
+open3d
+psutil
+flask
+pyinstaller==6.9.0

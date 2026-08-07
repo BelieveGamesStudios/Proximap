@@ -8,8 +8,8 @@ APP_NAME="proximap"
 DISPLAY_NAME="Proximap"
 VERSION="1.4.0"
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
-MAINTAINER="Believe Games Studios <support@believegamesstudios.com>"
-DESCRIPTION="Intuitive desktop 3D photogrammetry pipeline GUI dashboard."
+MAINTAINER="ProximaXR Spatial Technologies <fumz@proximaxr.space>"
+DESCRIPTION="Intuitive desktop 3D photogrammetry app."
 
 echo "=========================================================="
 echo " Starting Proximap Linux Bundling & Packaging (.deb)"
@@ -33,9 +33,29 @@ echo "[2/6] Freezing Python application with PyInstaller..."
 python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all PySide6 --collect-all vispy --collect-all numpy \
     --collect-all pillow --collect-all cv2 --collect-all trimesh \
-    --collect-all pyrr --collect-all OpenGL --collect-all scipy \
-    --collect-all skimage --collect-all open3d \
+    --collect-all pyrr --collect-all OpenGL --collect-all qrcode \
+    --collect-all scipy --collect-all skimage --collect-all open3d \
+    --collect-all mesh_editor --collect-all addons \
+    --exclude-module lightglue --exclude-module torch --exclude-module torchvision --exclude-module nvidia --exclude-module triton \
+    --exclude-module PySide6.QtWebEngineCore \
+    --exclude-module PySide6.QtWebEngineWidgets \
+    --exclude-module PySide6.QtWebEngineQuick \
+    --exclude-module PySide6.Qt3DCore \
+    --exclude-module PySide6.Qt3DRender \
+    --exclude-module PySide6.QtMultimedia \
+    --exclude-module PySide6.QtMultimediaWidgets \
+    --exclude-module PySide6.QtCharts \
+    --exclude-module PySide6.QtDataVisualization \
+    --exclude-module PySide6.QtDesigner \
+    --exclude-module PySide6.QtQml \
+    --exclude-module PySide6.QtQuick \
+    --exclude-module PySide6.QtQuickWidgets \
+    --exclude-module PySide6.QtVirtualKeyboard \
+    --exclude-module PySide6.QtSql \
+    --exclude-module PySide6.QtXml \
+    --exclude-module matplotlib \
     --add-data "mesh_editor/shaders:mesh_editor/shaders" \
+    --add-data "addons:addons" \
     main_window.py
 
 if [ ! -d "dist/Proximap" ]; then
@@ -43,6 +63,19 @@ if [ ! -d "dist/Proximap" ]; then
     exit 1
 fi
 echo "  PyInstaller compilation successful."
+
+echo "  Pruning unnecessary PyTorch & CUDA build bloat (Triton, C++ headers, test suites)..."
+rm -rf dist/Proximap/_internal/triton 2>/dev/null || true
+rm -rf dist/Proximap/_internal/torch/testing 2>/dev/null || true
+rm -rf dist/Proximap/_internal/torch/include 2>/dev/null || true
+rm -rf dist/Proximap/_internal/nvidia/nccl 2>/dev/null || true
+find dist/Proximap/_internal -name "*.a" -delete 2>/dev/null || true
+
+echo "  Pruning unused WebEngine shared libraries and resources..."
+rm -rf dist/Proximap/_internal/libQt6WebEngineCore.so* 2>/dev/null || true
+rm -rf dist/Proximap/_internal/PySide6/Qt/lib/libQt6WebEngineCore.so* 2>/dev/null || true
+rm -rf dist/Proximap/_internal/PySide6/Qt/resources/qtwebengine* 2>/dev/null || true
+
 
 # 4. Construct Debian package folder structure
 echo "[3/6] Setting up Debian package directory hierarchy..."
@@ -72,8 +105,21 @@ if [ -d "backend_bin/colmap" ]; then
     cp -r backend_bin/colmap/* "$COLMAP_DIR/" 2>/dev/null || true
 fi
 
+# If local colmap binary is missing, copy system colmap if available
+if [ ! -f "$COLMAP_DIR/colmap" ] && command -v colmap >/dev/null 2>&1; then
+    echo "  Copying system colmap binary ($(command -v colmap)) into build..."
+    cp "$(command -v colmap)" "$COLMAP_DIR/colmap"
+fi
+
 if [ -d "backend_bin/openMVS" ]; then
-    cp -r backend_bin/openMVS/* "$OPENMVS_DIR/" 2>/dev/null || true
+    echo "  Selectively copying required OpenMVS binaries..."
+    for bin in InterfaceCOLMAP DensifyPointCloud ReconstructMesh RefineMesh TextureMesh; do
+        if [ -f "backend_bin/openMVS/$bin" ]; then
+            cp "backend_bin/openMVS/$bin" "$OPENMVS_DIR/"
+        else
+            echo "  [WARNING] Required OpenMVS binary not found: $bin"
+        fi
+    done
 fi
 
 # Prune Windows/macOS-specific binary artifacts
@@ -84,11 +130,23 @@ find "$OPT_DIR/backend_bin" -type d -empty -delete 2>/dev/null || true
 if [ -f "toolchain_map.json" ]; then
     cp "toolchain_map.json" "$OPT_DIR/"
 fi
+if [ -d "backend_bin/sp_lg_weights" ]; then
+    mkdir -p "$OPT_DIR/backend_bin/sp_lg_weights"
+    cp -r backend_bin/sp_lg_weights/* "$OPT_DIR/backend_bin/sp_lg_weights/" 2>/dev/null || true
+fi
+
 if [ -d "models" ]; then
     cp -r "models" "$OPT_DIR/"
 fi
 if [ -d "public" ]; then
     cp -r "public" "$OPT_DIR/"
+fi
+if [ -d "addons" ]; then
+    cp -r "addons" "$OPT_DIR/"
+fi
+if [ -d "mesh_editor" ]; then
+    mkdir -p "$OPT_DIR/mesh_editor"
+    cp -r mesh_editor/* "$OPT_DIR/mesh_editor/" 2>/dev/null || true
 fi
 
 # Set executable permissions
@@ -112,7 +170,7 @@ Architecture: ${ARCH}
 Maintainer: ${MAINTAINER}
 Section: graphics
 Priority: optional
-Depends: libc6, libgl1-mesa-glx | libgl1, libegl1, libxcb-xinerama0, python3-open3d | python3-scipy
+Depends: libc6, libgl1-mesa-glx | libgl1, libegl1, libxcb-xinerama0, colmap
 Description: ${DESCRIPTION}
  Proximap is an intuitive desktop 3D photogrammetry GUI dashboard.
  Automates COLMAP and OpenMVS pipelines for 3D reconstruction.
@@ -139,6 +197,7 @@ chmod 644 "${CONTROL_DIR}/control"
 DEB_FILE="${DISPLAY_NAME}_${VERSION}_${ARCH}.deb"
 echo "[6/6] Building native .deb package: ${DEB_FILE}..."
 dpkg-deb -z1 --root-owner-group --build "$DEB_DIR" "$DEB_FILE"
+rm -rf "$DEB_DIR"
 
 echo "Creating portable distribution ZIP..."
 ZIP_FILE="Proximap_Linux_Release.zip"
