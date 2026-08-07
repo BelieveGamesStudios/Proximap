@@ -37,6 +37,23 @@ python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all scipy --collect-all skimage --collect-all open3d \
     --collect-all mesh_editor --collect-all addons \
     --exclude-module lightglue --exclude-module torch --exclude-module torchvision --exclude-module nvidia --exclude-module triton \
+    --exclude-module PySide6.QtWebEngineCore \
+    --exclude-module PySide6.QtWebEngineWidgets \
+    --exclude-module PySide6.QtWebEngineQuick \
+    --exclude-module PySide6.Qt3DCore \
+    --exclude-module PySide6.Qt3DRender \
+    --exclude-module PySide6.QtMultimedia \
+    --exclude-module PySide6.QtMultimediaWidgets \
+    --exclude-module PySide6.QtCharts \
+    --exclude-module PySide6.QtDataVisualization \
+    --exclude-module PySide6.QtDesigner \
+    --exclude-module PySide6.QtQml \
+    --exclude-module PySide6.QtQuick \
+    --exclude-module PySide6.QtQuickWidgets \
+    --exclude-module PySide6.QtVirtualKeyboard \
+    --exclude-module PySide6.QtSql \
+    --exclude-module PySide6.QtXml \
+    --exclude-module matplotlib \
     --add-data "mesh_editor/shaders:mesh_editor/shaders" \
     --add-data "addons:addons" \
     main_window.py
@@ -53,6 +70,11 @@ rm -rf dist/Proximap/_internal/torch/testing 2>/dev/null || true
 rm -rf dist/Proximap/_internal/torch/include 2>/dev/null || true
 rm -rf dist/Proximap/_internal/nvidia/nccl 2>/dev/null || true
 find dist/Proximap/_internal -name "*.a" -delete 2>/dev/null || true
+
+echo "  Pruning unused WebEngine shared libraries and resources..."
+rm -rf dist/Proximap/_internal/libQt6WebEngineCore.so* 2>/dev/null || true
+rm -rf dist/Proximap/_internal/PySide6/Qt/lib/libQt6WebEngineCore.so* 2>/dev/null || true
+rm -rf dist/Proximap/_internal/PySide6/Qt/resources/qtwebengine* 2>/dev/null || true
 
 
 # 4. Construct Debian package folder structure
@@ -90,7 +112,14 @@ if [ ! -f "$COLMAP_DIR/colmap" ] && command -v colmap >/dev/null 2>&1; then
 fi
 
 if [ -d "backend_bin/openMVS" ]; then
-    cp -r backend_bin/openMVS/* "$OPENMVS_DIR/" 2>/dev/null || true
+    echo "  Selectively copying required OpenMVS binaries..."
+    for bin in InterfaceCOLMAP DensifyPointCloud ReconstructMesh RefineMesh TextureMesh; do
+        if [ -f "backend_bin/openMVS/$bin" ]; then
+            cp "backend_bin/openMVS/$bin" "$OPENMVS_DIR/"
+        else
+            echo "  [WARNING] Required OpenMVS binary not found: $bin"
+        fi
+    done
 fi
 
 # Prune Windows/macOS-specific binary artifacts

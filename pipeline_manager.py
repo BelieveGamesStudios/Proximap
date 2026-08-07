@@ -39,7 +39,7 @@ from hardware_profiler import run_safe_subprocess, get_memory_budget, get_recomm
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
+        return getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -253,13 +253,13 @@ class PipelineWorker(QThread):
                 clean_abs_path = os.path.join(get_base_dir(), clean_rel_path)
 
                 if os.path.exists(clean_abs_path):
-                    normalized[group][name] = clean_rel_path
+                    normalized[group][name] = clean_abs_path
                 elif shutil.which(name):
                     normalized[group][name] = shutil.which(name)
                 elif shutil.which(os.path.basename(clean_rel_path)):
                     normalized[group][name] = shutil.which(os.path.basename(clean_rel_path))
                 else:
-                    normalized[group][name] = clean_rel_path
+                    normalized[group][name] = clean_abs_path
         return normalized
 
     def _backup_checkpoint(self, step_name: str):
@@ -317,7 +317,6 @@ class PipelineWorker(QThread):
             self.log_message.emit(f"[WARNING] Failed to write backup checkpoint: {e}")
 
     def run(self):
-
         try:
             self.status_changed.emit("Initializing Pipeline...")
             self.log_message.emit(f"[INFO] Plain/Smooth Surfaces optimization: {'Enabled' if self.has_plain_surfaces else 'Disabled'}")
@@ -352,22 +351,16 @@ class PipelineWorker(QThread):
         if not self.toolchain_map:
             return False
 
-        colmap_map = self.toolchain_map.get("colmap", {})
-        for name, rel_path in colmap_map.items():
-            abs_path = os.path.join(get_base_dir(), rel_path) if not os.path.isabs(rel_path) else rel_path
-            if not os.path.exists(abs_path) and not shutil.which(rel_path) and not shutil.which(name):
-                self.log_message.emit(
-                    f"Missing COLMAP binary for {sys.platform}: '{rel_path}'. "
-                    "Place Linux binary at backend_bin/colmap/colmap or install system package."
-                )
-                return False
-
-        mvs_map = self.toolchain_map.get("openMVS", {})
-        for name, rel_path in mvs_map.items():
-            abs_path = os.path.join(get_base_dir(), rel_path) if not os.path.isabs(rel_path) else rel_path
-            if not os.path.exists(abs_path) and not shutil.which(rel_path) and not shutil.which(name):
-                self.log_message.emit(f"Missing OpenMVS binary: {name} ({rel_path})")
-                return False
+        for group, binaries in self.toolchain_map.items():
+            if not isinstance(binaries, dict):
+                continue
+            for name, binary_path in binaries.items():
+                if not os.path.exists(binary_path) and not shutil.which(binary_path) and not shutil.which(name):
+                    self.log_message.emit(
+                        f"Missing toolchain binary for {sys.platform}: '{name}' ({binary_path}). "
+                        "Please place Linux binary in backend_bin or install system package."
+                    )
+                    return False
 
         return True
 

@@ -36,10 +36,30 @@ if (Test-Path "app_icon.ico") {
     $iconFlag = "--icon=app_icon.ico"
 }
 
+$excludes = @(
+    "--exclude-module=PySide6.QtWebEngineCore",
+    "--exclude-module=PySide6.QtWebEngineWidgets",
+    "--exclude-module=PySide6.QtWebEngineQuick",
+    "--exclude-module=PySide6.Qt3DCore",
+    "--exclude-module=PySide6.Qt3DRender",
+    "--exclude-module=PySide6.QtMultimedia",
+    "--exclude-module=PySide6.QtMultimediaWidgets",
+    "--exclude-module=PySide6.QtCharts",
+    "--exclude-module=PySide6.QtDataVisualization",
+    "--exclude-module=PySide6.QtDesigner",
+    "--exclude-module=PySide6.QtQml",
+    "--exclude-module=PySide6.QtQuick",
+    "--exclude-module=PySide6.QtQuickWidgets",
+    "--exclude-module=PySide6.QtVirtualKeyboard",
+    "--exclude-module=PySide6.QtSql",
+    "--exclude-module=PySide6.QtXml",
+    "--exclude-module=matplotlib"
+)
+
 if ($iconFlag) {
-    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --add-data "mesh_editor/shaders;mesh_editor/shaders" --copy-metadata pymatting main_window.py
+    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --add-data "mesh_editor/shaders;mesh_editor/shaders" --copy-metadata pymatting $excludes main_window.py
 } else {
-    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --add-data "mesh_editor/shaders;mesh_editor/shaders" --copy-metadata pymatting main_window.py
+    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --add-data "mesh_editor/shaders;mesh_editor/shaders" --copy-metadata pymatting $excludes main_window.py
 }
 
 
@@ -48,6 +68,20 @@ if (-not (Test-Path "dist/Proximap")) {
     exit 1
 }
 Write-Host "  PyInstaller compilation complete." -ForegroundColor Green
+
+Write-Host "  Pruning unused WebEngine DLLs and resources..." -ForegroundColor DarkGray
+$webEngineFiles = @(
+    "dist/Proximap/_internal/Qt6WebEngineCore.dll",
+    "dist/Proximap/_internal/PySide6/Qt/bin/Qt6WebEngineCore.dll",
+    "dist/Proximap/_internal/PySide6/Qt/resources/qtwebengine_resources.pak",
+    "dist/Proximap/_internal/PySide6/Qt/resources/qtwebengine_devtools_resources.pak"
+)
+foreach ($file in $webEngineFiles) {
+    if (Test-Path $file) {
+        Remove-Item -Force $file
+        Write-Host "  Removed unused file: $file" -ForegroundColor DarkGray
+    }
+}
 
 # 3. Create distribution backend directories
 Write-Host "[3/5] Setting up backend binary directories..." -ForegroundColor Yellow

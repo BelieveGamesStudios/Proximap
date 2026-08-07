@@ -9,7 +9,7 @@ description: |
 
 icon: public/app_icon.png
 grade: devel
-confinement: strict
+confinement: classic
 
 lint:
   ignore:
@@ -22,7 +22,7 @@ apps:
   proximap:
     command: Proximap
     environment:
-      LD_LIBRARY_PATH: /var/lib/snapd/lib/gl:$SNAP/usr/lib/x86_64-linux-gnu:$SNAP/usr/lib/x86_64-linux-gnu/dri:$SNAP/lib/x86_64-linux-gnu:$SNAP/_internal:$LD_LIBRARY_PATH
+      LD_LIBRARY_PATH: /usr/lib/x86_64-linux-gnu:/var/lib/snapd/lib/gl:$SNAP/usr/lib/x86_64-linux-gnu:$SNAP/usr/lib/x86_64-linux-gnu/dri:$SNAP/lib/x86_64-linux-gnu:$SNAP/_internal:$LD_LIBRARY_PATH
       LIBGL_DRIVERS_PATH: /var/lib/snapd/lib/gl/dri:$SNAP/usr/lib/x86_64-linux-gnu/dri
       __EGL_VENDOR_LIBRARY_DIRS: /var/lib/snapd/lib/gl/glvnd/egl_vendor.d:$SNAP/usr/share/glvnd/egl_vendor.d
       XCB_CURSOR_LIBRARY: $SNAP/usr/lib/x86_64-linux-gnu/libxcb-cursor.so.0

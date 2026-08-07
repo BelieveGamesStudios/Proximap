@@ -45,11 +45,8 @@ void main() {
         discard;
     }
     float depth = clipSpacePos.z / clipSpacePos.w;
-    if (depth < -1.0 || depth > 1.0) {
-        discard;
-    }
-    // Convert NDC depth [-1, 1] to window space depth [0, 1]
-    gl_FragDepth = (depth + 1.0) * 0.5;
+    // Convert NDC depth [-1, 1] to window space depth [0, 1] and clamp
+    gl_FragDepth = clamp((depth + 1.0) * 0.5, 0.0, 1.0);
     
     vec2 coord = fragPos3D.xy;
     

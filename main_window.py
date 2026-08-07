@@ -31,7 +31,7 @@ app.use_app("pyside6")
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
+        return getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
 os.environ["U2NET_HOME"] = os.path.join(get_base_dir(), "models")

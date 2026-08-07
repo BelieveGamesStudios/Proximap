@@ -108,7 +108,7 @@ class MeshEditorViewport(QOpenGLWidget):
 
     def initializeGL(self):
         # Initialize OpenGL context
-        print("[Viewport] Initializing OpenGL...")
+        print(f"[VP] initializeGL widget size=({self.width()},{self.height()})")
         
         # Load Shaders from disk with PyInstaller frozen bundle support
         if getattr(sys, 'frozen', False):
@@ -175,15 +175,15 @@ class MeshEditorViewport(QOpenGLWidget):
         gl.glDisable(gl.GL_BLEND)
         gl.glDepthMask(gl.GL_TRUE)
         
-        # Retrieve physical vs logical sizes
-        dpr = self.devicePixelRatioF()
-        w_logical = self.width()
-        h_logical = self.height()
-        w_physical = int(w_logical * dpr)
-        h_physical = int(h_logical * dpr)
-        
+        # Use the framebuffer size Qt gave us in resizeGL, not a recomputed guess —
+        # devicePixelRatioF() can disagree with the real framebuffer size under
+        # some platform/session combinations (e.g. forced QT_QPA_PLATFORM=xcb in snap).
+        w_physical = getattr(self, '_fb_width', self.width())
+        h_physical = getattr(self, '_fb_height', self.height())
         gl.glViewport(0, 0, w_physical, h_physical)
         
+        w_logical = self.width()
+        h_logical = self.height()
         aspect = w_logical / max(h_logical, 1.0)
         view_matrix = self.camera.get_view_matrix()
         proj_matrix = self.camera.get_projection_matrix(aspect)
@@ -280,7 +280,7 @@ class MeshEditorViewport(QOpenGLWidget):
         
         # Draw full screen quad
         gl.glBindVertexArray(self.grid_vao)
-        gl.glDrawElements(gl.GL_TRIANGLES, 6, gl.GL_UNSIGNED_INT, None)
+        gl.glDrawArrays(gl.GL_TRIANGLE_STRIP, 0, 4)
         gl.glBindVertexArray(0)
         
         gl.glDisable(gl.GL_BLEND)
@@ -312,6 +312,10 @@ class MeshEditorViewport(QOpenGLWidget):
             painter.end()
 
     def resizeGL(self, w, h):
+        # w, h are already physical framebuffer pixels — Qt has done the DPI math.
+        self._fb_width = w
+        self._fb_height = h
+        print(f"[VP] resizeGL fb=({w},{h})")
         gl.glViewport(0, 0, w, h)
 
     def cleanupGL(self):
@@ -695,17 +699,13 @@ class MeshEditorViewport(QOpenGLWidget):
 
     # Create full screen quad geometry in Z=0 plane for infinite grid unprojection
     def _setup_grid_quad(self):
+        # Triangle strip vertices (bottom-left, bottom-right, top-left, top-right)
         vertices = np.array([
             -1.0, -1.0, 0.0,
              1.0, -1.0, 0.0,
-             1.0,  1.0, 0.0,
-            -1.0,  1.0, 0.0
+            -1.0,  1.0, 0.0,
+             1.0,  1.0, 0.0
         ], dtype=np.float32)
-        
-        indices = np.array([
-            0, 1, 2,
-            2, 3, 0
-        ], dtype=np.uint32)
         
         self.grid_vao = gl.glGenVertexArrays(1)
         gl.glBindVertexArray(self.grid_vao)
@@ -713,10 +713,6 @@ class MeshEditorViewport(QOpenGLWidget):
         self.grid_vbo = gl.glGenBuffers(1)
         gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.grid_vbo)
         gl.glBufferData(gl.GL_ARRAY_BUFFER, vertices.nbytes, vertices, gl.GL_STATIC_DRAW)
-        
-        self.grid_ebo = gl.glGenBuffers(1)
-        gl.glBindBuffer(gl.GL_ELEMENT_ARRAY_BUFFER, self.grid_ebo)
-        gl.glBufferData(gl.GL_ELEMENT_ARRAY_BUFFER, indices.nbytes, indices, gl.GL_STATIC_DRAW)
         
         gl.glEnableVertexAttribArray(0)
         gl.glVertexAttribPointer(0, 3, gl.GL_FLOAT, gl.GL_FALSE, 0, None)
