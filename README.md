@@ -1,11 +1,12 @@
 <img width="1918" height="1078" alt="Screenshot 2026-06-20 080015" src="https://github.com/user-attachments/assets/62a2b602-45c5-4e54-855d-76c43b8c07e0" />
-# Proximap — Open Source Photogrammetry
+
+<h1>Proximap — Open Source Photogrammetry</h1>
 
 Proximap is an intuitive desktop application built in Python and PySide6 that provides a step-by-step wizard dashboard for 3D photogrammetry reconstruction. It acts as a graphical pipeline coordinator that automates **COLMAP** (for Structure-from-Motion / camera registration) and **OpenMVS** (for dense point clouds, meshing, mesh refinement, and texturing) to turn flat images into detailed 3D scenes.
 
 ---
 
-## Key Features
+<h2>Key Features</h2>
 
 * **Drag-and-Drop Loader**: Simply drag a folder or selection of image files (`.png`, `.jpg`, `.jpeg`, `.tiff`) into the dashboard.
 * **Camera Detection**: Autodetects your camera sensor make/model from image EXIF metadata.
