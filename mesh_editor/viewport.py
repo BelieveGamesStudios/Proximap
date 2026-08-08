@@ -8,8 +8,57 @@ from PySide6.QtCore import Qt, Signal, QPoint, QRectF
 from PySide6.QtGui import QMouseEvent, QKeyEvent, QWheelEvent, QAction, QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent
 
 import OpenGL.GL as gl
+from PySide6.QtCore import QThread
 from mesh_editor.scene import Camera, Scene, Object
 from mesh_editor.gizmo import Gizmo
+
+class MeshLoadWorker(QThread):
+    """Background worker for loading and parsing 3D meshes off the main UI thread."""
+    finished = Signal(object, str)  # (mesh_data_list, file_path)
+    error = Signal(str)
+
+    def __init__(self, file_path: str, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+
+    def run(self):
+        try:
+            import trimesh
+            from PIL import Image
+            loaded = trimesh.load(self.file_path, process=False)
+            results = []
+            if isinstance(loaded, trimesh.Scene):
+                for name, geom in loaded.geometry.items():
+                    data = self._extract_geom_data(geom)
+                    results.append((name, data))
+            else:
+                data = self._extract_geom_data(loaded)
+                name = os.path.basename(self.file_path)
+                results.append((name, data))
+            self.finished.emit(results, self.file_path)
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def _extract_geom_data(self, geom):
+        verts = np.asarray(geom.vertices, dtype=np.float32)
+        faces = np.asarray(geom.faces, dtype=np.uint32)
+        normals = np.asarray(geom.vertex_normals, dtype=np.float32) if hasattr(geom, 'vertex_normals') and geom.vertex_normals is not None else np.zeros_like(verts)
+        uvs = np.asarray(geom.visual.uv, dtype=np.float32) if hasattr(geom, 'visual') and hasattr(geom.visual, 'uv') and geom.visual.uv is not None else None
+        
+        img = None
+        if hasattr(geom, 'visual') and hasattr(geom.visual, 'material') and hasattr(geom.visual.material, 'image') and geom.visual.material.image is not None:
+            img = geom.visual.material.image.copy()
+
+        bounds = geom.bounds if hasattr(geom, 'bounds') and geom.bounds is not None else (verts.min(axis=0), verts.max(axis=0))
+        return {
+            'vertices': verts,
+            'indices': faces,
+            'normals': normals,
+            'texcoords': uvs,
+            'texture_data': img,
+            'aabb_min': bounds[0],
+            'aabb_max': bounds[1]
+        }
 
 class GizmoPivot:
     """A virtual object representing the pivot / median center of selected objects."""
@@ -77,11 +126,36 @@ class MeshEditorViewport(QOpenGLWidget):
         # GPU buffers & shader programs
         self.object_program = None
         self.grid_program = None
+        self.screen_program = None
         
         # Grid quad VAO
         self.grid_vao = None
         self.grid_vbo = None
         self.grid_ebo = None
+
+        # Screen quad VAO/VBO for RTT compositing
+        self.screen_vao = None
+        self.screen_vbo = None
+
+        # Offscreen FBO (Render-to-Texture) Handles
+        self.fbo = None
+        self.fbo_texture = None
+        self.fbo_depth_stencil = None
+        self.fbo_width = 0
+        self.fbo_height = 0
+
+        # Dynamic Resolution Scaling Constants & State
+        self.render_scale = 1.0
+        self.TARGET_FRAME_TIME_MS = 16.6  # 60 FPS target
+        self.MIN_RENDER_SCALE = 0.5
+        self.MAX_RENDER_SCALE = 1.0
+        self.SCALE_STEP = 0.05
+        self._last_frame_time_ms = 16.0
+
+        # Shading modes: 0 = Flat (Unlit), 1 = Flux (Blinn-Phong), 2 = Prism (PBR Stub)
+        self.shading_mode = 1
+        # Independent Wireframe rasterization toggle
+        self.wireframe = False
 
         # Navigation Gizmo Overlay Widget
         from mesh_editor.nav_gizmo import NavGizmoWidget
@@ -89,6 +163,16 @@ class MeshEditorViewport(QOpenGLWidget):
         self.nav_gizmo.snap_requested.connect(self._on_nav_gizmo_snap_requested)
         # Sync initial orientation
         self.nav_gizmo.update_orientation(self.camera.yaw, self.camera.pitch)
+
+    def set_shading_mode(self, mode: int):
+        """Set shading mode: 0 = Flat, 1 = Flux, 2 = Prism."""
+        self.shading_mode = max(0, min(2, int(mode)))
+        self.update()
+
+    def set_wireframe_mode(self, enabled: bool):
+        """Toggle Wire (Wireframe rasterization mode)."""
+        self.wireframe = bool(enabled)
+        self.update()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -134,14 +218,12 @@ class MeshEditorViewport(QOpenGLWidget):
         self.object_program = self._compile_and_link_shaders(obj_vert_src, obj_frag_src)
         self.grid_program = self._compile_and_link_shaders(grid_vert_src, grid_frag_src)
         
-        # Setup infinite grid full-screen quad VAO
+        # Setup infinite grid quad and screen quad
         self._setup_grid_quad()
+        self._setup_screen_quad()
         
         # Initialize custom gizmo inside this GL context
         self.gizmo.initialize(shaders_dir)
-        
-        # Scene starts empty on startup. Primitives/meshes can be imported using the Import button.
-        pass
         
         # Enable depth testing
         gl.glEnable(gl.GL_DEPTH_TEST)
@@ -164,23 +246,115 @@ class MeshEditorViewport(QOpenGLWidget):
         
         return GizmoPivot(median_center, active_obj.rotation, active_obj.scale)
 
+    def _setup_fbo(self, w: int, h: int):
+        w = max(1, w)
+        h = max(1, h)
+        if self.fbo is not None and self.fbo_width == w and self.fbo_height == h:
+            return
+
+        self._cleanup_fbo()
+
+        self.fbo_width = w
+        self.fbo_height = h
+
+        self.fbo = gl.glGenFramebuffers(1)
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.fbo)
+
+        self.fbo_texture = gl.glGenTextures(1)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.fbo_texture)
+        gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA8, w, h, 0, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, None)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+        gl.glTexParameteri(gl.GL_TEXTURE_2D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
+        gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_TEXTURE_2D, self.fbo_texture, 0)
+
+        self.fbo_depth_stencil = gl.glGenRenderbuffers(1)
+        gl.glBindRenderbuffer(gl.GL_RENDERBUFFER, self.fbo_depth_stencil)
+        gl.glRenderbufferStorage(gl.GL_RENDERBUFFER, gl.GL_DEPTH24_STENCIL8, w, h)
+        gl.glFramebufferRenderbuffer(gl.GL_FRAMEBUFFER, gl.GL_DEPTH_STENCIL_ATTACHMENT, gl.GL_RENDERBUFFER, self.fbo_depth_stencil)
+
+        status = gl.glCheckFramebufferStatus(gl.GL_FRAMEBUFFER)
+        if status != gl.GL_FRAMEBUFFER_COMPLETE:
+            print(f"[VP] FBO setup status incomplete: {status}")
+
+        default_fbo = self.defaultFramebufferObject()
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, default_fbo)
+
+    def _cleanup_fbo(self):
+        try:
+            if self.fbo is not None:
+                gl.glDeleteFramebuffers(1, [self.fbo])
+                self.fbo = None
+            if self.fbo_texture is not None:
+                gl.glDeleteTextures(1, [self.fbo_texture])
+                self.fbo_texture = None
+            if self.fbo_depth_stencil is not None:
+                gl.glDeleteRenderbuffers(1, [self.fbo_depth_stencil])
+                self.fbo_depth_stencil = None
+        except Exception:
+            pass
+
+    def _setup_screen_quad(self):
+        vert_src = """#version 330 core
+        layout (location = 0) in vec2 aPos;
+        layout (location = 1) in vec2 aTexCoords;
+        out vec2 TexCoords;
+        void main() {
+            TexCoords = aTexCoords;
+            gl_Position = vec4(aPos, 0.0, 1.0);
+        }"""
+        frag_src = """#version 330 core
+        out vec4 FragColor;
+        in vec2 TexCoords;
+        uniform sampler2D screenTexture;
+        void main() {
+            FragColor = texture(screenTexture, TexCoords);
+        }"""
+        self.screen_program = self._compile_and_link_shaders(vert_src, frag_src)
+
+        quad_verts = np.array([
+            -1.0,  1.0,  0.0, 1.0,
+            -1.0, -1.0,  0.0, 0.0,
+             1.0, -1.0,  1.0, 0.0,
+
+            -1.0,  1.0,  0.0, 1.0,
+             1.0, -1.0,  1.0, 0.0,
+             1.0,  1.0,  1.0, 1.0
+        ], dtype=np.float32)
+
+        self.screen_vao = gl.glGenVertexArrays(1)
+        self.screen_vbo = gl.glGenBuffers(1)
+        gl.glBindVertexArray(self.screen_vao)
+        gl.glBindBuffer(gl.GL_ARRAY_BUFFER, self.screen_vbo)
+        gl.glBufferData(gl.GL_ARRAY_BUFFER, quad_verts.nbytes, quad_verts, gl.GL_STATIC_DRAW)
+
+        gl.glEnableVertexAttribArray(0)
+        gl.glVertexAttribPointer(0, 2, gl.GL_FLOAT, gl.GL_FALSE, 16, None)
+        gl.glEnableVertexAttribArray(1)
+        gl.glVertexAttribPointer(1, 2, gl.GL_FLOAT, gl.GL_FALSE, 16, gl.ctypes.c_void_p(8))
+        gl.glBindVertexArray(0)
+
     def paintGL(self):
-        # 1. Clear background
+        t0 = time.perf_counter()
+
+        w_physical = getattr(self, '_fb_width', self.width())
+        h_physical = getattr(self, '_fb_height', self.height())
+
+        fbo_w = max(1, int(w_physical * self.render_scale))
+        fbo_h = max(1, int(h_physical * self.render_scale))
+
+        self._setup_fbo(fbo_w, fbo_h)
+
+        # 1. Bind Offscreen FBO (Render-To-Texture Pass)
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self.fbo)
+        gl.glViewport(0, 0, fbo_w, fbo_h)
+
         gl.glClearColor(self.bg_color[0], self.bg_color[1], self.bg_color[2], 1.0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT | gl.GL_STENCIL_BUFFER_BIT)
         
-        # Ensure clean opaque state before rendering objects
         gl.glEnable(gl.GL_DEPTH_TEST)
         gl.glDepthFunc(gl.GL_LEQUAL)
         gl.glDisable(gl.GL_BLEND)
         gl.glDepthMask(gl.GL_TRUE)
-        
-        # Use the framebuffer size Qt gave us in resizeGL, not a recomputed guess —
-        # devicePixelRatioF() can disagree with the real framebuffer size under
-        # some platform/session combinations (e.g. forced QT_QPA_PLATFORM=xcb in snap).
-        w_physical = getattr(self, '_fb_width', self.width())
-        h_physical = getattr(self, '_fb_height', self.height())
-        gl.glViewport(0, 0, w_physical, h_physical)
         
         w_logical = self.width()
         h_logical = self.height()
@@ -188,31 +362,33 @@ class MeshEditorViewport(QOpenGLWidget):
         view_matrix = self.camera.get_view_matrix()
         proj_matrix = self.camera.get_projection_matrix(aspect)
         
-        # 2. Render Scene Objects
+        # 2. Render Scene Objects using Master Shader (Flat=0, Flux=1, Prism=2)
         gl.glUseProgram(self.object_program)
         
-        # Setup global lighting direction (directional light moving with the camera eye)
         eye = self.camera.get_position()
         light_dir = eye - self.camera.target
-        # Normalize direction
-        norm_light_dir = light_dir / np.linalg.norm(light_dir)
+        norm_light_dir = light_dir / max(np.linalg.norm(light_dir), 1e-6)
         
-        # Pass camera and lighting uniforms
         gl.glUniform3fv(gl.glGetUniformLocation(self.object_program, "lightDir"), 1, norm_light_dir)
+        gl.glUniform3fv(gl.glGetUniformLocation(self.object_program, "eyePos"), 1, eye)
+        gl.glUniform1i(gl.glGetUniformLocation(self.object_program, "uLightingMode"), self.shading_mode)
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.object_program, "view"), 1, gl.GL_FALSE, view_matrix)
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.object_program, "proj"), 1, gl.GL_FALSE, proj_matrix)
         
-        # Render each object
+        # Wireframe mode rasterization toggle (Wire)
+        if self.wireframe:
+            gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_LINE)
+        else:
+            gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
+
         for obj in self.scene.objects:
             model_matrix = obj.get_model_matrix()
             gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.object_program, "model"), 1, gl.GL_FALSE, model_matrix)
             
-            # Object base color (greyish blue)
             color = np.array([0.45, 0.55, 0.65], dtype=np.float32)
             gl.glUniform3fv(gl.glGetUniformLocation(self.object_program, "objectColor"), 1, color)
             gl.glUniform1i(gl.glGetUniformLocation(self.object_program, "useOverrideColor"), 0)
             
-            # Pass texture uniforms
             has_tex = obj.mesh.texture_id is not None
             gl.glUniform1i(gl.glGetUniformLocation(self.object_program, "useTexture"), 1 if has_tex else 0)
             gl.glUniform1i(gl.glGetUniformLocation(self.object_program, "textureSampler"), 0)
@@ -220,7 +396,6 @@ class MeshEditorViewport(QOpenGLWidget):
             is_selected = obj in self.scene.selected_objects
             is_active = self.scene.active_object == obj
             
-            # If selected, enable stencil testing to write to the stencil buffer during the standard pass
             if is_selected:
                 gl.glEnable(gl.GL_STENCIL_TEST)
                 gl.glStencilOp(gl.GL_KEEP, gl.GL_KEEP, gl.GL_REPLACE)
@@ -228,48 +403,41 @@ class MeshEditorViewport(QOpenGLWidget):
                 gl.glStencilMask(0xFF)
                 gl.glClear(gl.GL_STENCIL_BUFFER_BIT)
                 
-            # Draw standard geometry
             obj.mesh.draw()
             
-            # Draw Blender-style selection outline using the stencil buffer
             if is_selected:
                 gl.glStencilFunc(gl.GL_NOTEQUAL, 1, 0xFF)
-                gl.glStencilMask(0x00) # Disable stencil writes
-                gl.glDepthMask(gl.GL_FALSE) # Disable depth writes for outline
+                gl.glStencilMask(0x00)
+                gl.glDepthMask(gl.GL_FALSE)
                 
-                # Slightly scale the model matrix for the outline pass (1.5% outline thickness)
                 outline_model = obj.get_outline_model_matrix(1.015)
                 gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.object_program, "model"), 1, gl.GL_FALSE, outline_model)
                 
                 gl.glUniform1i(gl.glGetUniformLocation(self.object_program, "useOverrideColor"), 1)
-                if is_active:
-                    highlight_color = np.array([0.0, 1.0, 0.61, 1.0], dtype=np.float32) # Bright green
-                else:
-                    highlight_color = np.array([0.1, 0.42, 0.27, 1.0], dtype=np.float32) # Muted teal-green
+                highlight_color = np.array([0.0, 1.0, 0.61, 1.0], dtype=np.float32) if is_active else np.array([0.1, 0.42, 0.27, 1.0], dtype=np.float32)
                 gl.glUniform4fv(gl.glGetUniformLocation(self.object_program, "overrideColor"), 1, highlight_color)
                 
                 obj.mesh.draw()
                 
-                # Restore defaults
                 gl.glDepthMask(gl.GL_TRUE)
                 gl.glDisable(gl.GL_STENCIL_TEST)
+
+        # Reset polygon mode to GL_FILL for infinite grid, gizmos, and screen blit
+        gl.glPolygonMode(gl.GL_FRONT_AND_BACK, gl.GL_FILL)
                 
-        # 3. Render Infinite Grid (Semi-transparent overlay)
+        # 3. Render Infinite Grid
         gl.glUseProgram(self.grid_program)
         
         gl.glEnable(gl.GL_BLEND)
         gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
         
-        # View matrices
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.grid_program, "view"), 1, gl.GL_FALSE, view_matrix)
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.grid_program, "proj"), 1, gl.GL_FALSE, proj_matrix)
-        # Inverse view/projection matrices for screen-space unprojection
         inv_view = pyrr.matrix44.inverse(view_matrix)
         inv_proj = pyrr.matrix44.inverse(proj_matrix)
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.grid_program, "invView"), 1, gl.GL_FALSE, inv_view)
         gl.glUniformMatrix4fv(gl.glGetUniformLocation(self.grid_program, "invProj"), 1, gl.GL_FALSE, inv_proj)
         
-        # Grid parameters
         gl.glUniform4fv(gl.glGetUniformLocation(self.grid_program, "gridColor1"), 1, self.grid_color_1)
         gl.glUniform4fv(gl.glGetUniformLocation(self.grid_program, "gridColor2"), 1, self.grid_color_2)
         gl.glUniform4fv(gl.glGetUniformLocation(self.grid_program, "axisColorX"), 1, self.axis_color_x)
@@ -278,7 +446,6 @@ class MeshEditorViewport(QOpenGLWidget):
         gl.glUniform1f(gl.glGetUniformLocation(self.grid_program, "gridThickness"), self.grid_thickness)
         gl.glUniform1f(gl.glGetUniformLocation(self.grid_program, "subdivisions"), self.grid_subdivisions)
         
-        # Draw full screen quad
         gl.glBindVertexArray(self.grid_vao)
         gl.glDrawArrays(gl.GL_TRIANGLE_STRIP, 0, 4)
         gl.glBindVertexArray(0)
@@ -291,6 +458,31 @@ class MeshEditorViewport(QOpenGLWidget):
             pivot = self._get_gizmo_pivot()
             if pivot is not None:
                 self.gizmo.draw(pivot, self.camera, w_logical, h_logical)
+
+        # 5. Composite Offscreen FBO Texture to Native Widget Canvas
+        default_fbo = self.defaultFramebufferObject()
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, default_fbo)
+        gl.glViewport(0, 0, w_physical, h_physical)
+
+        gl.glClearColor(0.0, 0.0, 0.0, 1.0)
+        gl.glClear(gl.GL_COLOR_BUFFER_BIT | gl.GL_DEPTH_BUFFER_BIT)
+
+        gl.glUseProgram(self.screen_program)
+        gl.glActiveTexture(gl.GL_TEXTURE0)
+        gl.glBindTexture(gl.GL_TEXTURE_2D, self.fbo_texture)
+        gl.glUniform1i(gl.glGetUniformLocation(self.screen_program, "screenTexture"), 0)
+
+        gl.glBindVertexArray(self.screen_vao)
+        gl.glDrawArrays(gl.GL_TRIANGLES, 0, 6)
+        gl.glBindVertexArray(0)
+
+        # Dynamic Resolution Scaling Metrics
+        frame_ms = (time.perf_counter() - t0) * 1000.0
+        self._last_frame_time_ms = frame_ms
+        if frame_ms > self.TARGET_FRAME_TIME_MS + 2.0:
+            self.render_scale = max(self.MIN_RENDER_SCALE, self.render_scale - self.SCALE_STEP)
+        elif frame_ms < self.TARGET_FRAME_TIME_MS - 4.0:
+            self.render_scale = min(self.MAX_RENDER_SCALE, self.render_scale + self.SCALE_STEP)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -312,30 +504,32 @@ class MeshEditorViewport(QOpenGLWidget):
             painter.end()
 
     def resizeGL(self, w, h):
-        # w, h are already physical framebuffer pixels — Qt has done the DPI math.
         self._fb_width = w
         self._fb_height = h
         print(f"[VP] resizeGL fb=({w},{h})")
         gl.glViewport(0, 0, w, h)
 
     def cleanupGL(self):
-        # Shut down custom gizmo
         self.gizmo.shutdown()
+        self._cleanup_fbo()
         
-        # Clean up shaders and VAOs
         try:
             if self.object_program:
                 gl.glDeleteProgram(self.object_program)
             if self.grid_program:
                 gl.glDeleteProgram(self.grid_program)
+            if self.screen_program:
+                gl.glDeleteProgram(self.screen_program)
             if self.grid_vao:
                 gl.glDeleteVertexArrays(1, [self.grid_vao])
                 gl.glDeleteBuffers(1, [self.grid_vbo])
                 gl.glDeleteBuffers(1, [self.grid_ebo])
+            if self.screen_vao:
+                gl.glDeleteVertexArrays(1, [self.screen_vao])
+                gl.glDeleteBuffers(1, [self.screen_vbo])
         except Exception:
             pass
             
-        # Clean up scene mesh VBOs/VAOs
         for obj in self.scene.objects:
             obj.mesh.cleanup()
 

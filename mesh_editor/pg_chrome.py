@@ -236,77 +236,111 @@ class PolygroundChromeBar(QFrame):
         self.app_menu_btn = self.logo_btn
 
         # Top Menu Bar (File / Edit / Window / Help)
-        from PySide6.QtWidgets import QMenuBar
         self.menu_bar = QMenuBar(self.left_region)
+        self.menu_bar.setFixedHeight(28)
+
+        # Set green custom logo icon
+        logo_pix = QPixmap(18, 18)
+        logo_pix.fill(Qt.transparent)
+        p = QPainter(logo_pix)
+        p.setRenderHint(QPainter.Antialiasing)
+        p.setBrush(QColor("#00E676"))
+        p.setPen(Qt.NoPen)
+        p.drawRoundedRect(0, 4, 18, 10, 5, 5)
+        p.end()
+        self.app_menu_btn.setIcon(QIcon(logo_pix))
+
+        # App Logo Popup Menu
+        self.app_menu = QMenu(self.app_menu_btn)
+        self.app_menu.setStyleSheet("""
+            QMenu {
+                background-color: #1E1E1E;
+                color: #CCCCCC;
+                border: 1px solid #333333;
+                padding: 4px;
+            }
+            QMenu::item:selected {
+                background-color: #2D2D2D;
+                color: #00E676;
+            }
+        """)
+
+        a_about = self.app_menu.addAction("About Proximap")
+        a_about.triggered.connect(self._show_about_dialog)
+        self.app_menu.addSeparator()
+
+        a_pref = self.app_menu.addAction("Preferences…")
+        a_pref.setShortcut("Ctrl+,")
+        win = self.window()
+        if win and hasattr(win, "_open_preferences_dialog"):
+            a_pref.triggered.connect(win._open_preferences_dialog)
+        else:
+            a_pref.triggered.connect(lambda: print("[CHROME] Preferences clicked"))
+
+        self.app_menu.addSeparator()
+        a_quit = self.app_menu.addAction("Quit Proximap")
+        a_quit.setShortcut("Ctrl+Q")
+        a_quit.triggered.connect(QApplication.instance().quit)
+
+        self.app_menu_btn.setMenu(self.app_menu)
+        left_layout.addWidget(self.app_menu_btn)
+
+        # Application QMenuBar (File, Edit, Window, Help)
+        self.menu_bar = QMenuBar(self.left_region)
+        self.menu_bar.setFixedHeight(28)
         self.menu_bar.setStyleSheet("""
             QMenuBar {
                 background-color: transparent;
                 color: #CCCCCC;
-                font-family: 'Inter', sans-serif;
                 font-size: 12px;
+                spacing: 6px;
             }
             QMenuBar::item {
                 background-color: transparent;
-                padding: 4px 10px;
+                padding: 4px 8px;
                 border-radius: 3px;
             }
             QMenuBar::item:selected {
-                background-color: #2A2A2A;
-                color: #00E676;
+                background-color: #262626;
+                color: #FFFFFF;
             }
             QMenu {
                 background-color: #1E1E1E;
-                color: #E0E0E0;
+                color: #CCCCCC;
                 border: 1px solid #333333;
                 padding: 4px;
             }
-            QMenu::item {
-                padding: 6px 20px;
-                border-radius: 3px;
-            }
             QMenu::item:selected {
-                background-color: #00E676;
-                color: #121212;
-            }
-            QMenu::separator {
-                height: 1px;
-                background-color: #333333;
-                margin: 4px 0px;
+                background-color: #2D2D2D;
+                color: #00E676;
             }
         """)
 
-        # Menus
         self.file_menu = self.menu_bar.addMenu("File")
         self.edit_menu = self.menu_bar.addMenu("Edit")
         self.window_menu = self.menu_bar.addMenu("Window")
         self.help_menu = self.menu_bar.addMenu("Help")
 
-        left_layout.addWidget(self.logo_btn)
         left_layout.addWidget(self.menu_bar)
 
+
         # ---------------------------------------------------------------------
-        # 2. Center Region: Sole Midpoint Anchored Control (Polyground | 3D Rec)
+        # 2. Center Region: Navigation Tabs
         # ---------------------------------------------------------------------
         self.center_region = QWidget(self)
         center_layout = QHBoxLayout(self.center_region)
         center_layout.setContentsMargins(0, 0, 0, 0)
-        center_layout.setSpacing(0)
-
-        # Primary Segmented Toggle: 3D Reconstruction | Polyground
-        from preferences_dialog import load_preferences
-        init_tab = load_preferences().get("startup_tab", "3D Reconstruction")
-        default_idx = 0 if init_tab == "3D Reconstruction" else 1
+        center_layout.setSpacing(6)
 
         self.tab_segmented = SegmentedControl(["3D Reconstruction", "Polyground"], default_index=default_idx, parent=self.center_region)
         self.tab_segmented.index_changed.connect(self.tab_switch_requested.emit)
         center_layout.addWidget(self.tab_segmented)
 
-        # Backward compatibility reference
         self.mode_segmented = self.mode_notch
 
 
         # ---------------------------------------------------------------------
-        # 3. Right Region: Layout Presets, Save Indicator, Profile
+        # 3. Right Region: Layout Presets
         # ---------------------------------------------------------------------
         self.right_region = QWidget(self)
         right_layout = QHBoxLayout(self.right_region)
@@ -318,7 +352,6 @@ class PolygroundChromeBar(QFrame):
         right_layout.addWidget(preset_label)
 
         self.preset_combo = QComboBox(self.right_region)
-        self.preset_combo.addItems(["Default", "Sculpt", "Custom…"])
         self.preset_combo.setFixedHeight(26)
         self.preset_combo.setCursor(Qt.PointingHandCursor)
         self.preset_combo.setStyleSheet("""
@@ -329,7 +362,7 @@ class PolygroundChromeBar(QFrame):
                 border-radius: 3px;
                 padding: 2px 8px;
                 font-size: 11px;
-                min-width: 80px;
+                min-width: 90px;
             }
             QComboBox:hover {
                 border-color: #444444;
@@ -341,15 +374,15 @@ class PolygroundChromeBar(QFrame):
                 selection-color: #121212;
             }
         """)
-        self.preset_combo.currentTextChanged.connect(self.layout_preset_changed.emit)
+        self.preset_combo.activated.connect(self._on_preset_activated)
         right_layout.addWidget(self.preset_combo)
         self.save_indicator = None
 
-        # Initial visibility based on default_idx
+        self.populate_layout_presets(["Default"], "Default")
+
         if default_idx == 0:
             self.right_region.setVisible(False)
 
-        # Initial layout update
         self._update_region_geometries()
 
     def resizeEvent(self, event):

@@ -310,7 +310,18 @@ class Gizmo:
         gl.glUniform4fv(self._loc["color"], 1, col)
 
     def _active_col(self, handle: str, default: np.ndarray) -> np.ndarray:
-        return self.COL_HOVER if self.is_handle_active_or_hovered(handle) else default
+        if self.active_handle is not None:
+            if self.active_handle == handle:
+                return self.COL_HOVER
+            else:
+                dimmed = default.copy()
+                dimmed[3] = 0.12
+                if len(dimmed) == 4:
+                    dimmed[:3] *= 0.25
+                return dimmed
+        if self.hovered_handle == handle:
+            return self.COL_HOVER
+        return default
 
     # ------------------------------------------------------------------- draw
 
@@ -394,10 +405,16 @@ class Gizmo:
             self._set_model(model)
             # filled quad
             hover_fill = np.array([1.0, 0.9, 0.0, 0.55], dtype=np.float32)
-            self._set_color(hover_fill if self.is_handle_active_or_hovered(name) else fill)
+            if self.active_handle is not None:
+                if self.active_handle == name:
+                    self._set_color(hover_fill)
+                else:
+                    self._set_color(np.array([fill[0]*0.2, fill[1]*0.2, fill[2]*0.2, 0.04], dtype=np.float32))
+            else:
+                self._set_color(hover_fill if self.hovered_handle == name else fill)
             gl.glDrawElements(gl.GL_TRIANGLES, self._PLANE_TRIS, gl.GL_UNSIGNED_INT, None)
             # outline
-            outline = self.COL_HOVER if self.is_handle_active_or_hovered(name) else np.array([*fill[:3], 1.0], dtype=np.float32)
+            outline = self._active_col(name, np.array([*fill[:3], 1.0], dtype=np.float32))
             self._set_color(outline)
             gl.glDrawArrays(gl.GL_LINE_LOOP, 0, 4)
         gl.glDisable(gl.GL_BLEND)

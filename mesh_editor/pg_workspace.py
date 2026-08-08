@@ -218,6 +218,70 @@ class PolygroundWorkspace(QWidget):
         if hasattr(self, 'tool_shelf_widget') and self.tool_shelf_widget:
             self.tool_shelf_widget.set_mode(mode)
 
+    def get_available_layouts(self) -> list:
+        layouts_dir = os.path.join(os.path.expanduser("~"), ".proximap", "layouts")
+        layouts = ["Default"]
+        if os.path.exists(layouts_dir):
+            for fname in sorted(os.listdir(layouts_dir)):
+                if fname.endswith(".json"):
+                    name = fname[:-5]
+                    if name != "Default" and name != "Sculpt":
+                        layouts.append(name)
+        return layouts
+
+    def save_named_layout(self, name: str) -> bool:
+        if not name or name == "Default":
+            return False
+        if not self.dock_manager:
+            return False
+        try:
+            layouts_dir = os.path.join(os.path.expanduser("~"), ".proximap", "layouts")
+            os.makedirs(layouts_dir, exist_ok=True)
+            file_path = os.path.join(layouts_dir, f"{name}.json")
+            state_bytes = self.dock_manager.saveState()
+            state_hex = state_bytes.toHex().data().decode("utf-8")
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump({"name": name, "state": state_hex}, f)
+            return True
+        except Exception as e:
+            print(f"[WARNING] Failed to save named layout '{name}': {e}")
+            return False
+
+    def load_named_layout(self, name: str) -> bool:
+        if not self.dock_manager:
+            return False
+        if name == "Default":
+            self._build_default_layout()
+            return True
+        try:
+            layouts_dir = os.path.join(os.path.expanduser("~"), ".proximap", "layouts")
+            file_path = os.path.join(layouts_dir, f"{name}.json")
+            if os.path.exists(file_path):
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                state_hex = data.get("state", "")
+                if state_hex:
+                    from PySide6.QtCore import QByteArray
+                    state_bytes = QByteArray.fromHex(state_hex.encode("utf-8"))
+                    return self.dock_manager.restoreState(state_bytes)
+        except Exception as e:
+            print(f"[WARNING] Failed to load named layout '{name}': {e}")
+        self._build_default_layout()
+        return False
+
+    def delete_named_layout(self, name: str) -> bool:
+        if not name or name == "Default":
+            return False
+        try:
+            layouts_dir = os.path.join(os.path.expanduser("~"), ".proximap", "layouts")
+            file_path = os.path.join(layouts_dir, f"{name}.json")
+            if os.path.exists(file_path):
+                os.remove(file_path)
+                return True
+        except Exception as e:
+            print(f"[WARNING] Failed to delete named layout '{name}': {e}")
+        return False
+
     def save_layout(self):
         """Saves current QADS layout state to ~/.proximap/dock_layout.json."""
         if not self.dock_manager:

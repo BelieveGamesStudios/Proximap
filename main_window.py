@@ -2461,6 +2461,9 @@ class MainWindow(QMainWindow):
         
         self.chrome_bar.tab_switch_requested.connect(self._on_chrome_tab_switch)
         self.chrome_bar.mode_changed.connect(self._on_mode_changed)
+        self.chrome_bar.layout_preset_changed.connect(self._on_layout_preset_changed)
+        self.chrome_bar.save_layout_requested.connect(self._on_save_layout_requested)
+        self.chrome_bar.delete_layout_requested.connect(self._on_delete_layout_requested)
         
         # Set initial page stack & chrome menus based on user preference (Default: 3D Reconstruction)
         init_tab = load_preferences().get("startup_tab", "3D Reconstruction")
@@ -2472,6 +2475,45 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(50, self._load_mesh_editor)
         
         self._set_process_btn_state("idle")
+
+    def _on_layout_preset_changed(self, name: str):
+        self._active_layout_name = name
+        if hasattr(self, "polyground_workspace") and self.polyground_workspace:
+            self.polyground_workspace.load_named_layout(name)
+
+    def _on_save_layout_requested(self):
+        if not hasattr(self, "polyground_workspace") or not self.polyground_workspace:
+            return
+        from PySide6.QtWidgets import QInputDialog, QLineEdit, QMessageBox
+        name, ok = QInputDialog.getText(self, "Save Layout", "Enter custom layout name:", QLineEdit.Normal, "")
+        if ok and name.strip():
+            clean_name = name.strip()
+            if clean_name in ["Default", "Sculpt"]:
+                QMessageBox.warning(self, "Invalid Name", f"The layout name '{clean_name}' is reserved.")
+                return
+            saved = self.polyground_workspace.save_named_layout(clean_name)
+            if saved:
+                self._active_layout_name = clean_name
+                layouts = self.polyground_workspace.get_available_layouts()
+                self.chrome_bar.populate_layout_presets(layouts, clean_name)
+
+    def _on_delete_layout_requested(self):
+        if not hasattr(self, "polyground_workspace") or not self.polyground_workspace:
+            return
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        layouts = [l for l in self.polyground_workspace.get_available_layouts() if l != "Default"]
+        if not layouts:
+            QMessageBox.information(self, "Delete Layout", "No custom layouts available to delete.")
+            return
+        item, ok = QInputDialog.getItem(self, "Delete Layout", "Select layout to delete:", layouts, 0, False)
+        if ok and item:
+            confirm = QMessageBox.question(self, "Confirm Delete", f"Are you sure you want to delete custom layout '{item}'?", QMessageBox.Yes | QMessageBox.No)
+            if confirm == QMessageBox.Yes:
+                self.polyground_workspace.delete_named_layout(item)
+                self._active_layout_name = "Default"
+                remaining = self.polyground_workspace.get_available_layouts()
+                self.polyground_workspace.load_named_layout("Default")
+                self.chrome_bar.populate_layout_presets(remaining, "Default")
 
     def _on_chrome_tab_switch(self, index: int):
         # On Linux, the VisPy OpenGL canvas is a native X11 window that the
@@ -2531,15 +2573,19 @@ class MainWindow(QMainWindow):
             # 3D Reconstruction Tab (Index 0): Hide Mode Notch & Layout Presets
             if hasattr(self.chrome_bar, "mode_notch") and self.chrome_bar.mode_notch:
                 self.chrome_bar.mode_notch.setVisible(False)
-            if hasattr(self.chrome_bar, "right_region") and self.chrome_bar.right_region:
-                self.chrome_bar.right_region.setVisible(False)
+            if hasattr(self.chrome_bar, "set_right_region_visible"):
+                self.chrome_bar.set_right_region_visible(False)
             self._setup_reconstruction_menu_actions()
         elif index == 1:
             # Polyground Workspace Tab (Index 1): Show Mode Notch & Layout Presets
             if hasattr(self.chrome_bar, "mode_notch") and self.chrome_bar.mode_notch:
                 self.chrome_bar.mode_notch.setVisible(True)
-            if hasattr(self.chrome_bar, "right_region") and self.chrome_bar.right_region:
-                self.chrome_bar.right_region.setVisible(True)
+            if hasattr(self.chrome_bar, "set_right_region_visible"):
+                self.chrome_bar.set_right_region_visible(True)
+            if hasattr(self, "polyground_workspace") and self.polyground_workspace:
+                active_l = getattr(self, "_active_layout_name", "Default")
+                layouts = self.polyground_workspace.get_available_layouts()
+                self.chrome_bar.populate_layout_presets(layouts, active_l)
             self._setup_window_menu()
             self._setup_chrome_menu_actions()
 
