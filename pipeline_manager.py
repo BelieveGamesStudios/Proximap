@@ -397,6 +397,7 @@ class PipelineWorker(QThread):
         import glob
         from hardware_profiler import _active_subprocesses
 
+        cmd = self._adapt_colmap_cmd(cmd)
         self.log_message.emit(f"[RUN] {' '.join(cmd)}")
 
         # Identify log file if it's an OpenMVS command
@@ -1547,15 +1548,121 @@ class PipelineWorker(QThread):
         self._using_gpu_sift = False
         return self._run_process_realtime(cmd_cpu, timeout=timeout, cwd=cwd, env=env, line_parser=line_parser)
 
+    def _get_colmap_help(self, colmap_exe: str, subcommand: str) -> str:
+        """Fetch and cache colmap <subcommand> -h output to inspect supported CLI option flags."""
+        if not hasattr(self, "_colmap_help_cache"):
+            self._colmap_help_cache = {}
+        cache_key = (colmap_exe, subcommand)
+        if cache_key in self._colmap_help_cache:
+            return self._colmap_help_cache[cache_key]
+
+        try:
+            import subprocess
+            creationflags = 0
+            if sys.platform == 'win32':
+                creationflags = subprocess.CREATE_NO_WINDOW
+            res = subprocess.run(
+                [colmap_exe, subcommand, "-h"],
+                capture_output=True,
+                text=True,
+                timeout=5.0,
+                creationflags=creationflags
+            )
+            help_text = (res.stdout or "") + "\n" + (res.stderr or "")
+        except Exception as e:
+            help_text = ""
+
+        self._colmap_help_cache[cache_key] = help_text
+        return help_text
+
+    def _adapt_colmap_cmd(self, cmd: list) -> list:
+        """
+        Dynamically adapts COLMAP feature extraction and matching flags
+        to match the exact option names supported by the COLMAP binary
+        (e.g., COLMAP <3.11 using --SiftExtraction.use_gpu vs COLMAP 3.11+/4.x using --FeatureExtraction.use_gpu).
+        """
+        if not cmd or len(cmd) < 2:
+            return list(cmd)
+
+        colmap_exe = cmd[0]
+        exe_basename = os.path.basename(colmap_exe).lower()
+        if "colmap" not in exe_basename:
+            return list(cmd)
+
+        subcommand = cmd[1]
+        help_text = self._get_colmap_help(colmap_exe, subcommand)
+        if not help_text:
+            return list(cmd)
+
+        adapted_cmd = list(cmd)
+
+        if subcommand == "feature_extractor":
+            use_feature_ext = "--FeatureExtraction.use_gpu" in help_text
+            use_sift_ext = "--SiftExtraction.use_gpu" in help_text
+
+            mapping = {}
+            if use_feature_ext:
+                mapping.update({
+                    "--SiftExtraction.use_gpu": "--FeatureExtraction.use_gpu",
+                    "--SiftExtraction.num_threads": "--FeatureExtraction.num_threads",
+                    "--SiftExtraction.max_image_size": "--FeatureExtraction.max_image_size",
+                })
+            elif use_sift_ext:
+                mapping.update({
+                    "--FeatureExtraction.use_gpu": "--SiftExtraction.use_gpu",
+                    "--FeatureExtraction.num_threads": "--SiftExtraction.num_threads",
+                    "--FeatureExtraction.max_image_size": "--SiftExtraction.max_image_size",
+                })
+
+            for i, token in enumerate(adapted_cmd):
+                if token in mapping:
+                    adapted_cmd[i] = mapping[token]
+
+        elif "matcher" in subcommand:
+            use_feature_match = "--FeatureMatching.use_gpu" in help_text
+            use_sift_match = "--SiftMatching.use_gpu" in help_text
+
+            mapping = {}
+            if use_feature_match:
+                mapping.update({
+                    "--SiftMatching.use_gpu": "--FeatureMatching.use_gpu",
+                    "--SiftMatching.num_threads": "--FeatureMatching.num_threads",
+                    "--SiftMatching.guided_matching": "--FeatureMatching.guided_matching",
+                    "--SiftMatching.max_num_matches": "--FeatureMatching.max_num_matches",
+                })
+            elif use_sift_match:
+                mapping.update({
+                    "--FeatureMatching.use_gpu": "--SiftMatching.use_gpu",
+                    "--FeatureMatching.num_threads": "--SiftMatching.num_threads",
+                    "--FeatureMatching.guided_matching": "--FeatureMatching.guided_matching",
+                    "--FeatureMatching.max_num_matches": "--SiftMatching.max_num_matches",
+                })
+
+            for i, token in enumerate(adapted_cmd):
+                if token in mapping:
+                    adapted_cmd[i] = mapping[token]
+
+        return adapted_cmd
+
     def _set_colmap_option(self, cmd: list, option: str, value: str):
         """Set or append a COLMAP command-line option in a mutable command list."""
-        try:
-            index = cmd.index(option)
-            if index + 1 < len(cmd):
-                cmd[index + 1] = value
-                return
-        except ValueError:
-            pass
+        alt_option = None
+        if option.startswith("--SiftMatching."):
+            alt_option = option.replace("--SiftMatching.", "--FeatureMatching.")
+        elif option.startswith("--FeatureMatching."):
+            alt_option = option.replace("--FeatureMatching.", "--SiftMatching.")
+        elif option.startswith("--SiftExtraction."):
+            alt_option = option.replace("--SiftExtraction.", "--FeatureExtraction.")
+        elif option.startswith("--FeatureExtraction."):
+            alt_option = option.replace("--FeatureExtraction.", "--SiftExtraction.")
+
+        for opt in (option, alt_option):
+            if opt and opt in cmd:
+                index = cmd.index(opt)
+                if index + 1 < len(cmd):
+                    cmd[index + 1] = value
+                    return
+
         cmd.extend([option, value])
 
     def _clear_colmap_match_tables(self, database_path: str):
