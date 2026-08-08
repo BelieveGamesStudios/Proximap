@@ -998,20 +998,20 @@ class PipelineWorker(QThread):
             cmd_match_gpu = [
                 colmap_exe, matcher_cmd,
                 "--database_path", database_path,
-                "--FeatureMatching.use_gpu", "1",
-                "--FeatureMatching.guided_matching", guided_matching,
-                "--FeatureMatching.max_num_matches", str(colmap_max_num_matches),
-                "--FeatureMatching.num_threads", str(num_threads),
+                "--SiftMatching.use_gpu", "1",
+                "--SiftMatching.guided_matching", guided_matching,
+                "--SiftMatching.max_num_matches", str(colmap_max_num_matches),
+                "--SiftMatching.num_threads", str(num_threads),
                 "--SiftMatching.max_ratio", nndr_ratio,
             ] + extra_args
 
             cmd_match_cpu = [
                 colmap_exe, matcher_cmd,
                 "--database_path", database_path,
-                "--FeatureMatching.use_gpu", "0",
-                "--FeatureMatching.guided_matching", guided_matching,
-                "--FeatureMatching.max_num_matches", str(colmap_max_num_matches),
-                "--FeatureMatching.num_threads", str(num_threads),
+                "--SiftMatching.use_gpu", "0",
+                "--SiftMatching.guided_matching", guided_matching,
+                "--SiftMatching.max_num_matches", str(colmap_max_num_matches),
+                "--SiftMatching.num_threads", str(num_threads),
                 "--SiftMatching.max_ratio", nndr_ratio,
             ] + extra_args
 
@@ -1045,7 +1045,7 @@ class PipelineWorker(QThread):
                 )
                 self._clear_colmap_match_tables(database_path)
                 relaxed_cpu_match = list(cmd_match_cpu)
-                self._set_colmap_option(relaxed_cpu_match, "--FeatureMatching.guided_matching", "1")
+                self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.guided_matching", "1")
                 self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_ratio", "0.95")
                 self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_distance", "0.9")
                 self._using_gpu_sift = False

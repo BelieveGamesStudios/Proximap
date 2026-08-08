@@ -800,6 +800,10 @@ class MeshEditorWidget(QWidget):
         viewport_hbox.addWidget(self.trans_toolbar)
         
         self.viewport = MeshEditorViewport(self)
+        viewport_hbox.addWidget(self.viewport, stretch=1)
+        viewport_layout.addLayout(viewport_hbox)
+        
+        layout.addWidget(self.viewport_container, stretch=1)
         
         # Disable properties inputs initially until an object is selected
         self._set_properties_enabled(False)
