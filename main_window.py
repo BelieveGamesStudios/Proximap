@@ -4077,15 +4077,73 @@ class MainWindow(QMainWindow):
         # Restore UI controls from metadata
         if meta:
             if "quality_preset" in meta:
-                idx = self.quality_combo.findText(meta["quality_preset"].capitalize())
+                preset_name = meta["quality_preset"].capitalize()
+                idx = self.quality_combo.findText(preset_name)
                 if idx >= 0:
                     self.quality_combo.setCurrentIndex(idx)
             if "gpu_mode" in meta:
-                idx = self.gpu_combo.findText(meta["gpu_mode"].capitalize())
+                gpu_name = meta["gpu_mode"].capitalize()
+                idx = self.gpu_combo.findText(gpu_name)
                 if idx >= 0:
                     self.gpu_combo.setCurrentIndex(idx)
             if "has_plain_surfaces" in meta:
-                self.plain_surfaces_checkbox.setChecked(meta["has_plain_surfaces"])
+                self.plain_surfaces_checkbox.setChecked(bool(meta["has_plain_surfaces"]))
+            if "mapper_mode" in meta and hasattr(self, 'mapper_combo'):
+                mapper_str = str(meta["mapper_mode"]).lower()
+                mapper_idx = 1 if mapper_str == "global" else 0
+                self.mapper_combo.setCurrentIndex(mapper_idx)
+            if "mesh_mode" in meta and hasattr(self, 'mesh_mode_combo'):
+                mesh_idx = self.mesh_mode_combo.findText(str(meta["mesh_mode"]).capitalize())
+                if mesh_idx >= 0:
+                    self.mesh_mode_combo.setCurrentIndex(mesh_idx)
+            if "poisson_depth" in meta:
+                if hasattr(self, 'poisson_depth_slider'):
+                    self.poisson_depth_slider.setValue(int(meta["poisson_depth"]))
+                elif hasattr(self, 'poisson_depth_spin'):
+                    self.poisson_depth_spin.setValue(int(meta["poisson_depth"]))
+
+            # Restore custom parameters UI controls if present
+            cparams = meta.get("custom_params")
+            if cparams and isinstance(cparams, dict):
+                if hasattr(self, 'custom_settings_toggle'):
+                    self.custom_settings_toggle.setChecked(True)
+                    if hasattr(self, 'custom_settings_container'):
+                        self.custom_settings_container.setVisible(True)
+
+                if "colmap_matcher_type" in cparams and hasattr(self, 'custom_matcher_combo'):
+                    reverse_matcher_map = {"auto": 0, "exhaustive": 1, "sequential": 2, "vocab_tree": 3, "spatial": 4}
+                    m_idx = reverse_matcher_map.get(cparams["colmap_matcher_type"], 0)
+                    self.custom_matcher_combo.setCurrentIndex(m_idx)
+
+                if "vocab_tree_path" in cparams and hasattr(self, 'vocab_path_edit'):
+                    self.vocab_path_edit.setText(str(cparams["vocab_tree_path"]))
+
+                if "colmap_max_num_features" in cparams and hasattr(self, 'custom_features_spin'):
+                    self.custom_features_spin.setValue(int(cparams["colmap_max_num_features"]))
+
+                if "colmap_max_num_matches" in cparams and hasattr(self, 'custom_matches_spin'):
+                    self.custom_matches_spin.setValue(int(cparams["colmap_max_num_matches"]))
+
+                if "colmap_block_size" in cparams and hasattr(self, 'custom_block_size_spin'):
+                    self.custom_block_size_spin.setValue(int(cparams["colmap_block_size"]))
+
+                if "guided_matching" in cparams and hasattr(self, 'custom_guided_check'):
+                    self.custom_guided_check.setChecked(str(cparams["guided_matching"]) == "1")
+
+                if "run_bundle_adjuster" in cparams and hasattr(self, 'custom_ba_check'):
+                    self.custom_ba_check.setChecked(bool(cparams["run_bundle_adjuster"]))
+
+                if "densify_res" in cparams and hasattr(self, 'custom_densify_res_combo'):
+                    self.custom_densify_res_combo.setCurrentIndex(int(cparams["densify_res"]))
+
+                if "densify_views" in cparams and hasattr(self, 'custom_densify_views_spin'):
+                    self.custom_densify_views_spin.setValue(int(cparams["densify_views"]))
+
+                if "refine_scales" in cparams and hasattr(self, 'custom_refine_scales_spin'):
+                    self.custom_refine_scales_spin.setValue(int(cparams["refine_scales"]))
+
+                if "texture_res" in cparams and hasattr(self, 'custom_texture_res_combo'):
+                    self.custom_texture_res_combo.setCurrentIndex(int(cparams["texture_res"]))
 
         # Enable view scene button and set mode
         mvs_dir = os.path.join(out_dir, "mvs")

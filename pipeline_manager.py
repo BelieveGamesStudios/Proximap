@@ -311,6 +311,8 @@ class PipelineWorker(QThread):
             existing_meta["mapper_mode"] = self.mapper_mode
             existing_meta["mesh_mode"] = self.mesh_mode
             existing_meta["poisson_depth"] = self.poisson_depth
+            if self.custom_params:
+                existing_meta["custom_params"] = self.custom_params
             save_session_metadata(existing_meta)
             self.log_message.emit(f"[BACKUP] Saved checkpoint for '{step_name}'.")
         except Exception as e:
