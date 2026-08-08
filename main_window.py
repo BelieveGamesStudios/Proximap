@@ -267,7 +267,10 @@ class ViewerLoadWorker(QThread):
             ext = os.path.splitext(file_path)[1].lower()
 
             if mode == 1:
-                # Dense Point Cloud
+                ply_path = file_path.replace(".mvs", ".ply")
+                if os.path.exists(ply_path):
+                    file_path = ply_path
+                ext = os.path.splitext(file_path)[1].lower()
                 if ext == '.ply':
                     points, colors, _ = _read_ply_static(file_path)
                     # If fast PLY static reader returned empty, try point_cloud_io fallback
@@ -314,96 +317,177 @@ def _read_ply_static(path):
     import numpy as np, struct
     if not os.path.exists(path):
         return np.zeros((0,3), np.float32), np.zeros((0,3), np.uint8), None
-    with open(path, 'rb') as f:
-        header_lines = []
-        while True:
-            line = f.readline().decode('utf-8', errors='ignore').strip()
-            header_lines.append(line)
-            if line == 'end_header':
-                break
-        num_vertices = num_faces = 0
-        format_type = None
-        vertex_properties = []
-        element_type = None
-        for line in header_lines:
-            parts = line.split()
-            if not parts: continue
-            if parts[0] == 'format':  format_type = parts[1]
-            elif parts[0] == 'element':
-                element_type = parts[1]
-                if element_type == 'vertex': num_vertices = int(parts[2])
-                elif element_type == 'face': num_faces    = int(parts[2])
-            elif parts[0] == 'property' and element_type == 'vertex':
-                if parts[1] == 'list':
-                    vertex_properties.append((parts[4], 'list', True, parts[2], parts[3]))
+    try:
+        with open(path, 'rb') as f:
+            header_lines = []
+            while True:
+                line = f.readline().decode('utf-8', errors='ignore').strip()
+                header_lines.append(line)
+                if line == 'end_header':
+                    break
+            num_vertices = num_faces = 0
+            format_type = None
+            vertex_properties = []
+            element_type = None
+            for line in header_lines:
+                parts = line.split()
+                if not parts: continue
+                if parts[0] == 'format':  format_type = parts[1]
+                elif parts[0] == 'element':
+                    element_type = parts[1]
+                    if element_type == 'vertex': num_vertices = int(parts[2])
+                    elif element_type == 'face': num_faces    = int(parts[2])
+                elif parts[0] == 'property' and element_type == 'vertex':
+                    if parts[1] == 'list':
+                        vertex_properties.append((parts[4], 'list', True, parts[2], parts[3]))
+                    else:
+                        vertex_properties.append((parts[2], parts[1], False, None, None))
+            type_map = {
+                'char':(np.int8,1),'uchar':(np.uint8,1),'short':(np.int16,2),'ushort':(np.uint16,2),
+                'int':(np.int32,4),'uint':(np.uint32,4),'float':(np.float32,4),'double':(np.float64,8),
+                'int8':(np.int8,1),'uint8':(np.uint8,1),'int16':(np.int16,2),'uint16':(np.uint16,2),
+                'int32':(np.int32,4),'uint32':(np.uint32,4),'float32':(np.float32,4),'float64':(np.float64,8)
+            }
+            type_char_map = {
+                'char': 'b', 'uchar': 'B', 'short': 'h', 'ushort': 'H',
+                'int': 'i', 'uint': 'I', 'float': 'f', 'double': 'd',
+                'int8': 'b', 'uint8': 'B', 'int16': 'h', 'uint16': 'H',
+                'int32': 'i', 'uint32': 'I', 'float32': 'f', 'float64': 'd'
+            }
+            type_sizes = {'b': 1, 'B': 1, 'h': 2, 'H': 2, 'i': 4, 'I': 4, 'f': 4, 'd': 8}
+
+            has_list = any(p[2] for p in vertex_properties)
+            points = np.zeros((num_vertices, 3), dtype=np.float32)
+            colors = None
+            faces  = None
+            prop_names = [p[0] for p in vertex_properties]
+            has_color  = all(c in prop_names for c in ('red','green','blue')) or all(c in prop_names for c in ('r','g','b'))
+            if has_color:
+                colors = np.zeros((num_vertices, 3), dtype=np.uint8)
+
+            if 'binary' in (format_type or ''):
+                if has_list:
+                    fixed_properties = []
+                    list_properties = []
+                    for p in vertex_properties:
+                        if p[2]: list_properties.append(p)
+                        else:
+                            if not list_properties: fixed_properties.append(p)
+
+                    fmt_chars = [type_char_map[t] for name, t, _, _, _ in fixed_properties if t in type_char_map]
+                    fixed_size = sum(type_sizes[c] for c in fmt_chars)
+                    endian_flag = '>' if 'big' in format_type else '<'
+                    fixed_struct = struct.Struct(endian_flag + ''.join(fmt_chars))
+
+                    names = [p[0] for p in fixed_properties]
+                    x_idx = names.index('x') if 'x' in names else -1
+                    y_idx = names.index('y') if 'y' in names else -1
+                    z_idx = names.index('z') if 'z' in names else -1
+
+                    r_name = 'red' if 'red' in names else ('r' if 'r' in names else None)
+                    g_name = 'green' if 'green' in names else ('g' if 'g' in names else None)
+                    b_name = 'blue' if 'blue' in names else ('b' if 'b' in names else None)
+
+                    r_idx = names.index(r_name) if r_name else -1
+                    g_idx = names.index(g_name) if g_name else -1
+                    b_idx = names.index(b_name) if b_name else -1
+
+                    data = f.read()
+                    offset = 0
+
+                    for i in range(num_vertices):
+                        val = fixed_struct.unpack_from(data, offset)
+                        if x_idx != -1: points[i, 0] = val[x_idx]
+                        if y_idx != -1: points[i, 1] = val[y_idx]
+                        if z_idx != -1: points[i, 2] = val[z_idx]
+
+                        if has_color and colors is not None:
+                            if r_idx != -1: colors[i, 0] = val[r_idx]
+                            if g_idx != -1: colors[i, 1] = val[g_idx]
+                            if b_idx != -1: colors[i, 2] = val[b_idx]
+
+                        offset += fixed_size
+
+                        for name, _, _, count_type, item_type in list_properties:
+                            c_char = type_char_map[count_type]
+                            c_size = type_sizes[c_char]
+                            count = struct.unpack_from(endian_flag + c_char, data, offset)[0]
+                            offset += c_size
+
+                            i_char = type_char_map[item_type]
+                            i_size = type_sizes[i_char]
+                            offset += count * i_size
+
+                    if num_faces > 0 and len(data) > offset:
+                        try:
+                            faces_list = []
+                            count_fmt = endian_flag + 'B'
+                            while offset < len(data) and len(faces_list) < num_faces:
+                                cnt = struct.unpack_from(count_fmt, data, offset)[0]
+                                offset += 1
+                                idxs = list(struct.unpack_from(f'{endian_flag}{cnt}I', data, offset))
+                                offset += 4 * cnt
+                                if len(idxs) == 3: faces_list.append(idxs)
+                            if faces_list: faces = np.array(faces_list, dtype=np.int32)
+                        except Exception: pass
                 else:
-                    vertex_properties.append((parts[2], parts[1], False, None, None))
-        type_map = {
-            'char':(np.int8,1),'uchar':(np.uint8,1),'short':(np.int16,2),'ushort':(np.uint16,2),
-            'int':(np.int32,4),'uint':(np.uint32,4),'float':(np.float32,4),'double':(np.float64,8),
-            'int8':(np.int8,1),'uint8':(np.uint8,1),'int16':(np.int16,2),'uint16':(np.uint16,2),
-            'int32':(np.int32,4),'uint32':(np.uint32,4),'float32':(np.float32,4),'float64':(np.float64,8)
-        }
-        has_list = any(p[2] for p in vertex_properties)
-        points = np.zeros((num_vertices, 3), dtype=np.float32)
-        colors = None
-        faces  = None
-        prop_names = [p[0] for p in vertex_properties]
-        has_color  = all(c in prop_names for c in ('red','green','blue'))
-        if has_color:
-            colors = np.zeros((num_vertices, 3), dtype=np.uint8)
-        if 'binary' in (format_type or ''):
-            fixed_props = [p for p in vertex_properties if not p[2]]
-            stride = sum(type_map[p[1]][1] for p in fixed_props if p[1] in type_map)
-            raw = f.read(stride * num_vertices)
-            offset = 0
-            col_offsets = {}
-            for p in fixed_props:
-                if p[1] in type_map:
-                    col_offsets[p[0]] = offset
-                    offset += type_map[p[1]][1]
-            dt_fields = []
-            for p in fixed_props:
-                if p[1] in type_map:
-                    dt_fields.append((p[0], type_map[p[1]][0]))
-            if dt_fields:
-                dt = np.dtype(dt_fields)
-                arr = np.frombuffer(raw, dtype=dt)
-                if 'x' in arr.dtype.names: points[:,0] = arr['x'].astype(np.float32)
-                if 'y' in arr.dtype.names: points[:,1] = arr['y'].astype(np.float32)
-                if 'z' in arr.dtype.names: points[:,2] = arr['z'].astype(np.float32)
-                if has_color and colors is not None:
-                    if 'red'   in arr.dtype.names: colors[:,0] = arr['red']
-                    if 'green' in arr.dtype.names: colors[:,1] = arr['green']
-                    if 'blue'  in arr.dtype.names: colors[:,2] = arr['blue']
-            if num_faces > 0:
-                faces_list = []
-                count_fmt = '>B' if 'big' in (format_type or '') else '<B'
-                idx_fmt   = '>I' if 'big' in (format_type or '') else '<I'
-                for _ in range(num_faces):
-                    cnt = struct.unpack(count_fmt, f.read(1))[0]
-                    idxs = list(struct.unpack(f'<{cnt}I', f.read(4*cnt)))
-                    if len(idxs) == 3: faces_list.append(idxs)
-                if faces_list: faces = np.array(faces_list, dtype=np.int32)
-        else:
-            for i in range(num_vertices):
-                vals = f.readline().decode('utf-8', errors='ignore').split()
-                if len(vals) >= 3:
-                    points[i] = [float(vals[0]), float(vals[1]), float(vals[2])]
-                    if has_color and colors is not None and len(vals) >= 6:
-                        ri = prop_names.index('red')   if 'red'   in prop_names else 3
-                        gi = prop_names.index('green') if 'green' in prop_names else 4
-                        bi = prop_names.index('blue')  if 'blue'  in prop_names else 5
-                        try: colors[i] = [int(vals[ri]), int(vals[gi]), int(vals[bi])]
-                        except: pass
-            if num_faces > 0:
-                faces_list = []
-                for _ in range(num_faces):
+                    fixed_props = [p for p in vertex_properties if not p[2]]
+                    stride = sum(type_map[p[1]][1] for p in fixed_props if p[1] in type_map)
+                    raw = f.read(stride * num_vertices)
+                    offset = 0
+                    col_offsets = {}
+                    for p in fixed_props:
+                        if p[1] in type_map:
+                            col_offsets[p[0]] = offset
+                            offset += type_map[p[1]][1]
+                    dt_fields = []
+                    for p in fixed_props:
+                        if p[1] in type_map:
+                            dt_fields.append((p[0], type_map[p[1]][0]))
+                    if dt_fields:
+                        dt = np.dtype(dt_fields)
+                        arr = np.frombuffer(raw, dtype=dt)
+                        if 'x' in arr.dtype.names: points[:,0] = arr['x'].astype(np.float32)
+                        if 'y' in arr.dtype.names: points[:,1] = arr['y'].astype(np.float32)
+                        if 'z' in arr.dtype.names: points[:,2] = arr['z'].astype(np.float32)
+                        if has_color and colors is not None:
+                            r_key = 'red' if 'red' in arr.dtype.names else 'r'
+                            g_key = 'green' if 'green' in arr.dtype.names else 'g'
+                            b_key = 'blue' if 'blue' in arr.dtype.names else 'b'
+                            if r_key in arr.dtype.names: colors[:,0] = arr[r_key]
+                            if g_key in arr.dtype.names: colors[:,1] = arr[g_key]
+                            if b_key in arr.dtype.names: colors[:,2] = arr[b_key]
+                    if num_faces > 0:
+                        faces_list = []
+                        count_fmt = '>B' if 'big' in (format_type or '') else '<B'
+                        idx_fmt   = '>I' if 'big' in (format_type or '') else '<I'
+                        for _ in range(num_faces):
+                            cnt = struct.unpack(count_fmt, f.read(1))[0]
+                            idxs = list(struct.unpack(f'<{cnt}I', f.read(4*cnt)))
+                            if len(idxs) == 3: faces_list.append(idxs)
+                        if faces_list: faces = np.array(faces_list, dtype=np.int32)
+            else:
+                for i in range(num_vertices):
                     vals = f.readline().decode('utf-8', errors='ignore').split()
-                    if vals and int(vals[0]) == 3 and len(vals) >= 4:
-                        faces_list.append([int(vals[1]), int(vals[2]), int(vals[3])])
-                if faces_list: faces = np.array(faces_list, dtype=np.int32)
-    return points, colors, faces
+                    if len(vals) >= 3:
+                        points[i] = [float(vals[0]), float(vals[1]), float(vals[2])]
+                        if has_color and colors is not None and len(vals) >= 6:
+                            ri = prop_names.index('red') if 'red' in prop_names else (prop_names.index('r') if 'r' in prop_names else 3)
+                            gi = prop_names.index('green') if 'green' in prop_names else (prop_names.index('g') if 'g' in prop_names else 4)
+                            bi = prop_names.index('blue') if 'blue' in prop_names else (prop_names.index('b') if 'b' in prop_names else 5)
+                            try: colors[i] = [int(vals[ri]), int(vals[gi]), int(vals[bi])]
+                            except: pass
+                if num_faces > 0:
+                    faces_list = []
+                    for _ in range(num_faces):
+                        vals = f.readline().decode('utf-8', errors='ignore').split()
+                        if vals and int(vals[0]) == 3 and len(vals) >= 4:
+                            faces_list.append([int(vals[1]), int(vals[2]), int(vals[3])])
+                    if faces_list: faces = np.array(faces_list, dtype=np.int32)
+        return points, colors, faces
+    except Exception as e:
+        print(f"[ERROR] Failed to parse PLY in _read_ply_static ({path}): {e}")
+        return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8), None
 
 
 class ModelServerHandler(http.server.BaseHTTPRequestHandler):
@@ -1554,6 +1638,14 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Proximap 1.4.0")
         self.setMinimumSize(1100, 750)
         self.showMaximized()
+        
+        base_dir = get_base_dir()
+        icon_path = os.path.join(base_dir, "app_icon.ico")
+        if not os.path.exists(icon_path):
+            icon_path = os.path.join(base_dir, "public", "app_icon.png")
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon
+            self.setWindowIcon(QIcon(icon_path))
         self.image_list = []
         self.worker = None
         
@@ -1829,16 +1921,12 @@ class MainWindow(QMainWindow):
             "Force CPU Fallback"
         ])
         
-        self.plain_surfaces_checkbox = QCheckBox("Plain/smooth surfaces  (Neural matching)", step2_box)
+        self.plain_surfaces_checkbox = QCheckBox("Plain/smooth surfaces  (GLOMAP Mapper)", step2_box)
         self.plain_surfaces_checkbox.setChecked(False)
         self.plain_surfaces_checkbox.setToolTip(
-            "Enables SuperPoint + LightGlue neural feature detection and matching\n"
-            "for plain, reflective, or textureless surfaces where standard SIFT fails.\n\n"
-            "Replaces both feature extraction and matching with a learned detector\n"
-            "that finds keypoints SIFT cannot detect on low-contrast regions.\n\n"
-            "GPU (CUDA) strongly recommended — CPU-only mode is significantly slower.\n"
-            "Not available at Preview quality (SIFT fallback is used instead).\n"
-            "Guided matching is disabled in this mode (SIFT-only concept)."
+            "Optimizes feature extraction parameters for plain, smooth, or reflective surfaces\n"
+            "and automatically uses GLOMAP global mapper for camera pose estimation.\n\n"
+            "Dynamically throttles feature and match limits based on dataset size and system memory pressure."
         )
         
         # Advanced Options Collapsible Panel
@@ -1930,6 +2018,65 @@ class MainWindow(QMainWindow):
         colmap_sec.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676; margin-top: 4px; border: none; background: transparent;")
         custom_grid.addWidget(colmap_sec, 0, 0, 1, 2)
 
+        # Matcher Type
+        lbl_matcher_type = QLabel("Matcher Type:", self.custom_settings_container)
+        lbl_matcher_type.setStyleSheet(lbl_style)
+        self.custom_matcher_combo = QComboBox(self.custom_settings_container)
+        self.custom_matcher_combo.addItems([
+            "Auto-Select (Hardware Profiler)",
+            "Exhaustive (Full pair matching)",
+            "Sequential (Ordered/Video frames)",
+            "Vocabulary Tree (Large dataset scale)",
+            "Spatial (GPS position based)"
+        ])
+        self.custom_matcher_combo.setCurrentIndex(0)
+        self.custom_matcher_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        self.custom_matcher_combo.currentIndexChanged.connect(self._on_matcher_type_changed)
+        custom_grid.addWidget(lbl_matcher_type, 1, 0)
+        custom_grid.addWidget(self.custom_matcher_combo, 1, 1)
+
+        # Vocab Tree File Selection Row (hidden by default)
+        self.vocab_tree_widget = QWidget(self.custom_settings_container)
+        self.vocab_tree_widget.setStyleSheet("border: none; background: transparent; padding: 0;")
+        vocab_layout = QHBoxLayout(self.vocab_tree_widget)
+        vocab_layout.setContentsMargins(0, 0, 0, 0)
+        vocab_layout.setSpacing(4)
+
+        self.vocab_path_edit = QLineEdit(self.vocab_tree_widget)
+        from pipeline_manager import get_default_vocab_tree_path
+        def_vocab = get_default_vocab_tree_path()
+        if def_vocab:
+            self.vocab_path_edit.setText(def_vocab)
+        self.vocab_path_edit.setPlaceholderText("Path to vocab_tree.bin (leave empty for bundled default)...")
+        self.vocab_path_edit.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px; font-size: 10px;")
+        
+        self.vocab_browse_btn = QPushButton("Browse...", self.vocab_tree_widget)
+        self.vocab_browse_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2D2D2D;
+                color: #CCCCCC;
+                border: 1px solid #444444;
+                border-radius: 3px;
+                padding: 2px 6px;
+                font-size: 10px;
+            }
+            QPushButton:hover {
+                background-color: #3D3D3D;
+                color: #00E676;
+            }
+        """)
+        self.vocab_browse_btn.clicked.connect(self._browse_vocab_tree_file)
+        
+        vocab_layout.addWidget(self.vocab_path_edit, stretch=1)
+        vocab_layout.addWidget(self.vocab_browse_btn)
+
+        self.lbl_vocab = QLabel("Vocab Tree File:", self.custom_settings_container)
+        self.lbl_vocab.setStyleSheet(lbl_style)
+        custom_grid.addWidget(self.lbl_vocab, 2, 0)
+        custom_grid.addWidget(self.vocab_tree_widget, 2, 1)
+        self.lbl_vocab.setVisible(False)
+        self.vocab_tree_widget.setVisible(False)
+
         # SIFT Max Features
         lbl_features = QLabel("SIFT Max Features:", self.custom_settings_container)
         lbl_features.setStyleSheet(lbl_style)
@@ -1938,8 +2085,8 @@ class MainWindow(QMainWindow):
         self.custom_features_spin.setSingleStep(1000)
         self.custom_features_spin.setValue(8000)
         self.custom_features_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_features, 1, 0)
-        custom_grid.addWidget(self.custom_features_spin, 1, 1)
+        custom_grid.addWidget(lbl_features, 3, 0)
+        custom_grid.addWidget(self.custom_features_spin, 3, 1)
 
         # Exhaustive Max Matches
         lbl_matches = QLabel("Max Num Matches:", self.custom_settings_container)
@@ -1949,27 +2096,39 @@ class MainWindow(QMainWindow):
         self.custom_matches_spin.setSingleStep(4096)
         self.custom_matches_spin.setValue(16384)
         self.custom_matches_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_matches, 2, 0)
-        custom_grid.addWidget(self.custom_matches_spin, 2, 1)
+        custom_grid.addWidget(lbl_matches, 4, 0)
+        custom_grid.addWidget(self.custom_matches_spin, 4, 1)
+
+        # Exhaustive Block Size
+        self.lbl_block_size = QLabel("Exhaustive Block Size:", self.custom_settings_container)
+        self.lbl_block_size.setStyleSheet(lbl_style)
+        self.custom_block_size_spin = QSpinBox(self.custom_settings_container)
+        self.custom_block_size_spin.setRange(5, 200)
+        self.custom_block_size_spin.setSingleStep(5)
+        self.custom_block_size_spin.setValue(50)
+        self.custom_block_size_spin.setToolTip("Block size for COLMAP exhaustive_matcher. Lower values (e.g. 20) reduce RAM consumption during matrix matching.")
+        self.custom_block_size_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(self.lbl_block_size, 5, 0)
+        custom_grid.addWidget(self.custom_block_size_spin, 5, 1)
 
         # Guided Matching
         self.custom_guided_check = QCheckBox("Use Guided Matching", self.custom_settings_container)
         self.custom_guided_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
         self.custom_guided_check.setChecked(True)
-        custom_grid.addWidget(self.custom_guided_check, 3, 0, 1, 2)
+        custom_grid.addWidget(self.custom_guided_check, 6, 0, 1, 2)
 
         # Bundle Adjuster
         self.custom_ba_check = QCheckBox("Run Extra Bundle Adjuster", self.custom_settings_container)
         self.custom_ba_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
         self.custom_ba_check.setChecked(False)
-        custom_grid.addWidget(self.custom_ba_check, 4, 0, 1, 2)
+        custom_grid.addWidget(self.custom_ba_check, 7, 0, 1, 2)
 
 
 
         # OpenMVS section
         openmvs_sec = QLabel("OpenMVS Settings", self.custom_settings_container)
         openmvs_sec.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676; margin-top: 4px; border: none; background: transparent;")
-        custom_grid.addWidget(openmvs_sec, 6, 0, 1, 2)
+        custom_grid.addWidget(openmvs_sec, 8, 0, 1, 2)
 
         # Densification Resolution
         lbl_densify_res = QLabel("Densification Res:", self.custom_settings_container)
@@ -1983,8 +2142,8 @@ class MainWindow(QMainWindow):
         ])
         self.custom_densify_res_combo.setCurrentIndex(1)
         self.custom_densify_res_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_densify_res, 7, 0)
-        custom_grid.addWidget(self.custom_densify_res_combo, 7, 1)
+        custom_grid.addWidget(lbl_densify_res, 9, 0)
+        custom_grid.addWidget(self.custom_densify_res_combo, 9, 1)
 
         # Max Views for Densification
         lbl_densify_views = QLabel("Max Densify Views:", self.custom_settings_container)
@@ -1993,8 +2152,8 @@ class MainWindow(QMainWindow):
         self.custom_densify_views_spin.setRange(1, 16)
         self.custom_densify_views_spin.setValue(4)
         self.custom_densify_views_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_densify_views, 8, 0)
-        custom_grid.addWidget(self.custom_densify_views_spin, 8, 1)
+        custom_grid.addWidget(lbl_densify_views, 10, 0)
+        custom_grid.addWidget(self.custom_densify_views_spin, 10, 1)
 
         # Mesh Refinement Scales
         lbl_refine_scales = QLabel("Mesh Refinement Scales:", self.custom_settings_container)
@@ -2003,8 +2162,8 @@ class MainWindow(QMainWindow):
         self.custom_refine_scales_spin.setRange(1, 5)
         self.custom_refine_scales_spin.setValue(2)
         self.custom_refine_scales_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_refine_scales, 9, 0)
-        custom_grid.addWidget(self.custom_refine_scales_spin, 9, 1)
+        custom_grid.addWidget(lbl_refine_scales, 11, 0)
+        custom_grid.addWidget(self.custom_refine_scales_spin, 11, 1)
 
         # Texturing Resolution
         lbl_texture_res = QLabel("Texturing Res:", self.custom_settings_container)
@@ -2018,8 +2177,8 @@ class MainWindow(QMainWindow):
         ])
         self.custom_texture_res_combo.setCurrentIndex(1)
         self.custom_texture_res_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_texture_res, 10, 0)
-        custom_grid.addWidget(self.custom_texture_res_combo, 10, 1)
+        custom_grid.addWidget(lbl_texture_res, 12, 0)
+        custom_grid.addWidget(self.custom_texture_res_combo, 12, 1)
         
         advanced_layout.addWidget(self.custom_settings_toggle)
         advanced_layout.addWidget(self.mapper_label)
@@ -2538,6 +2697,70 @@ class MainWindow(QMainWindow):
                 layout = QVBoxLayout(self.mesh_editor_placeholder)
                 layout.setContentsMargins(0, 0, 0, 0)
                 layout.addWidget(self.polyground_workspace)
+        except Exception as e:
+            import traceback
+            err_msg = f"Failed to load Mesh Editor:\n{str(e)}\n\n{traceback.format_exc()}"
+            print(f"[ERROR] {err_msg}")
+            
+            layout = self.mesh_editor_placeholder.layout()
+            if layout:
+                while layout.count():
+                    child = layout.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
+            else:
+                layout = QVBoxLayout(self.mesh_editor_placeholder)
+            
+            err_container = QWidget(self.mesh_editor_placeholder)
+            err_container.setFixedWidth(540)
+            err_layout = QVBoxLayout(err_container)
+            err_layout.setSpacing(12)
+            err_layout.setAlignment(Qt.AlignCenter)
+            
+            err_title = QLabel("Error Loading Mesh Editor", err_container)
+            err_title.setStyleSheet("color: #FF5252; font-size: 16px; font-weight: bold;")
+            err_title.setAlignment(Qt.AlignCenter)
+            
+            err_box = QTextEdit(err_container)
+            err_box.setPlainText(f"{str(e)}\n\n{traceback.format_exc()}")
+            err_box.setReadOnly(True)
+            err_box.setMaximumHeight(180)
+            err_box.setStyleSheet("""
+                QTextEdit {
+                    background-color: #1A1A1A;
+                    color: #FF8A80;
+                    border: 1px solid #FF5252;
+                    border-radius: 6px;
+                    font-family: monospace;
+                    font-size: 11px;
+                    padding: 8px;
+                }
+            """)
+            
+            retry_btn = QPushButton("Retry Loading", err_container)
+            retry_btn.setCursor(Qt.PointingHandCursor)
+            retry_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #00E676;
+                    color: #121212;
+                    font-weight: bold;
+                    font-size: 13px;
+                    border-radius: 4px;
+                    padding: 8px 20px;
+                }
+                QPushButton:hover {
+                    background-color: #00FF87;
+                }
+            """)
+            retry_btn.clicked.connect(self._retry_load_mesh_editor)
+            
+            err_layout.addWidget(err_title)
+            err_layout.addWidget(err_box)
+            err_layout.addWidget(retry_btn, 0, Qt.AlignCenter)
+            
+            layout.addStretch()
+            layout.addWidget(err_container, 0, Qt.AlignCenter)
+            layout.addStretch()
         finally:
             QApplication.restoreOverrideCursor()
             self._mesh_editor_loading = False
@@ -2682,29 +2905,98 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
+=======
+    def _retry_load_mesh_editor(self):
+        layout = self.mesh_editor_placeholder.layout()
+        if layout:
+            while layout.count():
+                child = layout.takeAt(0)
+                if child.widget():
+                    child.widget().deleteLater()
+        else:
+            layout = QVBoxLayout(self.mesh_editor_placeholder)
+            
+        loading_container = QWidget(self.mesh_editor_placeholder)
+        loading_container.setFixedWidth(320)
+        loading_layout = QVBoxLayout(loading_container)
+        loading_layout.setSpacing(12)
+        loading_layout.setAlignment(Qt.AlignCenter)
+        
+        self.loading_msg_label = QLabel("Opening Mesh Editor...", loading_container)
+        self.loading_msg_label.setStyleSheet("color: #ffffff; font-size: 15px; font-weight: bold;")
+        self.loading_msg_label.setAlignment(Qt.AlignCenter)
+        
+        self.loading_progress = QProgressBar(loading_container)
+        self.loading_progress.setRange(0, 0)
+        self.loading_progress.setTextVisible(False)
+        self.loading_progress.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #3A3A3A;
+                background-color: #222222;
+                height: 6px;
+                border-radius: 3px;
+            }
+            QProgressBar::chunk {
+                background-color: #00E676;
+                border-radius: 3px;
+            }
+        """)
+        
+        self.loading_sub_label = QLabel("Initializing 3D viewport and mesh utilities...", loading_container)
+        self.loading_sub_label.setStyleSheet("color: #737373; font-size: 11px;")
+        self.loading_sub_label.setAlignment(Qt.AlignCenter)
+        
+        loading_layout.addWidget(self.loading_msg_label)
+        loading_layout.addWidget(self.loading_progress)
+        loading_layout.addWidget(self.loading_sub_label)
+        
+        layout.addStretch()
+        layout.addWidget(loading_container, 0, Qt.AlignCenter)
+        layout.addStretch()
+        
+        self._mesh_editor_loading = True
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        QTimer.singleShot(100, self._load_mesh_editor)
+>>>>>>> main
 
     def _update_system_badge(self):
         """Calculates system resource quality badge and updates style dynamically."""
-        if self.total_ram_gb >= 8.0:
-            status_text = "SYSTEM READY (Optimal RAM)"
-            badge_color = "#00E676"  # Bright green
-            text_color = "#121212"
-        elif self.total_ram_gb >= 4.0:
-            status_text = "SYSTEM WARN (Low Memory Mode)"
-            badge_color = "#FFD700"  # Yellow
-            text_color = "#121212"
-        else:
-            status_text = "SYSTEM INSUFFICIENT (Below 4GB)"
-            badge_color = "#D50000"  # Deep red
-            text_color = "#ffffff"
+        try:
+            budget = hardware_profiler.get_memory_budget()
+            avail_gb = budget.available_gb
+            swap_used = budget.swap_used_gb
+            swap_total = budget.swap_total_gb
             
-        # Append GPU status details
-        gpu_info = "dGPU Active" if self.dgpu_detected else "iGPU Fallback Active"
-        self.badge.setText(f"{status_text}\n{gpu_info}")
-        self.badge.setStyleSheet(
-            f"background-color: {badge_color}; color: {text_color}; "
-            "font-weight: bold; border-radius: 4px; padding: 6px; font-size: 11px;"
-        )
+            if budget.pressure_level == "ok":
+                status_text = f"SYSTEM READY ({avail_gb:.1f}GB RAM Free)"
+                badge_color = "#00E676"  # Bright green
+                text_color = "#121212"
+            elif budget.pressure_level == "warn":
+                status_text = f"SYSTEM WARN ({avail_gb:.1f}GB RAM Free)"
+                badge_color = "#FFD700"  # Yellow
+                text_color = "#121212"
+            else:
+                status_text = f"SYSTEM INSUFFICIENT ({avail_gb:.1f}GB RAM Free)"
+                badge_color = "#D50000"  # Deep red
+                text_color = "#ffffff"
+                
+            gpu_info = "dGPU Active" if self.dgpu_detected else "iGPU Fallback Active"
+            if swap_used > 1.5 and swap_total > 0:
+                gpu_info += f" · Swap: {swap_used:.1f}/{swap_total:.1f}GB"
+                
+            self.badge.setText(f"{status_text}\n{gpu_info}")
+            self.badge.setStyleSheet(
+                f"background-color: {badge_color}; color: {text_color}; "
+                "font-weight: bold; border-radius: 4px; padding: 6px; font-size: 11px;"
+            )
+        except Exception:
+            # Fallback if profiler not fully ready
+            self.badge.setText(f"SYSTEM READY\n{'dGPU Active' if self.dgpu_detected else 'iGPU Fallback Active'}")
+            self.badge.setStyleSheet(
+                "background-color: #00E676; color: #121212; "
+                "font-weight: bold; border-radius: 4px; padding: 6px; font-size: 11px;"
+            )
+
 
     def _set_process_btn_state(self, state: str):
         """
@@ -3563,20 +3855,12 @@ class MainWindow(QMainWindow):
 
     def _on_plain_surfaces_toggled(self, state):
         """
-        When neural matching (SP+LG) is active, guided matching is a SIFT-only concept
-        and has no effect. Grey out the custom guided matching checkbox so it is visibly
-        inactive rather than silently ignored.
+        When plain surfaces is selected, feature extraction and matching are optimized,
+        and GLOMAP global mapper is forced.
         """
-        neural_active = bool(state)
         if hasattr(self, "custom_guided_check"):
-            self.custom_guided_check.setEnabled(not neural_active)
-            if neural_active:
-                self.custom_guided_check.setToolTip(
-                    "Guided matching is a SIFT-only option and is disabled\n"
-                    "when 'Plain/smooth surfaces (Neural matching)' is active."
-                )
-            else:
-                self.custom_guided_check.setToolTip("")
+            self.custom_guided_check.setEnabled(True)
+            self.custom_guided_check.setToolTip("")
 
 
     def _on_mesh_mode_changed(self, index):
@@ -3584,6 +3868,33 @@ class MainWindow(QMainWindow):
 
     def _on_poisson_depth_changed(self, value):
         self.poisson_depth_label.setText(f"Poisson Depth: {value}")
+
+    def _on_matcher_type_changed(self, index: int):
+        is_exhaustive = (index in (0, 1))  # Auto-Select or Exhaustive
+        is_vocab = (index == 3)
+        if hasattr(self, 'lbl_block_size'):
+            self.lbl_block_size.setVisible(is_exhaustive)
+        if hasattr(self, 'custom_block_size_spin'):
+            self.custom_block_size_spin.setVisible(is_exhaustive)
+        if hasattr(self, 'lbl_vocab'):
+            self.lbl_vocab.setVisible(is_vocab)
+        if hasattr(self, 'vocab_tree_widget'):
+            self.vocab_tree_widget.setVisible(is_vocab)
+            if is_vocab and hasattr(self, 'vocab_path_edit'):
+                if not self.vocab_path_edit.text().strip():
+                    from pipeline_manager import get_default_vocab_tree_path
+                    def_path = get_default_vocab_tree_path()
+                    if def_path:
+                        self.vocab_path_edit.setText(def_path)
+
+    def _browse_vocab_tree_file(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Vocabulary Tree File", self.last_accessed_dir,
+            "Binary Vocab Tree (*.bin *.fbow);;All Files (*)"
+        )
+        if file_path:
+            self.vocab_path_edit.setText(file_path)
+            self.last_accessed_dir = os.path.dirname(file_path)
 
     def _on_custom_settings_toggled(self, checked):
         self.mapper_label.setEnabled(checked)
@@ -3642,9 +3953,39 @@ class MainWindow(QMainWindow):
         if not self.standalone_cloud_path and not self.image_list:
             QMessageBox.warning(self, "No Images Found", "No images or video frames were found for this reconstruction session. Please import images or videos to proceed.")
             return
+
+        # Pre-flight dynamic memory guard & advisory
+        try:
+            budget = hardware_profiler.get_memory_budget()
+            if budget.available_gb < 1.5 and budget.swap_used_gb > (budget.swap_total_gb * 0.85):
+                QMessageBox.critical(
+                    self,
+                    "Critically Low System Memory",
+                    f"Available System RAM ({budget.available_gb:.1f} GB) and Swap Memory are critically low.\n\n"
+                    "Please close background applications (such as browsers or video editors) to free memory before starting reconstruction."
+                )
+                return
+            
+            n_images = len(self.image_list)
+            if not self.custom_settings_toggle.isChecked() and n_images > 80 and budget.available_gb < 6.0:
+                reply = QMessageBox.information(
+                    self,
+                    "Memory Safeguard Advisory",
+                    f"Your scan contains {n_images} images with {budget.available_gb:.1f} GB available RAM.\n\n"
+                    "Proximap will automatically activate Sequential Feature Matching and dynamic thread management "
+                    "to protect system stability and prevent memory crashes.\n\n"
+                    "Do you wish to proceed?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                if reply != QMessageBox.Yes:
+                    return
+        except Exception:
+            pass
             
         # Terminate any active viewer to prevent lock conflict on MVS files during reconstruction
         self._terminate_viewer()
+
         
         self._set_process_btn_state("progress")
         self.browse_btn.setEnabled(False)
@@ -3732,11 +4073,23 @@ class MainWindow(QMainWindow):
         mesh_mode = "poisson" if self.mesh_mode_combo.currentIndex() == 1 else "default"
         poisson_depth = self.poisson_depth_slider.value()
 
+        matcher_type_map = {
+            0: "auto",
+            1: "exhaustive",
+            2: "sequential",
+            3: "vocab_tree",
+            4: "spatial"
+        }
+        selected_matcher = matcher_type_map.get(self.custom_matcher_combo.currentIndex(), "auto")
+
         custom_params = None
         if self.custom_settings_toggle.isChecked():
             custom_params = {
+                "colmap_matcher_type": selected_matcher,
+                "vocab_tree_path": self.vocab_path_edit.text().strip(),
                 "colmap_max_num_features": self.custom_features_spin.value(),
                 "colmap_max_num_matches": self.custom_matches_spin.value(),
+                "colmap_block_size": self.custom_block_size_spin.value(),
                 "guided_matching": "1" if self.custom_guided_check.isChecked() else "0",
                 "run_bundle_adjuster": self.custom_ba_check.isChecked(),
                 "densify_res": str(self.custom_densify_res_combo.currentIndex()),
@@ -4924,23 +5277,59 @@ class MainWindow(QMainWindow):
         
         if mode == 0:
             # Sparse Point Cloud & Cameras
-            output_dir = get_reconstruction_out_dir()
-            points_bin = os.path.join(output_dir, "colmap", "sparse", "points3D.bin")
-            if not os.path.exists(points_bin):
-                points_bin = os.path.join(output_dir, "colmap", "sparse", "0", "points3D.bin")
+            mvs_dir = self.viewer_widget.current_mvs_dir
+            if not mvs_dir and file_path:
+                mvs_dir = os.path.dirname(file_path) if os.path.basename(file_path).endswith(('.mvs', '.ply', '.obj')) else file_path
+            if not mvs_dir:
+                mvs_dir = os.path.join(get_reconstruction_out_dir(), "mvs")
                 
-            if os.path.exists(points_bin):
+            output_dir = os.path.dirname(mvs_dir) if os.path.basename(mvs_dir) == 'mvs' else mvs_dir
+            
+            points_bin_candidates = [
+                os.path.join(output_dir, "colmap", "sparse", "points3D.bin"),
+                os.path.join(output_dir, "colmap", "sparse", "0", "points3D.bin"),
+                os.path.join(mvs_dir, "points3D.bin"),
+                os.path.join(output_dir, "points3D.bin"),
+                os.path.join(output_dir, "colmap", "sparse", "points3D.txt"),
+                os.path.join(output_dir, "colmap", "sparse", "0", "points3D.txt"),
+            ]
+            points_bin = None
+            for p in points_bin_candidates:
+                if os.path.exists(p):
+                    points_bin = p
+                    break
+                    
+            if points_bin and points_bin.endswith(".bin"):
                 points, colors = self._read_points3d_binary(points_bin)
             else:
-                scene_ply = os.path.join(output_dir, "mvs", "scene.ply")
-                if os.path.exists(scene_ply):
-                    points, colors, _ = self._read_ply(scene_ply)
+                scene_ply_candidates = [
+                    os.path.join(mvs_dir, "scene.ply"),
+                    os.path.join(output_dir, "scene.ply"),
+                    os.path.join(mvs_dir, "scene_dense.ply"),
+                    os.path.join(output_dir, "scene_dense.ply"),
+                ]
+                for sp in scene_ply_candidates:
+                    if os.path.exists(sp):
+                        pts, cls, _ = self._read_ply(sp)
+                        if pts is not None and len(pts) > 0:
+                            points, colors = pts, cls
+                            break
                     
-            images_bin = os.path.join(output_dir, "colmap", "sparse", "images.bin")
-            if not os.path.exists(images_bin):
-                images_bin = os.path.join(output_dir, "colmap", "sparse", "0", "images.bin")
-                
-            if os.path.exists(images_bin):
+            images_bin_candidates = [
+                os.path.join(output_dir, "colmap", "sparse", "images.bin"),
+                os.path.join(output_dir, "colmap", "sparse", "0", "images.bin"),
+                os.path.join(mvs_dir, "images.bin"),
+                os.path.join(output_dir, "images.bin"),
+                os.path.join(output_dir, "colmap", "sparse", "images.txt"),
+                os.path.join(output_dir, "colmap", "sparse", "0", "images.txt"),
+            ]
+            images_bin = None
+            for i in images_bin_candidates:
+                if os.path.exists(i):
+                    images_bin = i
+                    break
+                    
+            if images_bin and images_bin.endswith(".bin"):
                 cameras_data = self._read_images_binary(images_bin)
                 if cameras_data:
                     self._draw_cameras(cameras_data)
@@ -5041,6 +5430,9 @@ class MainWindow(QMainWindow):
                 edge_width=0
             )
             
+        elif hasattr(self, 'cameras_visual') and self.cameras_visual is not None:
+            # Cameras exist even if sparse points array is empty
+            pass
         else:
             self.canvas.native.hide()
             self.viewer_widget.fallback_label.setText("No valid 3D points or faces could be parsed.")
@@ -5054,17 +5446,19 @@ class MainWindow(QMainWindow):
         self.viewer_widget.fallback_label.hide()
         
         # Center and zoom camera
-        bbox_min = np.min(points, axis=0)
-        bbox_max = np.max(points, axis=0)
-        center = (bbox_min + bbox_max) / 2.0
-        scale = np.max(bbox_max - bbox_min)
-        
-        self.view.camera.center = center
-        self.view.camera.distance = max(0.1, scale * 1.5)
-        # Apply turntable elevation/azimuth if selected
-        if self.viewer_widget.cam_select.currentIndex() == 1:
-            self.view.camera.elevation = 30
-            self.view.camera.azimuth = 45
+        ref_pts = points if (points is not None and len(points) > 0) else None
+        if ref_pts is not None:
+            bbox_min = np.min(ref_pts, axis=0)
+            bbox_max = np.max(ref_pts, axis=0)
+            center = (bbox_min + bbox_max) / 2.0
+            scale = np.max(bbox_max - bbox_min)
+            
+            self.view.camera.center = center
+            self.view.camera.distance = max(0.1, scale * 1.5)
+            # Apply turntable elevation/azimuth if selected
+            if self.viewer_widget.cam_select.currentIndex() == 1:
+                self.view.camera.elevation = 30
+                self.view.camera.azimuth = 45
             
         self.canvas.update()
 
@@ -5484,8 +5878,9 @@ class MobileQRDialog(QDialog):
     def __init__(self, urls: list, mode: str = "import", parent=None):
         super().__init__(parent)
         self.mode = mode
+        self.urls = urls
         self.setWindowTitle("Mobile Device Bridge — " + ("Import Media" if mode == "import" else "Download 3D Model"))
-        self.setFixedSize(420, 520)
+        self.setFixedSize(420, 560 if len(urls) > 1 else 520)
         self.setModal(True)
         self.setStyleSheet("""
             QDialog {
@@ -5500,30 +5895,16 @@ class MobileQRDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
         title = QLabel("📱 Scan with your Mobile Phone", self)
         title.setStyleSheet("font-size: 16px; font-weight: bold; color: #00E676;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
-        # Get active network Wi-Fi SSID if possible
-        wifi_ssid = None
-        if os.name == "nt":
-            try:
-                import subprocess
-                res = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", "(Get-NetConnectionProfile).Name"],
-                    capture_output=True,
-                    text=True,
-                    timeout=2
-                )
-                if res.returncode == 0:
-                    lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
-                    if lines:
-                        wifi_ssid = lines[0]
-            except Exception:
-                pass
+        # Get active network Wi-Fi / Hotspot SSID if possible
+        from mobile_bridge_server import get_wifi_ssid
+        wifi_ssid = get_wifi_ssid()
 
         if wifi_ssid:
             network_msg = f"\nMake sure your phone is connected to the same Wi-Fi: '{wifi_ssid}'"
@@ -5540,9 +5921,42 @@ class MobileQRDialog(QDialog):
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(desc)
 
+        # Network Selector Dropdown if multiple IPs available
+        if len(urls) > 1:
+            url_select_box = QFrame(self)
+            url_select_box.setStyleSheet("background-color: #1E1E1E; border: 1px solid #333333; border-radius: 6px; padding: 4px 8px;")
+            url_select_layout = QHBoxLayout(url_select_box)
+            url_select_layout.setContentsMargins(4, 2, 4, 2)
+            
+            lbl_ip_select = QLabel("Network Adapter / IP:", url_select_box)
+            lbl_ip_select.setStyleSheet("font-size: 11px; color: #888888;")
+            url_select_layout.addWidget(lbl_ip_select)
+            
+            self.url_combo = QComboBox(url_select_box)
+            self.url_combo.setStyleSheet("""
+                QComboBox {
+                    background-color: #292929;
+                    color: #00E676;
+                    font-weight: bold;
+                    border: 1px solid #444;
+                    border-radius: 4px;
+                    padding: 4px 8px;
+                }
+                QComboBox QAbstractItemView {
+                    background-color: #1E1E1E;
+                    color: #00E676;
+                    selection-background-color: #333333;
+                }
+            """)
+            for u in urls:
+                self.url_combo.addItem(u)
+            self.url_combo.currentTextChanged.connect(self._on_url_selected)
+            url_select_layout.addWidget(self.url_combo, stretch=1)
+            layout.addWidget(url_select_box)
+
         # QR Code Image Label
         self.qr_label = QLabel(self)
-        self.qr_label.setFixedSize(240, 240)
+        self.qr_label.setFixedSize(220, 220)
         self.qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.qr_label.setStyleSheet("background-color: #ffffff; border-radius: 8px; padding: 10px;")
         
@@ -5563,12 +5977,12 @@ class MobileQRDialog(QDialog):
         
         lbl_type = QLabel("Or type this URL into your phone browser:", url_box)
         lbl_type.setStyleSheet("font-size: 11px; color: #888888;")
-        lbl_url = QLabel(primary_url, url_box)
-        lbl_url.setStyleSheet("font-size: 13px; font-weight: bold; color: #00E676;")
-        lbl_url.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_url = QLabel(primary_url, url_box)
+        self.lbl_url.setStyleSheet("font-size: 13px; font-weight: bold; color: #00E676;")
+        self.lbl_url.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         
         url_layout.addWidget(lbl_type)
-        url_layout.addWidget(lbl_url)
+        url_layout.addWidget(self.lbl_url)
         layout.addWidget(url_box)
 
         # Status text
@@ -5597,6 +6011,11 @@ class MobileQRDialog(QDialog):
         btn_layout.addWidget(self.cancel_btn)
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
+
+    def _on_url_selected(self, new_url: str):
+        if new_url:
+            self._set_qr_url(new_url)
+            self.lbl_url.setText(new_url)
 
     def _set_qr_url(self, url: str):
         try:
@@ -5750,7 +6169,7 @@ class MobileImportSetupDialog(QDialog):
     def check_network(self):
         import psutil
         import socket
-        import subprocess
+        from mobile_bridge_server import get_wifi_ssid
         
         # 1. Get active network connections from psutil
         stats = psutil.net_if_stats()
@@ -5758,38 +6177,26 @@ class MobileImportSetupDialog(QDialog):
         active_nets = []
         
         for name, stat in stats.items():
+            name_lower = name.lower()
+            if name_lower in ("lo", "loopback"):
+                continue
             if stat.isup and name in addrs:
                 for addr in addrs[name]:
                     if addr.family == socket.AF_INET:
                         ip = addr.address
-                        if ip and ip != "127.0.0.1" and not ip.startswith("169.254"):
-                            name_lower = name.lower()
+                        if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
                             if any(x in name_lower for x in ["wi-fi", "wifi", "wlan", "wireless", "802.11"]):
                                 conn_type = "Wi-Fi"
-                            elif any(x in name_lower for x in ["local area connection*", "direct"]):
+                            elif any(x in name_lower for x in ["local area connection*", "direct", "ap", "hotspot", "tether"]):
                                 conn_type = "Wi-Fi Hotspot"
-                            elif any(x in name_lower for x in ["ethernet", "lan"]):
+                            elif any(x in name_lower for x in ["ethernet", "lan", "eth", "en"]):
                                 conn_type = "Ethernet"
                             else:
                                 conn_type = "LAN"
                             active_nets.append((name, ip, conn_type))
                             
-        # 2. Try to get Wi-Fi network name / SSID (Windows)
-        wifi_ssid = None
-        if os.name == "nt":
-            try:
-                res = subprocess.run(
-                    ["powershell", "-NoProfile", "-Command", "(Get-NetConnectionProfile).Name"],
-                    capture_output=True,
-                    text=True,
-                    timeout=2
-                )
-                if res.returncode == 0:
-                    lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
-                    if lines:
-                        wifi_ssid = lines[0]
-            except Exception:
-                pass
+        # 2. Try to get Wi-Fi network / Hotspot name across OSes
+        wifi_ssid = get_wifi_ssid()
                 
         # 3. Format description message
         if not active_nets:
@@ -6142,8 +6549,11 @@ if __name__ == "__main__":
 
     from PySide6.QtGui import QSurfaceFormat
     fmt = QSurfaceFormat()
+    fmt.setVersion(3, 3)
+    fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
     fmt.setDepthBufferSize(24)
     fmt.setStencilBufferSize(8)
+    fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
     QSurfaceFormat.setDefaultFormat(fmt)
 
     app = QApplication(sys.argv)

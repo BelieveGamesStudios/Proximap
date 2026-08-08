@@ -15,7 +15,7 @@ _FIREWALL_RULE_PREFIX = "ProximapMobileBridge"
 def get_local_ips():
     """
     Returns a list of local IPv4 addresses sorted by likelihood of availability
-    (Wi-Fi / LAN, Hotspot, USB Tethering). Excludes 127.0.0.1.
+    (Wi-Fi / LAN, Hotspot, USB Tethering). Excludes loopback (127.x.x.x) and link-local (169.254.x.x).
     """
     ips = []
     
@@ -26,16 +26,51 @@ def get_local_ips():
         s.connect(("8.8.8.8", 80))
         default_ip = s.getsockname()[0]
         s.close()
-        if default_ip and default_ip != "127.0.0.1":
+        if default_ip and not default_ip.startswith("127.") and not default_ip.startswith("169.254."):
             ips.append(default_ip)
     except Exception:
         pass
 
-    # Method 2: Get all hostname IPs
+    # Method 2: Inspect active network interfaces via psutil
+    try:
+        import psutil
+        stats = psutil.net_if_stats()
+        addrs = psutil.net_if_addrs()
+        
+        wifi_hotspot_ips = []
+        other_ips = []
+        
+        for name, stat in stats.items():
+            name_lower = name.lower()
+            if name_lower in ("lo", "loopback"):
+                continue
+            if stat.isup and name in addrs:
+                for addr in addrs[name]:
+                    if addr.family == socket.AF_INET:
+                        ip = addr.address
+                        if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                            # Prioritize wireless / hotspot / AP / tethering interfaces
+                            if any(x in name_lower for x in ["wi-fi", "wifi", "wlan", "wireless", "802.11", "ap", "hotspot", "direct", "tether"]):
+                                if ip not in wifi_hotspot_ips:
+                                    wifi_hotspot_ips.append(ip)
+                            else:
+                                if ip not in other_ips:
+                                    other_ips.append(ip)
+                                    
+        for ip in wifi_hotspot_ips:
+            if ip not in ips:
+                ips.append(ip)
+        for ip in other_ips:
+            if ip not in ips:
+                ips.append(ip)
+    except Exception as e:
+        log.debug(f"[Network] psutil network lookup failed: {e}")
+
+    # Method 3: Get all hostname IPs
     try:
         hostname = socket.gethostname()
         for ip in socket.gethostbyname_ex(hostname)[2]:
-            if ip != "127.0.0.1" and ip not in ips:
+            if not ip.startswith("127.") and not ip.startswith("169.254.") and ip not in ips:
                 ips.append(ip)
     except Exception:
         pass
@@ -44,6 +79,73 @@ def get_local_ips():
         ips.append("127.0.0.1")
 
     return ips
+
+
+def get_wifi_ssid() -> str | None:
+    """Helper to detect the active Wi-Fi SSID or Hotspot connection name across OSes."""
+    try:
+        if sys.platform == "win32":
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "(Get-NetConnectionProfile).Name"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            )
+            if res.returncode == 0:
+                lines = [l.strip() for l in res.stdout.splitlines() if l.strip()]
+                if lines:
+                    return lines[0]
+        elif sys.platform.startswith("linux"):
+            # 1. Try nmcli active wifi SSID
+            res = subprocess.run(
+                ["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if res.returncode == 0:
+                for line in res.stdout.splitlines():
+                    if line.startswith("yes:"):
+                        ssid = line.split("yes:", 1)[1].strip()
+                        if ssid:
+                            return ssid
+            # 2. Try iwgetid -r
+            res = subprocess.run(
+                ["iwgetid", "-r"],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                return res.stdout.strip()
+            # 3. Try nmcli active connections (catches Hotspots too)
+            res = subprocess.run(
+                ["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show", "--active"],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if res.returncode == 0:
+                for line in res.stdout.splitlines():
+                    parts = line.split(":")
+                    if len(parts) >= 2 and any(t in parts[1].lower() for t in ["wireless", "wifi", "802-11-wireless"]):
+                        return parts[0].strip()
+        elif sys.platform == "darwin":
+            res = subprocess.run(
+                ["/System/Library/PrivateFrameworks/Apple80211.framework/Resources/airport", "-I"],
+                capture_output=True,
+                text=True,
+                timeout=2
+            )
+            if res.returncode == 0:
+                for line in res.stdout.splitlines():
+                    if " SSID:" in line:
+                        return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return None
+
 
 
 def _is_admin() -> bool:
@@ -292,7 +394,7 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
                 <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
                 <span>Select Images / Videos</span>
             </div>
-            <input type="file" id="fileInput" multiple accept="image/*,video/*" onchange="handleFilesSelected(this.files)">
+            <input type="file" id="fileInput" multiple accept="image/heic,image/heif,image/jpeg,image/jpg,image/png,image/webp,image/*,video/quicktime,video/mp4,video/x-m4v,video/*" onchange="handleFilesSelected(this.files)">
             <br>
             <div id="previewGrid" class="preview-grid" style="display: none;"></div>
             <br>
@@ -323,29 +425,41 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
             grid.innerHTML = '';
             grid.style.display = 'grid';
 
-            selectedFiles.forEach((file) => {
-                const item = document.createElement('div');
-                item.className = 'preview-item';
-                
-                if (file.type.startsWith('image/')) {
-                    const img = document.createElement('img');
-                    img.src = URL.createObjectURL(file);
-                    item.appendChild(img);
-                } else if (file.type.startsWith('video/')) {
-                    const video = document.createElement('video');
-                    video.src = URL.createObjectURL(file);
-                    item.appendChild(video);
-                    const badge = document.createElement('span');
-                    badge.className = 'video-badge';
-                    badge.innerText = 'VIDEO';
-                    item.appendChild(badge);
-                }
-                grid.appendChild(item);
-            });
-
             const btn = document.getElementById('uploadBtn');
             btn.style.display = 'block';
             btn.innerText = `Done — Send ${selectedFiles.length} File(s) to Proximap`;
+
+            // Render thumbnails asynchronously in small batches to keep mobile UI fluid
+            let index = 0;
+            function renderBatch() {
+                const batchSize = 6;
+                const end = Math.min(index + batchSize, selectedFiles.length);
+                for (let i = index; i < end; i++) {
+                    const file = selectedFiles[i];
+                    const item = document.createElement('div');
+                    item.className = 'preview-item';
+                    
+                    if (file.type.startsWith('image/') || /\\.(heic|heif|jpg|jpeg|png|webp)$/i.test(file.name)) {
+                        const img = document.createElement('img');
+                        img.src = URL.createObjectURL(file);
+                        item.appendChild(img);
+                    } else {
+                        const video = document.createElement('video');
+                        video.src = URL.createObjectURL(file);
+                        item.appendChild(video);
+                        const badge = document.createElement('span');
+                        badge.className = 'video-badge';
+                        badge.innerText = 'VIDEO';
+                        item.appendChild(badge);
+                    }
+                    grid.appendChild(item);
+                }
+                index = end;
+                if (index < selectedFiles.length) {
+                    requestAnimationFrame(renderBatch);
+                }
+            }
+            renderBatch();
         }
 
         function startUpload() {

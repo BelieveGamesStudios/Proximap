@@ -16,7 +16,7 @@ if sys.stderr is None:
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
+        return getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
 
 if __name__ == "__main__":

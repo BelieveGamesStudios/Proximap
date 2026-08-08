@@ -30,14 +30,50 @@ import sys
 import json
 import time
 import shutil
+import gc
+import psutil
 from PySide6.QtCore import QThread, Signal
-from hardware_profiler import run_safe_subprocess
+from hardware_profiler import run_safe_subprocess, get_memory_budget, get_recommended_matching_mode
+
 
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
+        return getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def is_valid_faiss_vocab_tree(file_path: str) -> bool:
+    """
+    Check if a vocabulary tree binary file is in the FAISS format (file_version == 1)
+    required by COLMAP 3.10+ (May 2025+).
+    Legacy FLANN index files start with uint32 file_version == 32762 (0x7ffa).
+    """
+    if not file_path or not os.path.exists(file_path):
+        return False
+    try:
+        with open(file_path, 'rb') as f:
+            header = f.read(4)
+            if len(header) < 4:
+                return False
+            import struct
+            version = struct.unpack('<I', header)[0]
+            return version == 1
+    except Exception:
+        return False
+
+
+def get_default_vocab_tree_path() -> str | None:
+    base_dir = get_base_dir()
+    colmap_dir = os.path.join(base_dir, "backend_bin", "colmap")
+    
+    if os.path.exists(colmap_dir):
+        for f in os.listdir(colmap_dir):
+            if f.endswith(".bin"):
+                cand = os.path.join(colmap_dir, f)
+                if is_valid_faiss_vocab_tree(cand):
+                    return cand
+    return None
 
 
 class PipelineWorker(QThread):
@@ -52,12 +88,16 @@ class PipelineWorker(QThread):
 
     def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, mapper_mode: str = "incremental", ref_cloud_path: str = None, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, resume_from_step: str = None, parent=None):
         super().__init__(parent)
-        self.image_dir = image_dir
-        self.output_dir = output_dir
+        self.image_dir = os.path.abspath(image_dir) if image_dir else image_dir
+        self.output_dir = os.path.abspath(output_dir) if output_dir else output_dir
         self.quality_preset = quality_preset
         self.gpu_mode = gpu_mode
         self.has_plain_surfaces = has_plain_surfaces
-        self.mapper_mode = mapper_mode
+        # When plain/smooth surfaces is selected, use GLOMAP global mapper instead of incremental mapper
+        if self.has_plain_surfaces:
+            self.mapper_mode = "global"
+        else:
+            self.mapper_mode = mapper_mode
         self.ref_cloud_path = ref_cloud_path
         self.mesh_mode = mesh_mode
         self.poisson_depth = poisson_depth
@@ -79,6 +119,75 @@ class PipelineWorker(QThread):
         self._mean_reproj_error = 0.0      # Mean reprojection error
         self._using_gpu_sift = True        # Whether GPU SIFT is being used
         self._depth_map_count = 0          # Number of depth maps computed
+
+    def _get_throttled_sift_limits(self, total_images: int) -> tuple:
+        """
+        Dynamically throttles SIFT Max Features and Max Matches based on:
+        1. Quality preset baseline (preview, medium, high, ultra).
+        2. Dataset size (number of images).
+        3. Dynamic RAM & Swap memory consumption (throttling down once >= 95% swap is consumed to prevent OOM shutdown).
+        """
+        # 1. Preset baseline limits
+        if self.quality_preset == "preview":
+            base_features = 4096
+            base_matches = 16384
+        elif self.quality_preset == "medium":
+            base_features = 8192
+            base_matches = 16384
+        elif self.quality_preset == "high":
+            base_features = 12288
+            base_matches = 32768
+        else:  # ultra
+            base_features = 16384
+            base_matches = 65536
+
+        # 2. Dataset size throttling factor
+        if total_images > 500:
+            dataset_factor = 0.5
+        elif total_images > 250:
+            dataset_factor = 0.65
+        elif total_images > 100:
+            dataset_factor = 0.8
+        else:
+            dataset_factor = 1.0
+
+        max_features = int(base_features * dataset_factor)
+        max_matches = int(base_matches * dataset_factor)
+
+        # 3. Dynamic Swap and Memory Throttling (Keyword: throttle)
+        mem_budget = get_memory_budget()
+        sw = psutil.swap_memory()
+        swap_pct = sw.percent if sw.total > 0 else 0.0
+
+        if swap_pct >= 95.0 or mem_budget.available_gb < 1.5:
+            self.log_message.emit(
+                f"[THROTTLE] High swap/RAM consumption detected (Swap: {swap_pct:.1f}%, Available RAM: {mem_budget.available_gb:.2f} GB). "
+                f"Throttling down Max Matches and SIFT Feature limits to prevent OOM shutdown."
+            )
+            max_features = min(max_features, 3072)
+            max_matches = min(max_matches, 4096)
+        elif swap_pct >= 80.0 or mem_budget.pressure_level != "ok":
+            self.log_message.emit(
+                f"[THROTTLE] System memory pressure detected (Swap: {swap_pct:.1f}%, Available RAM: {mem_budget.available_gb:.2f} GB). "
+                f"Throttling feature and match thresholds."
+            )
+            max_features = min(max_features, 6144)
+            max_matches = min(max_matches, 8192)
+
+        if dataset_factor < 1.0:
+            self.log_message.emit(
+                f"[THROTTLE] Dataset size of {total_images} images detected. "
+                f"Throttling limits to SIFT Max Features: {max_features}, Max Matches: {max_matches}."
+            )
+
+        # Custom parameter overrides take priority if provided
+        if self.custom_params:
+            if "colmap_max_num_features" in self.custom_params:
+                max_features = self.custom_params["colmap_max_num_features"]
+            if "colmap_max_num_matches" in self.custom_params:
+                max_matches = self.custom_params["colmap_max_num_matches"]
+
+        return max_features, max_matches
         self._dense_point_count = 0        # Points in dense cloud
         self._mesh_vertices = 0            # Mesh vertex count
         self._mesh_faces = 0               # Mesh face count
@@ -144,13 +253,13 @@ class PipelineWorker(QThread):
                 clean_abs_path = os.path.join(get_base_dir(), clean_rel_path)
 
                 if os.path.exists(clean_abs_path):
-                    normalized[group][name] = clean_rel_path
+                    normalized[group][name] = clean_abs_path
                 elif shutil.which(name):
                     normalized[group][name] = shutil.which(name)
                 elif shutil.which(os.path.basename(clean_rel_path)):
                     normalized[group][name] = shutil.which(os.path.basename(clean_rel_path))
                 else:
-                    normalized[group][name] = clean_rel_path
+                    normalized[group][name] = clean_abs_path
         return normalized
 
     def _backup_checkpoint(self, step_name: str):
@@ -208,7 +317,6 @@ class PipelineWorker(QThread):
             self.log_message.emit(f"[WARNING] Failed to write backup checkpoint: {e}")
 
     def run(self):
-
         try:
             self.status_changed.emit("Initializing Pipeline...")
             self.log_message.emit(f"[INFO] Plain/Smooth Surfaces optimization: {'Enabled' if self.has_plain_surfaces else 'Disabled'}")
@@ -243,22 +351,16 @@ class PipelineWorker(QThread):
         if not self.toolchain_map:
             return False
 
-        colmap_map = self.toolchain_map.get("colmap", {})
-        for name, rel_path in colmap_map.items():
-            abs_path = os.path.join(get_base_dir(), rel_path) if not os.path.isabs(rel_path) else rel_path
-            if not os.path.exists(abs_path) and not shutil.which(rel_path) and not shutil.which(name):
-                self.log_message.emit(
-                    f"Missing COLMAP binary for {sys.platform}: '{rel_path}'. "
-                    "Place Linux binary at backend_bin/colmap/colmap or install system package."
-                )
-                return False
-
-        mvs_map = self.toolchain_map.get("openMVS", {})
-        for name, rel_path in mvs_map.items():
-            abs_path = os.path.join(get_base_dir(), rel_path) if not os.path.isabs(rel_path) else rel_path
-            if not os.path.exists(abs_path) and not shutil.which(rel_path) and not shutil.which(name):
-                self.log_message.emit(f"Missing OpenMVS binary: {name} ({rel_path})")
-                return False
+        for group, binaries in self.toolchain_map.items():
+            if not isinstance(binaries, dict):
+                continue
+            for name, binary_path in binaries.items():
+                if not os.path.exists(binary_path) and not shutil.which(binary_path) and not shutil.which(name):
+                    self.log_message.emit(
+                        f"Missing toolchain binary for {sys.platform}: '{name}' ({binary_path}). "
+                        "Please place Linux binary in backend_bin or install system package."
+                    )
+                    return False
 
         return True
 
@@ -326,6 +428,7 @@ class PipelineWorker(QThread):
             )
             _active_subprocesses.add(proc)
             start_time = time.time()
+            last_mem_check = time.time()
 
             log_handle = None
             if is_openmvs:
@@ -368,6 +471,24 @@ class PipelineWorker(QThread):
                         log_handle.close()
                         self.log_message.emit(f"[TIMEOUT] Process timed out after {timeout}s")
                         return False
+
+                    # Memory watchdog check
+                    if time.time() - last_mem_check > 4.0:
+                        last_mem_check = time.time()
+                        vm = psutil.virtual_memory()
+                        if vm.percent > 96.0 or vm.available < (500 * 1024 * 1024):
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=2.0)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                            log_handle.close()
+                            self.log_message.emit(
+                                f"[CRITICAL OOM GUARD] System RAM usage reached {vm.percent:.1f}% "
+                                f"({vm.available / (1024**2):.0f} MB available). "
+                                f"Terminated {exe_name} to prevent system lockup/crash."
+                            )
+                            return False
 
                     line = log_handle.readline()
                     if not line:
@@ -433,7 +554,25 @@ class PipelineWorker(QThread):
                         self.log_message.emit(f"[TIMEOUT] Process timed out after {timeout}s")
                         return False
 
+                    # Memory watchdog check
+                    if time.time() - last_mem_check > 4.0:
+                        last_mem_check = time.time()
+                        vm = psutil.virtual_memory()
+                        if vm.percent > 96.0 or vm.available < (500 * 1024 * 1024):
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=2.0)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                            self.log_message.emit(
+                                f"[CRITICAL OOM GUARD] System RAM usage reached {vm.percent:.1f}% "
+                                f"({vm.available / (1024**2):.0f} MB available). "
+                                f"Terminated {exe_name} to prevent system lockup/crash."
+                            )
+                            return False
+
                     line = proc.stdout.readline()
+
                     if not line:
                         if proc.poll() is not None:
                             break
@@ -490,17 +629,37 @@ class PipelineWorker(QThread):
                 except Exception as e:
                     self.log_message.emit(f"[WARNING] Failed to clean output folder: {e}")
 
-        colmap_out = self._to_colmap_path(os.path.join(self.output_dir, "colmap"))
-        mvs_out = self._to_colmap_path(os.path.join(self.output_dir, "mvs"))
+        colmap_out = self._to_colmap_path(os.path.abspath(os.path.join(self.output_dir, "colmap")))
+        mvs_out = self._to_colmap_path(os.path.abspath(os.path.join(self.output_dir, "mvs")))
         os.makedirs(colmap_out, exist_ok=True)
         os.makedirs(mvs_out, exist_ok=True)
         os.makedirs(os.path.join(colmap_out, "sparse"), exist_ok=True)
 
-        num_threads = os.cpu_count() or 4
+        mem_budget = get_memory_budget()
+        self.log_message.emit(
+            f"[MEMORY] Dynamic Available RAM: {mem_budget.available_gb:.2f} GB | "
+            f"Swap Used: {mem_budget.swap_used_gb:.2f}/{mem_budget.swap_total_gb:.2f} GB | "
+            f"Pressure Level: {mem_budget.pressure_level.upper()}"
+        )
+
+        if mem_budget.available_gb < 1.5 and mem_budget.swap_used_gb > (mem_budget.swap_total_gb * 0.85):
+            self.log_message.emit(
+                "[CRITICAL] Available system memory is below 1.5 GB and swap memory is near exhaustion. "
+                "Aborting reconstruction to prevent system crash."
+            )
+            return False
+
+        pressure_mode = (mem_budget.pressure_level != "ok")
+        num_threads = mem_budget.safe_thread_count
+        self.log_message.emit(
+            f"[MEMORY] Budgeted parallel worker threads: {num_threads} (Host Logical CPUs: {os.cpu_count() or 4})"
+        )
 
         # --- GPU / CUDA Environment (used mainly by OpenMVS) ---
         env = os.environ.copy()
+        env["OMP_NUM_THREADS"] = str(num_threads)
         if self.gpu_mode == "force_cpu":
+
             self.log_message.emit("[INFO] Hardware Acceleration: Forcing CPU fallback.")
             env["CUDA_VISIBLE_DEVICES"] = ""
         elif self.gpu_mode == "force_gpu":
@@ -516,14 +675,16 @@ class PipelineWorker(QThread):
             else:
                 self.log_message.emit("[INFO] Hardware Acceleration: Dedicated GPU detected. Using CUDA.")
 
+        if self.has_plain_surfaces:
+            self.mapper_mode = "global"
+            self.log_message.emit("[INFO] Plain/Smooth Surfaces option selected: activating GLOMAP global mapper for camera pose estimation.")
+
         # -------------------------------------------------------------------------
         # QUALITY PRESET PARAMETERS
         # -------------------------------------------------------------------------
         if self.quality_preset == "preview":
             max_image_dim  = 1024
             colmap_max_image_size = 1024
-            colmap_max_num_features = 4096
-            colmap_max_num_matches = 16384
             colmap_first_octave = 0
             guided_matching = "0"
             nndr_ratio     = "0.8"
@@ -538,8 +699,6 @@ class PipelineWorker(QThread):
         elif self.quality_preset == "medium":
             max_image_dim  = 2048
             colmap_max_image_size = 2048
-            colmap_max_num_features = 8192
-            colmap_max_num_matches = 16384
             colmap_first_octave = -1
             guided_matching = "1" if self.has_plain_surfaces else "0"
             nndr_ratio     = "0.8"
@@ -554,8 +713,6 @@ class PipelineWorker(QThread):
         elif self.quality_preset == "high":
             max_image_dim  = 3200
             colmap_max_image_size = 3200
-            colmap_max_num_features = 12288
-            colmap_max_num_matches = 32768
             colmap_first_octave = -1
             guided_matching = "1"
             nndr_ratio     = "0.8"
@@ -570,8 +727,6 @@ class PipelineWorker(QThread):
         else:  # ultra
             max_image_dim  = None
             colmap_max_image_size = -1
-            colmap_max_num_features = 16384
-            colmap_max_num_matches = 65536
             colmap_first_octave = -1
             guided_matching = "1"
             nndr_ratio     = "0.8"
@@ -587,10 +742,6 @@ class PipelineWorker(QThread):
         # Override presets with custom parameters if custom overrides checkbox was checked
         if self.custom_params:
             self.log_message.emit("[INFO] Custom parameter overrides enabled. Overriding quality preset configuration.")
-            if "colmap_max_num_features" in self.custom_params:
-                colmap_max_num_features = self.custom_params["colmap_max_num_features"]
-            if "colmap_max_num_matches" in self.custom_params:
-                colmap_max_num_matches = self.custom_params["colmap_max_num_matches"]
             if "guided_matching" in self.custom_params:
                 guided_matching = self.custom_params["guided_matching"]
             if "run_bundle_adjuster" in self.custom_params:
@@ -639,9 +790,13 @@ class PipelineWorker(QThread):
                 self._total_images = 0
         self.progress_changed.emit(10)
 
+        # Dynamic SIFT parameter throttling based on dataset size, quality preset, and dynamic swap/memory pressure
+        colmap_max_num_features, colmap_max_num_matches = self._get_throttled_sift_limits(self._total_images)
+
         colmap_exe = os.path.join(base_dir, self.toolchain_map["colmap"]["colmap"])
         colmap_env = self._get_colmap_env()
-        database_path = self._to_colmap_path(os.path.join(colmap_out, "database.db"))
+        database_path = self._to_colmap_path(os.path.abspath(os.path.join(colmap_out, "database.db")))
+        os.makedirs(os.path.dirname(database_path), exist_ok=True)
         working_image_dir = self._to_colmap_path(working_image_dir)
         if os.path.exists(database_path):
             if resume_requested and is_checkpoint_valid:
@@ -657,9 +812,8 @@ class PipelineWorker(QThread):
         # STEP 2/9 — Feature Extraction
         # STEP 3/9 — Feature Matching
         # =========================================================================
-        use_neural = self.has_plain_surfaces and self.quality_preset != "preview"
 
-        # Determine camera-model multiplicity (used by both branches)
+        # Determine camera-model multiplicity
         single_camera_val = "1"
         try:
             from PIL import Image
@@ -698,51 +852,6 @@ class PipelineWorker(QThread):
             self._emit_matching_summary(database_path)
             self.progress_changed.emit(40)
 
-        elif use_neural:
-            # -----------------------------------------------------------------
-            # Neural path: SuperPoint detection + LightGlue matching
-            # Replaces feature_extractor AND exhaustive_matcher entirely.
-            # -----------------------------------------------------------------
-            self.log_message.emit(
-                "[INFO] Plain/smooth surfaces: activating SuperPoint + LightGlue neural pipeline."
-            )
-            self._feature_counts = []
-            self._match_counts = []
-            if not self._run_sp_lg_pipeline(
-                database_path, working_image_dir,
-                colmap_max_num_features, single_camera_val
-            ):
-                return False
-
-            # Summaries — tracking vars are populated inside _run_sp_lg_pipeline
-            self._emit_feature_summary()
-            db_stats = self._query_colmap_database_stats(database_path)
-            num_registered = db_stats["num_images"]
-            if num_registered < 2:
-                if len(self._feature_counts) >= 2:
-                    num_registered = len(self._feature_counts)
-                elif self._total_images >= 2:
-                    num_registered = self._total_images
-            if num_registered < 2:
-                self.log_message.emit(
-                    f"[ERROR] Only {num_registered} image(s) registered. "
-                    "Reconstruction requires at least 2. Aborting."
-                )
-                return False
-            self.progress_changed.emit(25)
-
-            self._image_names_map = self._get_image_names_from_db(database_path)
-            if db_stats["num_images"] > 0:
-                self._pairs_tested = (db_stats["num_images"] * (db_stats["num_images"] - 1)) // 2
-            else:
-                self._pairs_tested = (self._total_images * (self._total_images - 1)) // 2 if self._total_images > 1 else 0
-            self._pairs_matched = db_stats["num_pairs"]
-            if db_stats["match_counts"]:
-                self._match_counts = db_stats["match_counts"]
-            self._emit_matching_summary(database_path)
-            self.progress_changed.emit(40)
-            self._backup_checkpoint("features_extracted")
-
         else:
             # -----------------------------------------------------------------
             # SIFT path: existing COLMAP feature_extractor + exhaustive_matcher
@@ -755,11 +864,11 @@ class PipelineWorker(QThread):
                 "--image_path", working_image_dir,
                 "--ImageReader.camera_model", "PINHOLE",
                 "--ImageReader.single_camera", single_camera_val,
-                "--SiftExtraction.use_gpu", "1",
-                "--SiftExtraction.max_image_size", str(colmap_max_image_size),
+                "--FeatureExtraction.use_gpu", "1",
+                "--FeatureExtraction.max_image_size", str(colmap_max_image_size),
+                "--FeatureExtraction.num_threads", str(num_threads),
                 "--SiftExtraction.max_num_features", str(colmap_max_num_features),
                 "--SiftExtraction.first_octave", str(colmap_first_octave),
-                "--SiftExtraction.num_threads", str(num_threads),
             ]
             cmd_extract_cpu = [
                 colmap_exe, "feature_extractor",
@@ -767,11 +876,11 @@ class PipelineWorker(QThread):
                 "--image_path", working_image_dir,
                 "--ImageReader.camera_model", "PINHOLE",
                 "--ImageReader.single_camera", single_camera_val,
-                "--SiftExtraction.use_gpu", "0",
-                "--SiftExtraction.max_image_size", str(colmap_max_image_size),
+                "--FeatureExtraction.use_gpu", "0",
+                "--FeatureExtraction.max_image_size", str(colmap_max_image_size),
+                "--FeatureExtraction.num_threads", str(num_threads),
                 "--SiftExtraction.max_num_features", str(colmap_max_num_features),
                 "--SiftExtraction.first_octave", str(colmap_first_octave),
-                "--SiftExtraction.num_threads", str(num_threads),
             ]
             if self.has_plain_surfaces:
                 # Preview quality: lower SIFT thresholds as a best-effort fallback
@@ -783,7 +892,7 @@ class PipelineWorker(QThread):
                 cmd_extract_cpu.extend(additional_flags)
             self._feature_counts = []
             if not self._run_with_gpu_fallback(
-                cmd_extract_gpu, cmd_extract_cpu, timeout=7200.0, env=colmap_env,
+                cmd_extract_gpu, cmd_extract_cpu, timeout=14400.0, env=colmap_env,
                 line_parser=self._parse_feature_extraction_line
             ):
                 return False
@@ -815,32 +924,118 @@ class PipelineWorker(QThread):
 
             # Step 3: SIFT matching
             self.status_changed.emit("Step 3/9: Matching SIFT Features...")
+            os.makedirs(os.path.dirname(database_path), exist_ok=True)
+            if not os.path.exists(database_path):
+                self.log_message.emit(f"[WARNING] COLMAP database missing prior to matching: {database_path}. Initializing database schema...")
+                self._create_colmap_db_schema(database_path)
+
             self._image_names_map = self._get_image_names_from_db(database_path)
 
+            curr_avail_gb = get_memory_budget().available_gb
+            matching_mode = get_recommended_matching_mode(self._total_images, curr_avail_gb)
+
+            # Override matching_mode if user explicitly chose a matcher type in custom_params
+            if self.custom_params and "colmap_matcher_type" in self.custom_params:
+                user_matcher = self.custom_params["colmap_matcher_type"]
+                if user_matcher in ["exhaustive", "sequential", "vocab_tree", "spatial"]:
+                    matching_mode = user_matcher
+
+            if matching_mode == "sequential":
+                matcher_cmd = "sequential_matcher"
+                extra_args = ["--SequentialMatching.overlap", "15", "--SequentialMatching.loop_detection", "0"]
+                self.log_message.emit(
+                    f"[INFO] Using sequential_matcher for {self._total_images} images."
+                )
+
+            elif matching_mode == "vocab_tree":
+                vocab_path = self.custom_params.get("vocab_tree_path", "") if self.custom_params else ""
+                if not vocab_path or not os.path.exists(vocab_path):
+                    vocab_path = get_default_vocab_tree_path() or ""
+
+                if vocab_path and os.path.exists(vocab_path):
+                    if is_valid_faiss_vocab_tree(vocab_path):
+                        matcher_cmd = "vocab_tree_matcher"
+                        extra_args = ["--VocabTreeMatching.vocab_tree_path", vocab_path]
+                        self.log_message.emit(f"[INFO] Using vocab_tree_matcher with FAISS vocabulary tree: {vocab_path}")
+                    else:
+                        self.log_message.emit(
+                            f"[WARNING] Vocabulary tree file '{os.path.basename(vocab_path)}' is in legacy FLANN index format (COLMAP 3.10+ requires FAISS index). "
+                            "Automatically falling back to exhaustive_matcher."
+                        )
+                        matcher_cmd = "exhaustive_matcher"
+                        extra_args = []
+                else:
+                    self.log_message.emit(
+                        "[WARNING] Vocabulary tree file not found or invalid FAISS path. Falling back to exhaustive_matcher."
+                    )
+                    matcher_cmd = "exhaustive_matcher"
+                    extra_args = []
+
+            elif matching_mode == "spatial":
+                matcher_cmd = "spatial_matcher"
+                extra_args = []
+                self.log_message.emit("[INFO] Using spatial_matcher for GPS-based camera pose matching.")
+
+            elif matching_mode == "exhaustive_blocked":
+                matcher_cmd = "exhaustive_matcher"
+                block_size_val = "20"
+                if self.custom_params and "colmap_block_size" in self.custom_params:
+                    block_size_val = str(self.custom_params["colmap_block_size"])
+                extra_args = ["--ExhaustiveMatching.block_size", block_size_val]
+                self.log_message.emit(
+                    f"[MEMORY OPTIMIZATION] Using exhaustive_matcher with reduced block size ({block_size_val}) "
+                    f"to prevent RAM saturation during matrix matching."
+                )
+            else:
+                matcher_cmd = "exhaustive_matcher"
+                if self.custom_params and "colmap_block_size" in self.custom_params:
+                    block_size_val = str(self.custom_params["colmap_block_size"])
+                    extra_args = ["--ExhaustiveMatching.block_size", block_size_val]
+                    self.log_message.emit(f"[INFO] Using exhaustive_matcher with custom block size ({block_size_val}).")
+                else:
+                    extra_args = []
+
             cmd_match_gpu = [
-                colmap_exe, "exhaustive_matcher",
+                colmap_exe, matcher_cmd,
                 "--database_path", database_path,
-                "--SiftMatching.use_gpu", "1",
-                "--SiftMatching.guided_matching", guided_matching,
+                "--FeatureMatching.use_gpu", "1",
+                "--FeatureMatching.guided_matching", guided_matching,
+                "--FeatureMatching.max_num_matches", str(colmap_max_num_matches),
+                "--FeatureMatching.num_threads", str(num_threads),
                 "--SiftMatching.max_ratio", nndr_ratio,
-                "--SiftMatching.max_num_matches", str(colmap_max_num_matches),
-                "--SiftMatching.num_threads", str(num_threads),
-            ]
+            ] + extra_args
+
             cmd_match_cpu = [
-                colmap_exe, "exhaustive_matcher",
+                colmap_exe, matcher_cmd,
                 "--database_path", database_path,
-                "--SiftMatching.use_gpu", "0",
-                "--SiftMatching.guided_matching", guided_matching,
+                "--FeatureMatching.use_gpu", "0",
+                "--FeatureMatching.guided_matching", guided_matching,
+                "--FeatureMatching.max_num_matches", str(colmap_max_num_matches),
+                "--FeatureMatching.num_threads", str(num_threads),
                 "--SiftMatching.max_ratio", nndr_ratio,
-                "--SiftMatching.max_num_matches", str(colmap_max_num_matches),
-                "--SiftMatching.num_threads", str(num_threads),
-            ]
+            ] + extra_args
+
             self._match_counts = []
             if not self._run_with_gpu_fallback(
-                cmd_match_gpu, cmd_match_cpu, timeout=7200.0, env=colmap_env,
+                cmd_match_gpu, cmd_match_cpu, timeout=14400.0, env=colmap_env,
                 line_parser=self._parse_matching_line
             ):
-                return False
+                if matcher_cmd == "vocab_tree_matcher":
+                    self.log_message.emit(
+                        "[WARNING] vocab_tree_matcher failed during execution. Retrying automatically with exhaustive_matcher..."
+                    )
+                    matcher_cmd = "exhaustive_matcher"
+                    cmd_match_gpu = [arg for arg in cmd_match_gpu if not arg.startswith("--VocabTreeMatching")]
+                    cmd_match_cpu = [arg for arg in cmd_match_cpu if not arg.startswith("--VocabTreeMatching")]
+                    cmd_match_gpu[1] = "exhaustive_matcher"
+                    cmd_match_cpu[1] = "exhaustive_matcher"
+                    if not self._run_with_gpu_fallback(
+                        cmd_match_gpu, cmd_match_cpu, timeout=14400.0, env=colmap_env,
+                        line_parser=self._parse_matching_line
+                    ):
+                        return False
+                else:
+                    return False
 
             db_stats = self._query_colmap_database_stats(database_path)
             if self._total_images > 1 and db_stats["num_pairs"] == 0:
@@ -850,12 +1045,12 @@ class PipelineWorker(QThread):
                 )
                 self._clear_colmap_match_tables(database_path)
                 relaxed_cpu_match = list(cmd_match_cpu)
-                self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.guided_matching", "1")
+                self._set_colmap_option(relaxed_cpu_match, "--FeatureMatching.guided_matching", "1")
                 self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_ratio", "0.95")
                 self._set_colmap_option(relaxed_cpu_match, "--SiftMatching.max_distance", "0.9")
                 self._using_gpu_sift = False
                 if not self._run_process_realtime(
-                    relaxed_cpu_match, timeout=7200.0, env=colmap_env,
+                    relaxed_cpu_match, timeout=14400.0, env=colmap_env,
                     line_parser=self._parse_matching_line
                 ):
                     return False
@@ -886,6 +1081,10 @@ class PipelineWorker(QThread):
                 except Exception as e:
                     self.log_message.emit(f"[WARNING] Failed to clean sparse folder: {e}")
             os.makedirs(sparse_dir, exist_ok=True)
+            os.makedirs(os.path.dirname(database_path), exist_ok=True)
+            if not os.path.exists(database_path):
+                self.log_message.emit(f"[WARNING] COLMAP database missing prior to mapping: {database_path}. Initializing database schema...")
+                self._create_colmap_db_schema(database_path)
 
             cmd_incremental = [
                 colmap_exe, "mapper",
@@ -913,7 +1112,7 @@ class PipelineWorker(QThread):
                     "--GlobalMapper.num_threads", str(num_threads),
                     "--GlobalMapper.ba_num_iterations", str(ba_global_max_refinements),
                 ]
-                ok = self._run_process_realtime(cmd_global, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line)
+                ok = self._run_process_realtime(cmd_global, timeout=14400.0, env=colmap_env, line_parser=self._parse_mapper_line)
                 if not ok or not self._select_best_sparse_model(sparse_dir):
                     self.log_message.emit("[WARNING] GLOMAP global_mapper failed or produced no model. Falling back to COLMAP incremental mapper...")
                     if os.path.exists(sparse_dir):
@@ -922,11 +1121,11 @@ class PipelineWorker(QThread):
                         except Exception:
                             pass
                     os.makedirs(sparse_dir, exist_ok=True)
-                    if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
+                    if not self._run_process_realtime(cmd_incremental, timeout=14400.0, env=colmap_env, line_parser=self._parse_mapper_line):
                         return False
             else:
                 self.status_changed.emit("Step 4/9: Estimating Camera Poses (SfM)...")
-                if not self._run_process_realtime(cmd_incremental, timeout=7200.0, env=colmap_env, line_parser=self._parse_mapper_line):
+                if not self._run_process_realtime(cmd_incremental, timeout=14400.0, env=colmap_env, line_parser=self._parse_mapper_line):
                     return False
 
             best_model_dir = self._to_colmap_path(self._select_best_sparse_model(sparse_dir)) if self._select_best_sparse_model(sparse_dir) else None
@@ -1187,344 +1386,6 @@ class PipelineWorker(QThread):
         self.progress_changed.emit(99)
         self._backup_checkpoint("mesh_reconstruction")
         return True
-
-    def _run_sp_lg_pipeline(
-        self,
-        database_path: str,
-        image_dir: str,
-        max_num_keypoints: int,
-        single_camera_val: str,
-    ) -> bool:
-        """
-        SuperPoint + LightGlue neural feature detection and exhaustive matching.
-        Writes results into COLMAP's SQLite database.db so mapper proceeds unmodified.
-
-        Schema references (COLMAP source / docs, 2026-07-29):
-          keypoints.data  : float32[N, 4] row-major — [x, y, scale, orientation]
-                            Similarity format (cols=4). scale=1.0, orientation=0.0;
-                            mapper uses only columns 0/1 (x, y).
-          matches.data    : uint32[M, 2] — [kp_idx_img1, kp_idx_img2]
-          two_view_geometries.config:
-                            UNCALIBRATED = 3  (fundamental matrix)
-                            Correct for general interior scenes that are not globally
-                            planar. PLANAR=4 (homography) would be wrong here.
-                            Source: colmap/src/colmap/scene/two_view_geometry.h
-          pair_id formula : 2147483647 * min(id1, id2) + max(id1, id2)
-                            Source: colmap/src/colmap/scene/database.h
-        """
-        import sqlite3
-        import numpy as np
-        import cv2
-        from PIL import Image as PILImage
-
-        # ------------------------------------------------------------------
-        # TwoViewGeometry::ConfigurationType (two_view_geometry.h, main branch)
-        # UNCALIBRATED = 3: fundamental matrix — correct for general interior
-        # scenes where the scene is not globally planar (a room, not a wall).
-        # ------------------------------------------------------------------
-        COLMAP_UNCALIBRATED = 3
-
-        def _pair_id(id1: int, id2: int) -> int:
-            """Encode two image IDs per COLMAP database.h."""
-            if id1 > id2:
-                id1, id2 = id2, id1
-            return 2147483647 * id1 + id2
-
-        # --- Device selection (mirrors existing gpu_mode semantics) -------
-        try:
-            import torch
-        except ImportError:
-            self.log_message.emit("[ERROR] SP+LG: PyTorch not installed. Install lightglue (pip install lightglue).")
-            return False
-
-        if self.gpu_mode == "force_cpu":
-            device = torch.device("cpu")
-            self.log_message.emit("[SP+LG] CPU-only mode selected.")
-        elif self.gpu_mode == "force_gpu":
-            if torch.cuda.is_available():
-                device = torch.device("cuda")
-                self.log_message.emit("[SP+LG] Forced GPU: CUDA available.")
-            else:
-                device = torch.device("cpu")
-                self.log_message.emit("[SP+LG] WARNING: GPU forced but CUDA unavailable — CPU fallback.")
-        else:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            dev_label = "CUDA GPU" if device.type == "cuda" else "CPU (note: may be slow on large image sets)"
-            self.log_message.emit(f"[SP+LG] Auto-detected device: {dev_label}.")
-        self._using_gpu_sift = (device.type == "cuda")
-
-        # --- Pre-bundled weights / TORCH_HOME redirect -----------------------
-        # Always redirect torch.hub to our bundled weights directory.
-        # If the weights are already present (offline), they load instantly.
-        # If absent on first run, torch.hub downloads them here once.
-        # Must happen BEFORE importing lightglue (its __init__ calls
-        # torch.hub.load_state_dict_from_url unconditionally at import time).
-        weights_dir = os.path.join(get_base_dir(), "backend_bin", "sp_lg_weights")
-        os.makedirs(weights_dir, exist_ok=True)
-        os.environ["TORCH_HOME"] = weights_dir
-        os.environ["PYTORCH_JIT"] = "0"
-        try:
-            import torch
-            if hasattr(torch.jit, "_state"):
-                torch.jit._state.disable()
-        except Exception:
-            pass
-        self.log_message.emit(f"[SP+LG] Using model weight cache: {weights_dir}")
-
-        # --- Load models ---------------------------------------------------
-        try:
-            from lightglue import SuperPoint, LightGlue
-            from lightglue.utils import load_image as lg_load_image
-        except ImportError as e:
-            self.log_message.emit(f"[ERROR] SP+LG: lightglue not found: {e}. Install: pip install lightglue")
-            return False
-
-        self.log_message.emit("[SP+LG] Loading SuperPoint + LightGlue models...")
-        try:
-            extractor = SuperPoint(max_num_keypoints=max_num_keypoints).eval().to(device)
-            matcher = LightGlue(features="superpoint").eval().to(device)
-        except Exception as e:
-            err_str = str(e).lower()
-            if "urlopen" in err_str or "name resolution" in err_str or "connection" in err_str or "gaierror" in err_str:
-                self.log_message.emit(
-                    "[ERROR] SP+LG: Cannot download model weights (no internet access / DNS resolution failed).\n"
-                    "  To resolve offline operation, run the following command while connected to internet:\n"
-                    "  curl -L https://github.com/cvg/LightGlue/releases/download/v0.1_arxiv/superpoint_v1.pth "
-                    "-o backend_bin/sp_lg_weights/hub/checkpoints/superpoint_v1.pth && \\\n"
-                    "  curl -L https://github.com/cvg/LightGlue/releases/download/v0.1_arxiv/superpoint_lightglue.pth "
-                    "-o backend_bin/sp_lg_weights/hub/checkpoints/superpoint_lightglue_v0-1_arxiv.pth"
-                )
-            else:
-                self.log_message.emit(f"[ERROR] SP+LG model loading failed: {e}")
-            return False
-        self.log_message.emit("[SP+LG] Models ready.")
-
-        # --- Enumerate images ----------------------------------------------
-        image_extensions = ('.jpg', '.jpeg', '.png', '.tif', '.tiff')
-        image_files = sorted([
-            f for f in os.listdir(image_dir)
-            if f.lower().endswith(image_extensions)
-        ])
-        if not image_files:
-            self.log_message.emit("[ERROR] SP+LG: No images found in working directory.")
-            return False
-        total_images = len(image_files)
-
-        # --- Create DB schema via colmap database_creator (or Python fallback) -
-        import shutil
-        base_dir = get_base_dir()
-        colmap_exe = os.path.join(base_dir, self.toolchain_map["colmap"]["colmap"])
-        system_colmap = shutil.which("colmap")
-        colmap_for_db = system_colmap or colmap_exe
-
-        colmap_env = self._get_colmap_env()
-        self.log_message.emit("[SP+LG] Initialising COLMAP database schema...")
-        ok = False
-        if colmap_for_db and not colmap_for_db.lower().endswith('.exe'):
-            ok = self._run_process_realtime(
-                [colmap_for_db, "database_creator", "--database_path", database_path],
-                timeout=30.0, env=colmap_env
-            )
-        
-        if not ok:
-            self.log_message.emit("[SP+LG] colmap database_creator unavailable or failed; using Python schema fallback.")
-            ok = self._create_colmap_db_schema(database_path)
-
-        if not ok:
-            self.log_message.emit("[ERROR] SP+LG: Failed to initialise database schema.")
-            return False
-
-        # --- Measure image dimensions and register cameras + images --------
-        size_map = {}  # filename -> (w, h)
-        for fname in image_files:
-            try:
-                with PILImage.open(os.path.join(image_dir, fname)) as img:
-                    size_map[fname] = img.size  # PIL: (width, height)
-            except Exception:
-                size_map[fname] = (1920, 1080)
-
-        conn = sqlite3.connect(database_path)
-        cur = conn.cursor()
-        try:
-            use_single_camera = (single_camera_val == "1")
-            if use_single_camera:
-                w, h = list(size_map.values())[0]
-                fx = max(w, h) * 1.2
-                params = np.array([fx, fx, w / 2.0, h / 2.0], dtype=np.float64)
-                cur.execute(
-                    "INSERT INTO cameras (model, width, height, params, prior_focal_length)"
-                    " VALUES (?,?,?,?,?)",
-                    (1, w, h, params.tobytes(), 0)
-                )
-                size_to_cam = {(w, h): cur.lastrowid}
-            else:
-                size_to_cam = {}
-                for fname in image_files:
-                    sz = size_map[fname]
-                    if sz not in size_to_cam:
-                        w, h = sz
-                        fx = max(w, h) * 1.2
-                        params = np.array([fx, fx, w / 2.0, h / 2.0], dtype=np.float64)
-                        cur.execute(
-                            "INSERT INTO cameras (model, width, height, params, prior_focal_length)"
-                            " VALUES (?,?,?,?,?)",
-                            (1, w, h, params.tobytes(), 0)
-                        )
-                        size_to_cam[sz] = cur.lastrowid
-
-            # images rows — unknown prior pose stored as NaN per COLMAP convention
-            image_id_map = {}
-            for fname in image_files:
-                cam_id = size_to_cam[size_map[fname]]
-                cur.execute(
-                    "INSERT INTO images (name, camera_id) VALUES (?,?)",
-                    (fname, cam_id)
-                )
-                image_id_map[fname] = cur.lastrowid
-            conn.commit()
-
-            # --- SuperPoint extraction per image --------------------------------
-            self.status_changed.emit("Step 2/9: Extracting Neural Features (SuperPoint)...")
-            self._feature_counts = []
-            features_by_id = {}  # image_id -> lightglue feature dict (on CPU for storage)
-            dev_tag = "GPU" if device.type == "cuda" else "CPU"
-
-            for i, fname in enumerate(image_files):
-                if not self.is_running:
-                    return False
-
-                image_id = image_id_map[fname]
-                self.status_changed.emit(f"Step 2/9: SP Keypoints ({i + 1}/{total_images})...")
-                self.progress_changed.emit(10 + int(15 * i / total_images))
-
-                try:
-                    img_tensor = lg_load_image(os.path.join(image_dir, fname)).to(device)
-                    with torch.inference_mode():
-                        feats = extractor.extract(img_tensor)
-
-                    # keypoints: [1, N, 2] pixel coords
-                    kps = feats["keypoints"][0].cpu().numpy()  # [N, 2]
-                    n_kp = len(kps)
-
-                    # COLMAP similarity keypoint blob: float32[N, 4] — [x, y, scale, orientation]
-                    kp_blob = np.zeros((n_kp, 4), dtype=np.float32)
-                    kp_blob[:, 0] = kps[:, 0]  # x
-                    kp_blob[:, 1] = kps[:, 1]  # y
-
-                    cur.execute(
-                        "INSERT INTO keypoints (image_id, rows, cols, data) VALUES (?,?,?,?)",
-                        (image_id, n_kp, 4, kp_blob.tobytes())
-                    )
-
-                    # Move feature dict to CPU and store for matching pass
-                    features_by_id[image_id] = {
-                        k: v.cpu() for k, v in feats.items()
-                    }
-                    self._feature_counts.append(n_kp)
-                    self.log_message.emit(
-                        f"[SP/{dev_tag}] {fname}: {n_kp:,} keypoints ({i + 1}/{total_images})"
-                    )
-                except Exception as e:
-                    self.log_message.emit(f"[ERROR] SP+LG: SuperPoint failed on {fname}: {e}")
-                    return False
-
-            conn.commit()
-
-            # Sanity check
-            if len(features_by_id) < 2:
-                self.log_message.emit("[ERROR] SP+LG: Fewer than 2 images successfully processed.")
-                return False
-
-            # --- LightGlue exhaustive matching + RANSAC geometric verification --
-            self.status_changed.emit("Step 3/9: Matching Neural Features (LightGlue)...")
-            image_ids = list(image_id_map.values())
-            all_pairs = [
-                (image_ids[a], image_ids[b])
-                for a in range(len(image_ids))
-                for b in range(a + 1, len(image_ids))
-            ]
-            num_pairs = len(all_pairs)
-            self._match_counts = []
-
-            # F matrix as float64[3,3] row-major zero blob
-            zero_f = np.zeros((3, 3), dtype=np.float64).tobytes()
-
-            for pair_idx, (id1, id2) in enumerate(all_pairs):
-                if not self.is_running:
-                    return False
-
-                self.progress_changed.emit(25 + int(15 * pair_idx / max(num_pairs, 1)))
-
-                feats0 = {k: v.to(device) for k, v in features_by_id[id1].items()}
-                feats1 = {k: v.to(device) for k, v in features_by_id[id2].items()}
-
-                try:
-                    with torch.inference_mode():
-                        result = matcher({"image0": feats0, "image1": feats1})
-                except Exception as e:
-                    self.log_message.emit(f"[WARNING] SP+LG: LightGlue failed for pair ({id1},{id2}): {e}")
-                    continue
-
-                match_indices = result["matches"][0].cpu().numpy()  # [M, 2]
-                if len(match_indices) == 0:
-                    continue
-
-                pid = _pair_id(id1, id2)
-                matches_blob = match_indices.astype(np.uint32).tobytes()
-                cur.execute(
-                    "INSERT INTO matches (pair_id, rows, cols, data) VALUES (?,?,?,?)",
-                    (pid, len(match_indices), 2, matches_blob)
-                )
-
-                # Geometric verification via RANSAC on fundamental matrix.
-                kps0 = features_by_id[id1]["keypoints"][0].numpy()  # [N0, 2]
-                kps1 = features_by_id[id2]["keypoints"][0].numpy()  # [N1, 2]
-                pts0 = kps0[match_indices[:, 0]].astype(np.float64)
-                pts1 = kps1[match_indices[:, 1]].astype(np.float64)
-
-                inlier_indices = match_indices  # fallback: all LG matches as inliers
-                f_blob = zero_f
-                if len(pts0) >= 8:
-                    try:
-                        F, mask = cv2.findFundamentalMat(pts0, pts1, cv2.FM_RANSAC, 3.0, 0.999)
-                        if F is not None and mask is not None:
-                            inlier_mask = mask.ravel().astype(bool)
-                            inlier_indices = match_indices[inlier_mask]
-                            f_blob = F.astype(np.float64).tobytes()
-                    except Exception:
-                        pass  # keep fallback values
-
-                n_inliers = len(inlier_indices)
-                if n_inliers < 4:
-                    continue  # not enough inliers for mapper initialisation
-
-                inliers_blob = inlier_indices.astype(np.uint32).tobytes()
-                cur.execute(
-                    "INSERT INTO two_view_geometries"
-                    " (pair_id, rows, cols, data, config, F, E, H)"
-                    " VALUES (?,?,?,?,?,?,?,?)",
-                    (pid, n_inliers, 2, inliers_blob,
-                     COLMAP_UNCALIBRATED, f_blob, zero_f, zero_f)
-                )
-                self._match_counts.append(n_inliers)
-                self.log_message.emit(
-                    f"[LG/{dev_tag}] Pair ({id1},{id2}): {len(match_indices)} matches → {n_inliers} inliers"
-                    f" ({pair_idx + 1}/{num_pairs})"
-                )
-
-            conn.commit()
-        except Exception as e:
-            self.log_message.emit(f"[ERROR] SP+LG: Database transaction failed: {e}")
-            return False
-        finally:
-            conn.close()
-
-        n_verified = len(self._match_counts)
-        self.log_message.emit(
-            f"[SP+LG] Complete: {n_verified}/{num_pairs} pairs have verified matches."
-        )
-        return True
-
     def _run_simulated_pipeline(self) -> bool:
         """Runs a visual simulation of the pipeline for testing UI and fallback states."""
         steps = [
@@ -2171,11 +2032,7 @@ class PipelineWorker(QThread):
         min_f = min(self._feature_counts)
         max_f = max(self._feature_counts)
 
-        use_neural = self.has_plain_surfaces and self.quality_preset != "preview"
-        if use_neural:
-            compute_label = f"Neural (SuperPoint / {'GPU' if self._using_gpu_sift else 'CPU'})"
-        else:
-            compute_label = "iGPU (OpenGL)" if self._using_gpu_sift else "CPU (VLFeat)"
+        compute_label = "GPU (CUDA)" if self._using_gpu_sift else "CPU Fallback"
         
         self.log_message.emit(
             f"\n{'='*60}\n"

@@ -16,7 +16,7 @@ from addons.addon_base import ProximapAddon
 
 class MeshInspectorAddon(ProximapAddon):
     addon_id = "mesh_inspector"
-    addon_name = "Mesh Inspector & Statistics"
+    addon_name = "Mesh Inspector"
     addon_version = "1.0.0"
     addon_description = "Calculates vertex counts, face counts, and bounding dimensions for selected meshes in the Mesh Editor."
     addon_author = "Proximap Team"
@@ -29,20 +29,39 @@ class MeshInspectorAddon(ProximapAddon):
 
     def register(self, mesh_editor) -> None:
         super().register(mesh_editor)
-        if hasattr(mesh_editor, "viewport") and hasattr(mesh_editor.viewport, "selection_changed"):
+        if hasattr(mesh_editor, "selection_changed"):
+            try:
+                mesh_editor.selection_changed.connect(self.update_stats)
+            except Exception:
+                pass
+        elif hasattr(mesh_editor, "viewport") and hasattr(mesh_editor.viewport, "selection_changed"):
             try:
                 mesh_editor.viewport.selection_changed.connect(self.update_stats)
+            except Exception:
+                pass
+
+        if hasattr(mesh_editor, "viewport") and hasattr(mesh_editor.viewport, "transform_changed"):
+            try:
                 mesh_editor.viewport.transform_changed.connect(self.update_stats)
             except Exception:
                 pass
 
     def unregister(self, mesh_editor) -> None:
-        if self.mesh_editor and hasattr(self.mesh_editor, "viewport"):
-            try:
-                self.mesh_editor.viewport.selection_changed.disconnect(self.update_stats)
-                self.mesh_editor.viewport.transform_changed.disconnect(self.update_stats)
-            except Exception:
-                pass
+        if self.mesh_editor:
+            if hasattr(self.mesh_editor, "selection_changed"):
+                try:
+                    self.mesh_editor.selection_changed.disconnect(self.update_stats)
+                except Exception:
+                    pass
+            if hasattr(self.mesh_editor, "viewport"):
+                try:
+                    self.mesh_editor.viewport.selection_changed.disconnect(self.update_stats)
+                except Exception:
+                    pass
+                try:
+                    self.mesh_editor.viewport.transform_changed.disconnect(self.update_stats)
+                except Exception:
+                    pass
         super().unregister(mesh_editor)
 
     def get_panel_widget(self, parent: Optional[QWidget] = None) -> Optional[QWidget]:
@@ -53,10 +72,9 @@ class MeshInspectorAddon(ProximapAddon):
         panel.setObjectName("MeshInspectorPanel")
         panel.setStyleSheet("""
             QFrame#MeshInspectorPanel {
-                background-color: #121212;
-                border: 1px solid #333333;
-                border-radius: 6px;
-                padding: 8px;
+                background-color: transparent;
+                border: none;
+                padding: 0px;
             }
             QLabel {
                 color: #e0e0e0;
@@ -65,12 +83,8 @@ class MeshInspectorAddon(ProximapAddon):
         """)
 
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(6)
-
-        hdr_label = QLabel("🔍 Mesh Inspector", panel)
-        hdr_label.setStyleSheet("color: #00E676; font-weight: bold; font-size: 12px;")
-        layout.addWidget(hdr_label)
 
         grid = QGridLayout()
         grid.setSpacing(4)
@@ -127,7 +141,7 @@ class MeshInspectorAddon(ProximapAddon):
 
         selected_objs = self.mesh_editor.viewport.scene.selected_objects
         if not selected_objs:
-            self._reset_labels("No selection")
+            self._reset_labels("Select a mesh")
             return
 
         total_verts = 0
@@ -136,21 +150,43 @@ class MeshInspectorAddon(ProximapAddon):
         max_bound = np.array([float('-inf'), float('-inf'), float('-inf')])
 
         for obj in selected_objs:
-            if hasattr(obj, "mesh_data") and obj.mesh_data is not None:
-                verts = obj.mesh_data.vertices
-                faces = obj.mesh_data.faces
-                total_verts += len(verts)
-                total_faces += len(faces)
+            # Case 1: Proximap Scene Object with obj.mesh
+            if hasattr(obj, "mesh") and obj.mesh is not None:
+                mesh = obj.mesh
+                if hasattr(mesh, "vertices") and mesh.vertices is not None and len(mesh.vertices) > 0:
+                    verts_count = len(mesh.vertices) // 3 if mesh.vertices.ndim == 1 else len(mesh.vertices)
+                    indices = getattr(mesh, "indices", None)
+                    faces_count = (len(indices) // 3 if (indices is not None and indices.ndim == 1) else len(indices)) if indices is not None else 0
 
-                if len(verts) > 0:
-                    # Apply local matrix transformation for scale/bounding calculation
-                    scale = np.array(obj.scale)
-                    scaled_verts = verts * scale
+                    total_verts += verts_count
+                    total_faces += faces_count
+
+                    if hasattr(obj, "get_world_aabb"):
+                        w_min, w_max = obj.get_world_aabb()
+                        min_bound = np.minimum(min_bound, w_min)
+                        max_bound = np.maximum(max_bound, w_max)
+                    else:
+                        scaled_verts = mesh.vertices.reshape(-1, 3) * np.array(getattr(obj, "scale", [1, 1, 1]))
+                        min_bound = np.minimum(min_bound, scaled_verts.min(axis=0))
+                        max_bound = np.maximum(max_bound, scaled_verts.max(axis=0))
+
+            # Case 2: obj has mesh_data attribute
+            elif hasattr(obj, "mesh_data") and obj.mesh_data is not None:
+                verts = obj.mesh_data.vertices
+                faces = getattr(obj.mesh_data, "faces", getattr(obj.mesh_data, "indices", None))
+                verts_count = len(verts) // 3 if verts.ndim == 1 else len(verts)
+                faces_count = (len(faces) // 3 if (faces is not None and faces.ndim == 1) else len(faces)) if faces is not None else 0
+                total_verts += verts_count
+                total_faces += faces_count
+
+                if verts_count > 0:
+                    scale = np.array(getattr(obj, "scale", [1, 1, 1]))
+                    scaled_verts = (verts.reshape(-1, 3) if verts.ndim == 1 else verts) * scale
                     min_bound = np.minimum(min_bound, scaled_verts.min(axis=0))
                     max_bound = np.maximum(max_bound, scaled_verts.max(axis=0))
 
         if total_verts == 0 or np.isinf(min_bound[0]):
-            self._reset_labels()
+            self._reset_labels("Select a mesh")
             return
 
         dims = max_bound - min_bound

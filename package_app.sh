@@ -41,11 +41,27 @@ elif [ -f "app_icon.png" ]; then
 fi
 
 python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
-    --collect-all numpy --collect-all rembg --collect-all scipy \
-    --collect-all pymatting --collect-all vispy --collect-all imgui_bundle \
+    --collect-all numpy --collect-all scipy \
+    --collect-all vispy --collect-all imgui_bundle \
     --collect-all trimesh --collect-all pyrr --collect-all cv2 \
-    --add-data "mesh_editor/shaders:mesh_editor/shaders" \
-    --copy-metadata pymatting main_window.py
+    --exclude-module PySide6.QtWebEngineCore \
+    --exclude-module PySide6.QtWebEngineWidgets \
+    --exclude-module PySide6.QtWebEngineQuick \
+    --exclude-module PySide6.Qt3DCore \
+    --exclude-module PySide6.Qt3DRender \
+    --exclude-module PySide6.QtMultimedia \
+    --exclude-module PySide6.QtMultimediaWidgets \
+    --exclude-module PySide6.QtCharts \
+    --exclude-module PySide6.QtDataVisualization \
+    --exclude-module PySide6.QtDesigner \
+    --exclude-module PySide6.QtQml \
+    --exclude-module PySide6.QtQuick \
+    --exclude-module PySide6.QtQuickWidgets \
+    --exclude-module PySide6.QtVirtualKeyboard \
+    --exclude-module PySide6.QtSql \
+    --exclude-module PySide6.QtXml \
+    --exclude-module matplotlib \
+    --add-data "mesh_editor/shaders:mesh_editor/shaders" main_window.py
 
 if [ ! -d "dist/Proximap.app" ]; then
     echo "PyInstaller compilation failed! 'dist/Proximap.app' not found."
@@ -73,27 +89,40 @@ else
     echo "  [WARNING] colmap executable not found in backend_bin/colmap"
 fi
 
-echo "  Copying OpenMVS binaries..."
-if [ -f "backend_bin/openMVS/DensifyPointCloud" ]; then
-    cp -r "backend_bin/openMVS/"* "$OPENMVS_DIR/"
+echo "  Selectively copying required OpenMVS binaries..."
+if [ -d "backend_bin/openMVS" ]; then
+    for bin in InterfaceCOLMAP DensifyPointCloud ReconstructMesh RefineMesh TextureMesh; do
+        if [ -f "backend_bin/openMVS/$bin" ]; then
+            cp "backend_bin/openMVS/$bin" "$OPENMVS_DIR/"
+        else
+            echo "  [WARNING] Required OpenMVS binary not found: $bin"
+        fi
+    done
 else
-    echo "  [WARNING] OpenMVS binaries not found in backend_bin/openMVS"
+    echo "  [WARNING] OpenMVS directory not found."
 fi
 
 echo "  Pruning Windows-only backend artifacts from macOS bundle..."
 find "$MAC_OS_DIR/backend_bin" -type f \( -name "*.exe" -o -name "*.dll" -o -name "*.bat" -o -name "*.pdb" -o -name "*.lib" \) -delete
 find "$MAC_OS_DIR/backend_bin" -type d -empty -delete
 
+echo "  Pruning unused WebEngine shared libraries from macOS bundle..."
+rm -rf "$MAC_OS_DIR/_internal/libQt6WebEngineCore.dylib"* 2>/dev/null || true
+rm -rf "$MAC_OS_DIR/_internal/PySide6/Qt/lib/libQt6WebEngineCore.dylib"* 2>/dev/null || true
+rm -rf "$MAC_OS_DIR/_internal/PySide6/Qt/resources/qtwebengine*dylib"* 2>/dev/null || true
+rm -rf "$MAC_OS_DIR/_internal/PySide6/Qt/resources/qtwebengine"* 2>/dev/null || true
+
 echo "  Copying toolchain map configuration..."
 if [ -f "toolchain_map.json" ]; then
     cp "toolchain_map.json" "$MAC_OS_DIR/"
 fi
 
-echo "  Copying offline background removal models..."
-if [ -d "models" ]; then
-    cp -r "models" "$MAC_OS_DIR/"
-else
-    echo "  [WARNING] Models directory not found."
+echo "  Copying application icon for runtime usage..."
+if [ -f "app_icon.ico" ]; then
+    cp "app_icon.ico" "$MAC_OS_DIR/"
+fi
+if [ -f "app_icon.png" ]; then
+    cp "app_icon.png" "$MAC_OS_DIR/"
 fi
 
 echo "  Copying UI icons and public assets..."

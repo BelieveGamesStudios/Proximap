@@ -36,10 +36,30 @@ if (Test-Path "app_icon.ico") {
     $iconFlag = "--icon=app_icon.ico"
 }
 
+$excludes = @(
+    "--exclude-module=PySide6.QtWebEngineCore",
+    "--exclude-module=PySide6.QtWebEngineWidgets",
+    "--exclude-module=PySide6.QtWebEngineQuick",
+    "--exclude-module=PySide6.Qt3DCore",
+    "--exclude-module=PySide6.Qt3DRender",
+    "--exclude-module=PySide6.QtMultimedia",
+    "--exclude-module=PySide6.QtMultimediaWidgets",
+    "--exclude-module=PySide6.QtCharts",
+    "--exclude-module=PySide6.QtDataVisualization",
+    "--exclude-module=PySide6.QtDesigner",
+    "--exclude-module=PySide6.QtQml",
+    "--exclude-module=PySide6.QtQuick",
+    "--exclude-module=PySide6.QtQuickWidgets",
+    "--exclude-module=PySide6.QtVirtualKeyboard",
+    "--exclude-module=PySide6.QtSql",
+    "--exclude-module=PySide6.QtXml",
+    "--exclude-module=matplotlib"
+)
+
 if ($iconFlag) {
-    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --add-data "mesh_editor/shaders;mesh_editor/shaders" --copy-metadata pymatting main_window.py
+    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy --collect-all scipy --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --add-data "mesh_editor/shaders;mesh_editor/shaders" $excludes main_window.py
 } else {
-    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --add-data "mesh_editor/shaders;mesh_editor/shaders" --copy-metadata pymatting main_window.py
+    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all scipy --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --add-data "mesh_editor/shaders;mesh_editor/shaders" $excludes main_window.py
 }
 
 
@@ -48,6 +68,20 @@ if (-not (Test-Path "dist/Proximap")) {
     exit 1
 }
 Write-Host "  PyInstaller compilation complete." -ForegroundColor Green
+
+Write-Host "  Pruning unused WebEngine DLLs and resources..." -ForegroundColor DarkGray
+$webEngineFiles = @(
+    "dist/Proximap/_internal/Qt6WebEngineCore.dll",
+    "dist/Proximap/_internal/PySide6/Qt/bin/Qt6WebEngineCore.dll",
+    "dist/Proximap/_internal/PySide6/Qt/resources/qtwebengine_resources.pak",
+    "dist/Proximap/_internal/PySide6/Qt/resources/qtwebengine_devtools_resources.pak"
+)
+foreach ($file in $webEngineFiles) {
+    if (Test-Path $file) {
+        Remove-Item -Force $file
+        Write-Host "  Removed unused file: $file" -ForegroundColor DarkGray
+    }
+}
 
 # 3. Create distribution backend directories
 Write-Host "[3/5] Setting up backend binary directories..." -ForegroundColor Yellow
@@ -61,11 +95,13 @@ New-Item -ItemType Directory -Force -Path $distOpenMvsDir | Out-Null
 Write-Host "[4/5] Selectively copying backend toolchain dependencies..." -ForegroundColor Yellow
 
 # Copy COLMAP dependencies
-Write-Host "  Copying COLMAP binaries..." -ForegroundColor DarkGray
+Write-Host "  Copying COLMAP binaries and vocabulary trees..." -ForegroundColor DarkGray
 # - DLLs
 Copy-Item -Path "backend_bin/colmap/*.dll" -Destination $distColmapDir
 # - Executable
 Copy-Item -Path "backend_bin/colmap/colmap.exe" -Destination $distColmapDir
+# - Vocab trees (.bin)
+Get-ChildItem -Path "backend_bin/colmap/*.bin" -ErrorAction SilentlyContinue | Copy-Item -Destination $distColmapDir
 # - Plugins folder (Qt plugins)
 if (Test-Path "backend_bin/colmap/plugins") {
     Copy-Item -Path "backend_bin/colmap/plugins" -Destination $distColmapDir -Recurse
@@ -99,14 +135,6 @@ Copy-Item -Path "toolchain_map.json" -Destination "dist/Proximap/"
 if (Test-Path "app_icon.ico") {
     Write-Host "  Copying app_icon.ico to dist directory..." -ForegroundColor DarkGray
     Copy-Item -Path "app_icon.ico" -Destination "dist/Proximap/"
-}
-
-# Copy offline background removal models
-Write-Host "  Copying offline background removal models..." -ForegroundColor DarkGray
-if (Test-Path "models") {
-    Copy-Item -Path "models" -Destination "dist/Proximap/" -Recurse
-} else {
-    Write-Warning "Models directory not found. Background removal will fail offline until models are placed in dist/Proximap/models/"
 }
 
 # Copy public directory containing toolbar icons

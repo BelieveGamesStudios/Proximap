@@ -66,7 +66,7 @@ Section "Main Section" SEC01
 
   ; Recursively copy the PyInstaller output directory
   ; This assumes you have run '.\package_app.ps1' or 'python -m PyInstaller' first
-  File /r "dist\Proximap\*.*"
+  File /r "dist\Proximap\"
 
   ; Store installation folder in registry
   WriteRegStr HKLM "${PRODUCT_DIR_REGKEY}" "" "$INSTDIR\Proximap.exe"
