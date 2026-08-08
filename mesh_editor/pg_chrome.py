@@ -7,10 +7,10 @@ import sys
 import os
 import webbrowser
 from PySide6.QtCore import Qt, Signal, QSize, QUrl
-from PySide6.QtGui import QColor, QFont, QAction, QIcon, QDesktopServices
+from PySide6.QtGui import QColor, QFont, QAction, QIcon, QDesktopServices, QPixmap, QPainter
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QLabel, 
-    QComboBox, QToolButton, QMenu, QFrame, QSizePolicy, QDialog
+    QComboBox, QToolButton, QMenu, QMenuBar, QFrame, QSizePolicy, QDialog, QApplication
 )
 
 
@@ -156,6 +156,8 @@ class PolygroundChromeBar(QFrame):
     tab_switch_requested = Signal(int)
     mode_changed = Signal(str)
     layout_preset_changed = Signal(str)
+    save_layout_requested = Signal()
+    delete_layout_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -164,6 +166,10 @@ class PolygroundChromeBar(QFrame):
         self._init_ui()
 
     def _init_ui(self):
+        from preferences_dialog import load_preferences
+        init_tab = load_preferences().get("startup_tab", "3D Reconstruction")
+        default_idx = 0 if init_tab == "3D Reconstruction" else 1
+
         self.setStyleSheet("""
             #PolygroundChromeBar {
                 background-color: #161616;
@@ -172,7 +178,7 @@ class PolygroundChromeBar(QFrame):
         """)
 
         # ---------------------------------------------------------------------
-        # 1. Left Region: Proximap Logo (About only) + Mode Notch + QMenuBar
+        # 1. Left Region: Proximap Logo + QMenuBar
         # ---------------------------------------------------------------------
         self.left_region = QWidget(self)
         left_layout = QHBoxLayout(self.left_region)
@@ -181,7 +187,7 @@ class PolygroundChromeBar(QFrame):
 
         # Proximap Logo Button (face.png icon)
         self.logo_btn = QToolButton(self.left_region)
-        self.logo_btn.setText("")  # Icon only, no spelled out text
+        self.logo_btn.setText("")
         self.logo_btn.setPopupMode(QToolButton.InstantPopup)
         self.logo_btn.setCursor(Qt.PointingHandCursor)
         self.logo_btn.setToolTip("Proximap")
@@ -209,12 +215,12 @@ class PolygroundChromeBar(QFrame):
             }
         """)
 
-        # Dropdown menu for Logo Button: Contains ONLY "About Proximap"
+        # Dropdown menu for Logo Button: Contains "About Proximap"
         self.logo_menu = QMenu(self)
         self.logo_menu.setStyleSheet("""
             QMenu {
                 background-color: #1E1E1E;
-                color: #E0E0E0;
+                color: #CCCCCC;
                 border: 1px solid #333333;
                 padding: 4px;
             }
@@ -224,8 +230,8 @@ class PolygroundChromeBar(QFrame):
                 font-weight: bold;
             }
             QMenu::item:selected {
-                background-color: #00E676;
-                color: #121212;
+                background-color: #2D2D2D;
+                color: #00E676;
             }
         """)
         about_action = self.logo_menu.addAction("About Proximap")
@@ -234,56 +240,7 @@ class PolygroundChromeBar(QFrame):
 
         # Backward compatibility reference
         self.app_menu_btn = self.logo_btn
-
-        # Top Menu Bar (File / Edit / Window / Help)
-        self.menu_bar = QMenuBar(self.left_region)
-        self.menu_bar.setFixedHeight(28)
-
-        # Set green custom logo icon
-        logo_pix = QPixmap(18, 18)
-        logo_pix.fill(Qt.transparent)
-        p = QPainter(logo_pix)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.setBrush(QColor("#00E676"))
-        p.setPen(Qt.NoPen)
-        p.drawRoundedRect(0, 4, 18, 10, 5, 5)
-        p.end()
-        self.app_menu_btn.setIcon(QIcon(logo_pix))
-
-        # App Logo Popup Menu
-        self.app_menu = QMenu(self.app_menu_btn)
-        self.app_menu.setStyleSheet("""
-            QMenu {
-                background-color: #1E1E1E;
-                color: #CCCCCC;
-                border: 1px solid #333333;
-                padding: 4px;
-            }
-            QMenu::item:selected {
-                background-color: #2D2D2D;
-                color: #00E676;
-            }
-        """)
-
-        a_about = self.app_menu.addAction("About Proximap")
-        a_about.triggered.connect(self._show_about_dialog)
-        self.app_menu.addSeparator()
-
-        a_pref = self.app_menu.addAction("Preferences…")
-        a_pref.setShortcut("Ctrl+,")
-        win = self.window()
-        if win and hasattr(win, "_open_preferences_dialog"):
-            a_pref.triggered.connect(win._open_preferences_dialog)
-        else:
-            a_pref.triggered.connect(lambda: print("[CHROME] Preferences clicked"))
-
-        self.app_menu.addSeparator()
-        a_quit = self.app_menu.addAction("Quit Proximap")
-        a_quit.setShortcut("Ctrl+Q")
-        a_quit.triggered.connect(QApplication.instance().quit)
-
-        self.app_menu_btn.setMenu(self.app_menu)
-        left_layout.addWidget(self.app_menu_btn)
+        left_layout.addWidget(self.logo_btn)
 
         # Application QMenuBar (File, Edit, Window, Help)
         self.menu_bar = QMenuBar(self.left_region)
@@ -323,7 +280,6 @@ class PolygroundChromeBar(QFrame):
 
         left_layout.addWidget(self.menu_bar)
 
-
         # ---------------------------------------------------------------------
         # 2. Center Region: Navigation Tabs
         # ---------------------------------------------------------------------
@@ -337,7 +293,6 @@ class PolygroundChromeBar(QFrame):
         center_layout.addWidget(self.tab_segmented)
 
         self.mode_segmented = self.mode_notch
-
 
         # ---------------------------------------------------------------------
         # 3. Right Region: Layout Presets
@@ -450,4 +405,31 @@ class PolygroundChromeBar(QFrame):
                 for menu in [self.file_menu, self.edit_menu, self.window_menu, self.help_menu]:
                     native_bar.addMenu(menu)
 
+    def set_right_region_visible(self, visible: bool):
+        self.right_region.setVisible(visible)
+        self._update_region_geometries()
 
+    def populate_layout_presets(self, layouts: list[str], active_layout: str):
+        self.preset_combo.blockSignals(True)
+        self.preset_combo.clear()
+        for idx, l in enumerate(layouts):
+            self.preset_combo.addItem(l)
+            if l == active_layout:
+                self.preset_combo.setCurrentIndex(idx)
+                self._last_valid_preset = l
+        self.preset_combo.insertSeparator(self.preset_combo.count())
+        self.preset_combo.addItem("Save Layout...")
+        self.preset_combo.addItem("Delete Layout...")
+        self.preset_combo.blockSignals(False)
+
+    def _on_preset_activated(self, index: int):
+        text = self.preset_combo.itemText(index)
+        if text == "Save Layout...":
+            self.save_layout_requested.emit()
+            self.preset_combo.setCurrentText(getattr(self, "_last_valid_preset", "Default"))
+        elif text == "Delete Layout...":
+            self.delete_layout_requested.emit()
+            self.preset_combo.setCurrentText(getattr(self, "_last_valid_preset", "Default"))
+        else:
+            self._last_valid_preset = text
+            self.layout_preset_changed.emit(text)
