@@ -29,8 +29,6 @@ except ModuleNotFoundError as e:
 from vispy import app, scene
 app.use_app("pyside6")
 
-from preferences_dialog import load_preferences, save_preferences
-
 def get_base_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
@@ -253,34 +251,15 @@ class ViewerLoadWorker(QThread):
             mode      = self.mode
             points = colors = faces = texcoords = texture_path = None
 
-            # If given a .mvs project file, resolve to corresponding .ply / .obj geometry file
-            if file_path.lower().endswith(".mvs"):
-                mvs_dir = os.path.dirname(file_path)
-                base = os.path.splitext(os.path.basename(file_path))[0]
-                candidates = [base + ".ply", base + "_mesh.ply", "scene_dense.ply", "scene_dense_refcloud.ply", "scene.ply"]
-                for cand in candidates:
-                    cand_path = os.path.join(mvs_dir, cand)
-                    if os.path.exists(cand_path):
-                        file_path = cand_path
-                        break
-
-            ext = os.path.splitext(file_path)[1].lower()
-
             if mode == 1:
+                # Dense Point Cloud
                 ply_path = file_path.replace(".mvs", ".ply")
                 if os.path.exists(ply_path):
                     file_path = ply_path
                 ext = os.path.splitext(file_path)[1].lower()
                 if ext == '.ply':
+                    import struct
                     points, colors, _ = _read_ply_static(file_path)
-                    # If fast PLY static reader returned empty, try point_cloud_io fallback
-                    if (points is None or len(points) == 0) and os.path.exists(file_path):
-                        import point_cloud_io
-                        res = point_cloud_io.load_point_cloud(file_path)
-                        if res.success and res.cloud is not None:
-                            points = np.asarray(res.cloud.points, dtype=np.float32)
-                            colors = (np.asarray(res.cloud.colors) * 255).astype(np.uint8) \
-                                     if res.has_colors else np.full((len(points), 3), 180, np.uint8)
                 else:
                     import point_cloud_io
                     res = point_cloud_io.load_point_cloud(file_path)
@@ -290,15 +269,9 @@ class ViewerLoadWorker(QThread):
                                  if res.has_colors else np.full((len(points), 3), 180, np.uint8)
 
             elif mode == 2:
+                ext = os.path.splitext(file_path)[1].lower()
                 if ext == '.ply':
                     points, colors, faces = _read_ply_static(file_path)
-                    if (points is None or len(points) == 0) and os.path.exists(file_path):
-                        import point_cloud_io
-                        res = point_cloud_io.load_point_cloud(file_path)
-                        if res.success and res.cloud is not None:
-                            points = np.asarray(res.cloud.points, dtype=np.float32)
-                            colors = (np.asarray(res.cloud.colors) * 255).astype(np.uint8) \
-                                     if res.has_colors else np.full((len(points), 3), 180, np.uint8)
                 elif ext not in ('.obj', '.ply'):
                     import point_cloud_io
                     res = point_cloud_io.load_point_cloud(file_path)
@@ -677,12 +650,30 @@ class ViewerWrapperWidget(QFrame):
         self.control_bar = QFrame(self)
         self.control_bar.setFixedHeight(50)
         self.control_bar.setStyleSheet("background-color: #242424; border-bottom: 1px solid #2B2B2B; border-top-left-radius: 8px; border-top-right-radius: 8px;")
-        self.control_bar.hide()
         control_layout = QHBoxLayout(self.control_bar)
         control_layout.setContentsMargins(10, 5, 10, 5)
         
-        # Dropdown File Menu (kept for menu action mapping)
+        # Dropdown File Menu
         self.file_menu_btn = QPushButton("File ▾", self.control_bar)
+        self.file_menu_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 4px 10px;
+                font-weight: normal;
+                background-color: #333333;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                margin-left: 0px;
+            }
+            QPushButton:hover {
+                background-color: #444444;
+                border-color: #00E676;
+            }
+            QPushButton::menu-indicator {
+                image: none;
+            }
+        """)
         self.file_menu = QMenu(self)
         self.file_menu.setStyleSheet("""
             QMenu {
@@ -737,24 +728,70 @@ class ViewerWrapperWidget(QFrame):
         
         self.file_menu_btn.setMenu(self.file_menu)
         
-        # Dropdown to choose camera tracking style (Arcball & Turntable)
-        self.cam_select = QComboBox(self)
+        # Dropdown to choose camera tracking style
+        self.cam_select = QComboBox(self.control_bar)
+        self.cam_select.setMinimumWidth(150)
         self.cam_select.addItems([
             "Arcball Camera",
-            "Turntable Camera"
+            "Turntable Camera",
+            "Fly Camera",
+            "Pan-Zoom Camera",
+            "Magnify Camera"
         ])
-        self.cam_select.hide()
         
         # Checkbox to toggle controls display overlay
-        self.show_controls_cb = QCheckBox("Show Controls", self)
-        self.show_controls_cb.hide()
+        self.show_controls_cb = QCheckBox("Show Controls", self.control_bar)
+        self.show_controls_cb.setStyleSheet("""
+            QCheckBox {
+                color: #ffffff;
+                font-size: 11px;
+                margin-left: 10px;
+                margin-right: 10px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+            }
+        """)
         
-        # Action buttons (kept for action mapping)
-        self.bg_btn = QPushButton("BG Color", self)
-        self.bg_btn.hide()
+        # Dropdown to choose MVS scene mode
+        self.mode_select = QComboBox(self.control_bar)
+        self.mode_select.setMinimumWidth(200)
+        self.mode_select.addItems([
+            "Sparse Point Cloud & Cameras",
+            "Dense Point Cloud",
+            "Textured Mesh"
+        ])
         
-        self.reload_btn = QPushButton("Reload", self)
-        self.reload_btn.hide()
+        # Action buttons
+        self.bg_btn = QPushButton("BG Color", self.control_bar)
+        self.bg_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 4px 8px;
+                font-weight: normal;
+                background-color: #333333;
+                color: #ffffff;
+                border: 1px solid #444444;
+            }
+            QPushButton:hover {
+                background-color: #444444;
+                border-color: #00E676;
+            }
+        """)
+        
+        self.reload_btn = QPushButton("Reload", self.control_bar)
+        self.reload_btn.setStyleSheet("font-size: 11px; padding: 4px 8px; font-weight: normal;")
+        
+        control_layout.addWidget(self.file_menu_btn)
+        control_layout.addStretch()
+        control_layout.addWidget(self.cam_select)
+        control_layout.addWidget(self.show_controls_cb)
+        control_layout.addWidget(self.mode_select)
+        control_layout.addWidget(self.bg_btn)
+        control_layout.addWidget(self.reload_btn)
+        
+        layout.addWidget(self.control_bar)
         
         # Container for the embedded window
         self.container_area = QWidget(self)
@@ -770,63 +807,21 @@ class ViewerWrapperWidget(QFrame):
         
         layout.addWidget(self.container_area)
         
-        # Mode Selector Notch anchored floating over top-left corner of 3D Reconstruction Viewport
-        self.mode_notch = QComboBox(self.container_area)
-        self.mode_notch.addItems([
-            "Sparse Point Cloud & Cameras",
-            "Dense Point Cloud",
-            "Textured Mesh"
-        ])
-        self.mode_notch.setFixedHeight(26)
-        self.mode_notch.setCursor(Qt.PointingHandCursor)
-        self.mode_notch.setStyleSheet("""
-            QComboBox {
-                background-color: rgba(28, 28, 28, 230);
-                color: #FFFFFF;
-                font-weight: bold;
-                font-size: 11px;
-                border: 1px solid rgba(80, 80, 80, 200);
-                border-radius: 4px;
-                padding: 2px 10px;
-                min-width: 170px;
-            }
-            QComboBox:hover {
-                border-color: #00E676;
-                background-color: rgba(40, 40, 40, 250);
-            }
-            QComboBox::drop-down {
-                subcontrol-origin: padding;
-                subcontrol-position: top right;
-                width: 16px;
-                border-left: none;
-            }
-            QComboBox QAbstractItemView {
-                background-color: #1E1E1E;
-                color: #CCCCCC;
-                selection-background-color: #00E676;
-                selection-color: #121212;
-                border: 1px solid #3A3A3A;
-                outline: 0;
-            }
-        """)
-        self.mode_notch.show()
-        
-        # Backward compatibility alias
-        self.mode_select = self.mode_notch
-        
         # Setup actions
         self.reload_btn.clicked.connect(self._on_reload_clicked)
-        self.mode_notch.currentIndexChanged.connect(self._on_mode_changed)
+        self.mode_select.currentIndexChanged.connect(self._on_mode_changed)
         self.cam_select.currentIndexChanged.connect(self.camera_changed.emit)
         
         self.current_mvs_dir = None
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, "mode_notch") and self.mode_notch:
-            margin = 12
-            self.mode_notch.move(margin, margin)
-            self.mode_notch.raise_()
+        w = self.width()
+            
+        if w < 600:
+            self.show_controls_cb.setText("Controls")
+            self.cam_select.setMinimumWidth(100)
+            self.mode_select.setMinimumWidth(140)
             self.bg_btn.setText("Color")
         else:
             self.show_controls_cb.setText("Show Controls")
@@ -901,14 +896,6 @@ class ViewerWrapperWidget(QFrame):
         if index == 0:
             return os.path.join(self.current_mvs_dir, "scene.mvs")
         elif index == 1:
-            for candidate in [
-                "scene_dense.ply",
-                "scene_dense_refcloud.ply",
-                "scene_dense.mvs"
-            ]:
-                path = os.path.join(self.current_mvs_dir, candidate)
-                if os.path.exists(path):
-                    return path
             return os.path.join(self.current_mvs_dir, "scene_dense.mvs")
         elif index == 2:
             # We want to load the textured mesh.
@@ -1637,7 +1624,6 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Proximap 1.4.0")
         self.setMinimumSize(1100, 750)
-        self.showMaximized()
         
         base_dir = get_base_dir()
         icon_path = os.path.join(base_dir, "app_icon.ico")
@@ -1646,6 +1632,7 @@ class MainWindow(QMainWindow):
         if os.path.exists(icon_path):
             from PySide6.QtGui import QIcon
             self.setWindowIcon(QIcon(icon_path))
+            
         self.image_list = []
         self.worker = None
         
@@ -1662,8 +1649,7 @@ class MainWindow(QMainWindow):
         self.cameras_visual = None
         self._last_points = None
         self.last_accessed_dir = os.path.expanduser("~")
-        from preferences_dialog import load_preferences
-        self.viewport_bg_color = load_preferences().get("reconstruction_bg_color", "#1A1A1A")
+        self.viewport_bg_color = '#0C0C0C'
         
         self._clear_reconstruction_out()
         self._init_ui()
@@ -1719,28 +1705,16 @@ class MainWindow(QMainWindow):
                     print(f"[WARNING] Could not clear {item_path} on startup: {e}")
 
     def _init_ui(self):
-        # Root Container with PolygroundChromeBar + QStackedWidget
-        central_container = QWidget(self)
-        self.setCentralWidget(central_container)
-        root_layout = QVBoxLayout(central_container)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
-
-        from mesh_editor.pg_chrome import PolygroundChromeBar
-        self.chrome_bar = PolygroundChromeBar(self)
-        self.chrome_bar.file_menu.aboutToShow.connect(lambda: self._update_chrome_menus_for_tab(self.page_stack.currentIndex()))
-        self.chrome_bar.edit_menu.aboutToShow.connect(lambda: self._update_chrome_menus_for_tab(self.page_stack.currentIndex()))
-        root_layout.addWidget(self.chrome_bar)
-
-        self.page_stack = QStackedWidget(central_container)
-        root_layout.addWidget(self.page_stack, stretch=1)
+        # Main Tabbed Interface
+        self.main_tabs = QTabWidget(self)
+        self.main_tabs.setObjectName("MainTabs")
+        self.setCentralWidget(self.main_tabs)
         
-        # 3D Reconstruction Tab Page
-        reconstruction_tab = QWidget(self.page_stack)
+        # 3D Reconstruction Tab
+        reconstruction_tab = QWidget(self.main_tabs)
         main_layout = QHBoxLayout(reconstruction_tab)
         main_layout.setContentsMargins(15, 15, 15, 15)
         main_layout.setSpacing(15)
-
         
         # Left Side Control Panel (Wizard Steps)
         sidebar = QFrame(self)
@@ -2316,11 +2290,7 @@ class MainWindow(QMainWindow):
         if hasattr(self.canvas, '_keys_check') and 'escape' in self.canvas._keys_check:
             del self.canvas._keys_check['escape']
         self.view = self.canvas.central_widget.add_view()
-        prefs = load_preferences()
-        initial_cam = prefs.get("camera_mode", "Arcball Camera")
-        self.view.camera = 'turntable' if initial_cam == "Turntable Camera" else 'arcball'
-        cam_idx = 1 if initial_cam == "Turntable Camera" else 0
-        self.viewer_widget.cam_select.setCurrentIndex(cam_idx)
+        self.view.camera = 'arcball' # Default camera mode is Arcball
         
         # Add native VisPy canvas widget to the layout
         self.viewer_widget.container_area_layout.addWidget(self.canvas.native)
@@ -2338,12 +2308,8 @@ class MainWindow(QMainWindow):
                 padding: 10px;
             }
         """)
-        initial_controls = prefs.get("show_controls", True)
-        self.viewer_widget.show_controls_cb.setChecked(initial_controls)
+        self.overlay_label.setVisible(False)
         self.viewer_widget.show_controls_cb.stateChanged.connect(self._on_show_controls_changed)
-        self.overlay_label.setVisible(initial_controls)
-        if initial_controls:
-            self._update_overlay_content()
         
         right_layout.addWidget(self.viewer_widget, stretch=4)
         
@@ -2405,9 +2371,12 @@ class MainWindow(QMainWindow):
         
         main_layout.addWidget(right_panel, stretch=1)
         
+        # Register tabs to MainTabs
+        self.main_tabs.addTab(reconstruction_tab, "3D Reconstruction")
+        
         # Lazy load the Mesh Editor tab to avoid importing trimesh at startup
         self.mesh_editor_tab = None
-        self.mesh_editor_placeholder = QWidget(self.page_stack)
+        self.mesh_editor_placeholder = QWidget(self.main_tabs)
         
         # Add styled loading UI to the placeholder
         placeholder_layout = QVBoxLayout(self.mesh_editor_placeholder)
@@ -2451,240 +2420,25 @@ class MainWindow(QMainWindow):
         placeholder_layout.addWidget(loading_container, 0, Qt.AlignCenter)
         placeholder_layout.addStretch()
         
-        # Add pages to StackedWidget: Page 0 = 3D Reconstruction, Page 1 = Polyground
-        self.page_stack.addWidget(reconstruction_tab)
-        self.page_stack.addWidget(self.mesh_editor_placeholder)
-        
-        self.chrome_bar.tab_switch_requested.connect(self._on_chrome_tab_switch)
-        self.chrome_bar.mode_changed.connect(self._on_mode_changed)
-        
-        # Set initial page stack & chrome menus based on user preference (Default: 3D Reconstruction)
-        init_tab = load_preferences().get("startup_tab", "3D Reconstruction")
-        init_idx = 0 if init_tab == "3D Reconstruction" else 1
-        self.page_stack.setCurrentIndex(init_idx)
-        self._update_chrome_menus_for_tab(init_idx)
-
-        # Lazy load Polyground workspace on startup
-        QTimer.singleShot(50, self._load_mesh_editor)
+        self.main_tabs.addTab(self.mesh_editor_placeholder, "Mesh Editor")
+        self.main_tabs.currentChanged.connect(self._on_tab_changed)
         
         self._set_process_btn_state("idle")
 
-    def _on_chrome_tab_switch(self, index: int):
-        # On Linux, the VisPy OpenGL canvas is a native X11 window that the
-        # compositor continues drawing for 1-2 frames after Qt hides it — so
-        # simply hiding it or deferring by one tick isn't enough. The robust fix
-        # is to place an opaque cover widget OVER the page_stack area for the
-        # duration of the transition so there is nothing for the X11 compositor
-        # to bleed through onto.
-        self._show_tab_switch_cover()
-        # Give the cover one paint pass to flush, then do the actual switch.
-        QTimer.singleShot(32, lambda: self._do_tab_switch(index))
-
-    def _show_tab_switch_cover(self):
-        """Place a solid opaque cover over the page_stack to block OpenGL bleed-through."""
-        from PySide6.QtWidgets import QFrame
-        if not hasattr(self, "_tab_cover") or self._tab_cover is None:
-            self._tab_cover = QFrame(self.page_stack)
-            self._tab_cover.setStyleSheet("background-color: #111111;")
-            self._tab_cover.setAttribute(Qt.WA_OpaquePaintEvent, True)
-        # Resize cover to exactly match the page_stack geometry and bring to front
-        self._tab_cover.setGeometry(self.page_stack.rect())
-        self._tab_cover.raise_()
-        self._tab_cover.show()
-
-    def _hide_tab_switch_cover(self):
-        """Remove the transition cover after the switch is complete."""
-        if hasattr(self, "_tab_cover") and self._tab_cover is not None:
-            self._tab_cover.hide()
-
-    def _do_tab_switch(self, index: int):
-        # Index 0 = 3D Reconstruction, Index 1 = Polyground
-        # Hide OpenGL canvas before switching to Polyground (Index 1) as an extra precaution
-        if index == 1 and hasattr(self, "canvas") and self.canvas and self.canvas.native:
-            self.canvas.native.hide()
-
-        self.page_stack.setCurrentIndex(index)
-        self._update_chrome_menus_for_tab(index)
-
-        # Restore canvas visibility when switching to 3D Reconstruction tab (Index 0)
-        if index == 0 and hasattr(self, "canvas") and self.canvas and self.canvas.native:
-            self.canvas.native.show()
-
-        # Remove the cover after the new page has had one frame to paint
-        QTimer.singleShot(32, self._hide_tab_switch_cover)
-
-        if index == 1 and getattr(self, "mesh_editor_tab", None) is None:
+    def _on_tab_changed(self, index):
+        if index == 1 and self.mesh_editor_tab is None:
             if not getattr(self, "_mesh_editor_loading", False):
                 self._mesh_editor_loading = True
                 QApplication.setOverrideCursor(Qt.WaitCursor)
                 QTimer.singleShot(100, self._load_mesh_editor)
 
-    def _update_chrome_menus_for_tab(self, index: int):
-        if not hasattr(self, "chrome_bar") or not self.chrome_bar:
-            return
-
-        if index == 0:
-            # 3D Reconstruction Tab (Index 0): Hide Mode Notch & Setup Reconstruction Menus
-            if hasattr(self.chrome_bar, "mode_notch") and self.chrome_bar.mode_notch:
-                self.chrome_bar.mode_notch.setVisible(False)
-            self._setup_reconstruction_menu_actions()
-        elif index == 1:
-            # Polyground Workspace Tab (Index 1): Show Mode Notch (Object/Edit) & Polyground Menus
-            if hasattr(self.chrome_bar, "mode_notch") and self.chrome_bar.mode_notch:
-                self.chrome_bar.mode_notch.setVisible(True)
-            self._setup_window_menu()
-            self._setup_chrome_menu_actions()
-
-    def _setup_reconstruction_menu_actions(self):
-        if not hasattr(self, "chrome_bar") or not self.chrome_bar:
-            return
-
-        vw = getattr(self, "viewer_widget", None)
-        has_images = bool(getattr(self, "image_list", []))
-        has_reconstruction = hasattr(self, "current_mvs_dir") or (hasattr(self, "_last_points") and self._last_points is not None)
-        has_project_data = has_images or has_reconstruction
-
-        # 1. File Menu for 3D Reconstruction
-        file_menu = self.chrome_bar.file_menu
-        file_menu.clear()
-
-        a_new = file_menu.addAction("New Project")
-        a_new.setShortcut("Ctrl+N")
-        if vw and hasattr(vw, "action_new"):
-            a_new.triggered.connect(vw.action_new.trigger)
-
-        file_menu.addSeparator()
-
-        a_save = file_menu.addAction("Save Project (.pxm)")
-        a_save.setEnabled(has_project_data)
-        if vw and hasattr(vw, "action_save"):
-            a_save.triggered.connect(vw.action_save.trigger)
-
-        a_load = file_menu.addAction("Load Project (.pxm)")
-        if vw and hasattr(vw, "action_load"):
-            a_load.triggered.connect(vw.action_load.trigger)
-
-        # "Recover Last Session" option
-        has_backup = os.path.exists(get_backup_metadata_path())
-        a_recover = file_menu.addAction("Recover Last Session")
-        a_recover.setEnabled(has_backup)
-        if vw and hasattr(vw, "action_recover"):
-            a_recover.triggered.connect(vw.action_recover.trigger)
-
-        file_menu.addSeparator()
-
-        a_export_dense = file_menu.addAction("Export Dense Point Cloud")
-        is_dense_avail = bool(vw and hasattr(vw, "action_export_dense") and vw.action_export_dense.isEnabled())
-        a_export_dense.setEnabled(is_dense_avail)
-        if vw and hasattr(vw, "action_export_dense"):
-            a_export_dense.triggered.connect(vw.action_export_dense.trigger)
-
-        a_export_sparse = file_menu.addAction("Export Sparse Model")
-        is_sparse_avail = bool(vw and hasattr(vw, "action_export_sparse") and vw.action_export_sparse.isEnabled())
-        a_export_sparse.setEnabled(is_sparse_avail)
-        if vw and hasattr(vw, "action_export_sparse"):
-            a_export_sparse.triggered.connect(vw.action_export_sparse.trigger)
-
-        export_mesh = file_menu.addMenu("Export Mesh")
-        a_glb = export_mesh.addAction("GLB (.glb)")
-        a_obj = export_mesh.addAction("OBJ (.obj)")
-        a_usdz = export_mesh.addAction("USDZ (.usdz)")
-
-        is_mesh_avail = bool(vw and hasattr(vw, "action_export_glb") and vw.action_export_glb.isEnabled())
-        a_glb.setEnabled(is_mesh_avail)
-        a_obj.setEnabled(is_mesh_avail)
-        a_usdz.setEnabled(is_mesh_avail)
-        export_mesh.setEnabled(is_mesh_avail)
-
-        if vw:
-            if hasattr(vw, "action_export_glb"):
-                a_glb.triggered.connect(vw.action_export_glb.trigger)
-            if hasattr(vw, "action_export_obj"):
-                a_obj.triggered.connect(vw.action_export_obj.trigger)
-            if hasattr(vw, "action_export_usdz"):
-                a_usdz.triggered.connect(vw.action_export_usdz.trigger)
-
-        file_menu.addSeparator()
-
-        a_imp_cloud = file_menu.addAction("Import Point Cloud")
-        if vw and hasattr(vw, "action_import_standalone"):
-            a_imp_cloud.triggered.connect(vw.action_import_standalone.trigger)
-
-        a_mob_imp = file_menu.addAction("Import Images/Videos from Mobile Device")
-        if vw and hasattr(vw, "action_mobile_import"):
-            a_mob_imp.triggered.connect(vw.action_mobile_import.trigger)
-
-        a_mob_exp = file_menu.addAction("Send 3D Model to Mobile")
-        is_mob_avail = bool(vw and hasattr(vw, "action_mobile_export") and vw.action_mobile_export.isEnabled())
-        a_mob_exp.setEnabled(is_mob_avail)
-        if vw and hasattr(vw, "action_mobile_export"):
-            a_mob_exp.triggered.connect(vw.action_mobile_export.trigger)
-
-        # 2. Edit Menu for 3D Reconstruction
-        edit_menu = self.chrome_bar.edit_menu
-        edit_menu.clear()
-
-        has_selected_photos = False
-        if hasattr(self, "photos_tab") and hasattr(self.photos_tab, "photo_list"):
-            has_selected_photos = bool(self.photos_tab.photo_list.selectedItems())
-
-        a_delete_photos = edit_menu.addAction("Delete Selected Photos")
-        a_delete_photos.setEnabled(has_selected_photos)
-        if hasattr(self, "_remove_selected_photos"):
-            a_delete_photos.triggered.connect(self._remove_selected_photos)
-
-        edit_menu.addSeparator()
-        a_pref = edit_menu.addAction("Preferences...")
-        a_pref.setShortcut("Ctrl+Alt+P")
-        a_pref.triggered.connect(self._open_preferences_dialog)
-
-        # 3. Window Menu for 3D Reconstruction
-        window_menu = self.chrome_bar.window_menu
-        window_menu.clear()
-        a_reset_view = window_menu.addAction("Reset 3D Viewport")
-        if vw and hasattr(vw, "reset_view"):
-            a_reset_view.triggered.connect(vw.reset_view)
-
-        window_menu.addSeparator()
-        a_fullscreen = window_menu.addAction("Toggle Fullscreen")
-        a_fullscreen.setShortcut("F11")
-        a_fullscreen.setCheckable(True)
-        a_fullscreen.setChecked(self.isFullScreen())
-        a_fullscreen.triggered.connect(self._toggle_fullscreen)
-
-    def _toggle_fullscreen(self):
-        if self.isFullScreen():
-            self.showNormal()
-            self.showMaximized()
-        else:
-            self.showFullScreen()
-        self._update_chrome_menus_for_tab(self.page_stack.currentIndex())
-
-    def _on_mode_changed(self, mode: str):
-        if hasattr(self, "polyground_workspace") and self.polyground_workspace:
-            self.polyground_workspace._on_mode_changed(mode)
-
     def _load_mesh_editor(self):
         try:
             from mesh_editor import MeshEditorWidget
-            from mesh_editor.pg_workspace import PolygroundWorkspace
-
-            self.mesh_editor_coordinator = MeshEditorWidget(self)
-            self.mesh_editor_tab = self.mesh_editor_coordinator  # backward compatibility
-            self.mesh_editor_coordinator.action_upload_proximap.triggered.connect(self._upload_mesh_editor_scene)
+            self.mesh_editor_tab = MeshEditorWidget(self)
+            self.mesh_editor_tab.action_upload_proximap.triggered.connect(self._upload_mesh_editor_scene)
             
-            # Create PolygroundWorkspace with QADS DockManager
-            self.polyground_workspace = PolygroundWorkspace(self.mesh_editor_coordinator, self)
-            self.polyground_workspace.initialize()
-
-            # Attach Window menu & File/Edit actions to top chrome bar if Polyground tab is active
-            if self.page_stack.currentIndex() == 1:
-                self._update_chrome_menus_for_tab(1)
-
-            # macOS native menu bar shim if on Darwin
-            self.chrome_bar.attach_native_mac_menu(self)
-
-            # Swap in the Polyground workspace
+            # Clear placeholder layout (loading UI) and swap in the actual mesh editor
             layout = self.mesh_editor_placeholder.layout()
             if layout:
                 while layout.count():
@@ -2692,11 +2446,11 @@ class MainWindow(QMainWindow):
                     if child.widget():
                         child.widget().deleteLater()
                 layout.setContentsMargins(0, 0, 0, 0)
-                layout.addWidget(self.polyground_workspace)
+                layout.addWidget(self.mesh_editor_tab)
             else:
                 layout = QVBoxLayout(self.mesh_editor_placeholder)
                 layout.setContentsMargins(0, 0, 0, 0)
-                layout.addWidget(self.polyground_workspace)
+                layout.addWidget(self.mesh_editor_tab)
         except Exception as e:
             import traceback
             err_msg = f"Failed to load Mesh Editor:\n{str(e)}\n\n{traceback.format_exc()}"
@@ -2764,146 +2518,6 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
             self._mesh_editor_loading = False
-
-    def _setup_window_menu(self):
-        if not hasattr(self, "polyground_workspace") or not self.polyground_workspace:
-            return
-
-        window_menu = self.chrome_bar.window_menu
-        window_menu.clear()
-
-        docks = self.polyground_workspace.docks
-        for name, dock in docks.items():
-            if name == "viewport":
-                continue
-            action = dock.toggleViewAction()
-            action.setText(dock.windowTitle())
-            window_menu.addAction(action)
-
-        window_menu.addSeparator()
-        reset_action = window_menu.addAction("Reset to Default Layout")
-        reset_action.triggered.connect(self.polyground_workspace._build_default_layout)
-
-        window_menu.addSeparator()
-        a_fullscreen = window_menu.addAction("Toggle Fullscreen")
-        a_fullscreen.setShortcut("F11")
-        a_fullscreen.setCheckable(True)
-        a_fullscreen.setChecked(self.isFullScreen())
-        a_fullscreen.triggered.connect(self._toggle_fullscreen)
-
-    def _setup_chrome_menu_actions(self):
-        if not hasattr(self, "mesh_editor_coordinator") or not self.mesh_editor_coordinator:
-            return
-
-        ed = self.mesh_editor_coordinator
-        has_mesh = bool(getattr(ed, "mesh_nodes", {})) or (getattr(ed, "active_mesh", None) is not None)
-        has_reconstruction = hasattr(self, "current_mvs_dir") or (hasattr(self, "_last_points") and self._last_points is not None)
-
-        # 1. File Menu
-        file_menu = self.chrome_bar.file_menu
-        file_menu.clear()
-
-        a_import = file_menu.addAction("Import Mesh (.obj, .glb)")
-        if hasattr(ed, '_on_import_model_clicked'):
-            a_import.triggered.connect(ed._on_import_model_clicked)
-
-        a_rec = file_menu.addAction("Load Reconstructed Model")
-        a_rec.setEnabled(has_reconstruction)
-        if hasattr(ed, '_on_load_reconstructed_model_clicked'):
-            a_rec.triggered.connect(ed._on_load_reconstructed_model_clicked)
-
-        a_pxm = file_menu.addAction("Import .PXM File")
-        if hasattr(ed, '_on_import_pxm_clicked'):
-            a_pxm.triggered.connect(lambda: ed._on_import_pxm_clicked())
-
-        file_menu.addSeparator()
-
-        a_glb = file_menu.addAction("Export Scene (.glb)")
-        a_glb.setEnabled(has_mesh)
-        if hasattr(ed, '_on_export_scene_clicked'):
-            a_glb.triggered.connect(lambda: ed._on_export_scene_clicked('glb'))
-
-        a_obj = file_menu.addAction("Export Scene (.obj)")
-        a_obj.setEnabled(has_mesh)
-        if hasattr(ed, '_on_export_scene_clicked'):
-            a_obj.triggered.connect(lambda: ed._on_export_scene_clicked('obj'))
-
-        a_usdz = file_menu.addAction("Export Scene (.usdz)")
-        a_usdz.setEnabled(has_mesh)
-        if hasattr(ed, '_on_export_scene_clicked'):
-            a_usdz.triggered.connect(lambda: ed._on_export_scene_clicked('usdz'))
-
-        file_menu.addSeparator()
-
-        a_upload = file_menu.addAction("Upload to Proximap")
-        a_upload.setEnabled(has_mesh)
-        a_upload.triggered.connect(self._upload_mesh_editor_scene)
-
-        # 2. Edit Menu
-        edit_menu = self.chrome_bar.edit_menu
-        edit_menu.clear()
-
-        has_undo = bool(getattr(ed, "undo_stack", []))
-        has_redo = bool(getattr(ed, "redo_stack", []))
-        has_selection = (getattr(ed, "selected_node", None) is not None) or (getattr(ed, "active_mesh", None) is not None)
-
-        a_undo = edit_menu.addAction("Undo")
-        a_undo.setShortcut("Ctrl+Z")
-        a_undo.setEnabled(has_undo)
-        if hasattr(ed, '_perform_undo'):
-            a_undo.triggered.connect(ed._perform_undo)
-
-        a_redo = edit_menu.addAction("Redo")
-        a_redo.setShortcut("Ctrl+Y")
-        a_redo.setEnabled(has_redo)
-        if hasattr(ed, '_perform_redo'):
-            a_redo.triggered.connect(ed._perform_redo)
-
-        edit_menu.addSeparator()
-
-        a_del = edit_menu.addAction("Delete Selected")
-        a_del.setShortcut("Delete")
-        a_del.setEnabled(has_selection)
-        if hasattr(ed, '_on_delete_selected_mesh'):
-            a_del.triggered.connect(ed._on_delete_selected_mesh)
-
-        edit_menu.addSeparator()
-        a_pref = edit_menu.addAction("Preferences...")
-        a_pref.setShortcut("Ctrl+Alt+P")
-        if hasattr(ed, '_open_preferences'):
-            a_pref.triggered.connect(ed._open_preferences)
-        else:
-            a_pref.triggered.connect(self._open_preferences_dialog)
-
-        # 3. Help Menu
-        help_menu = self.chrome_bar.help_menu
-        help_menu.clear()
-
-        a_docs = help_menu.addAction("Proximap Documentation")
-        a_docs.triggered.connect(lambda: QMessageBox.information(self, "Documentation", "Visit https://proximaxr.space for documentation."))
-
-        a_shortcuts = help_menu.addAction("Keyboard Shortcuts")
-        a_shortcuts.triggered.connect(lambda: QMessageBox.information(self, "Shortcuts", "Translate: W | Rotate: E | Scale: R\nUndo: Ctrl+Z | Redo: Ctrl+Y | Delete: Del"))
-
-        a_about = help_menu.addAction("About Proximap")
-        a_about.triggered.connect(lambda: QMessageBox.about(self, "About Proximap", "Proximap v1.0.0\nProximaXR Spatial Technologies\nContact: fumz@proximaxr.space"))
-
-    def _open_preferences_dialog(self):
-        try:
-            from preferences_dialog import PreferencesDialog
-            ed = getattr(self, 'mesh_editor_coordinator', self)
-            addon_mgr = getattr(ed, 'addon_manager', None)
-            dlg = PreferencesDialog(addon_mgr, self, self)
-            dlg.exec()
-        except Exception as e:
-            print(f"[WARNING] Could not open preferences dialog: {e}")
-
-
-    def closeEvent(self, event):
-        if hasattr(self, "polyground_workspace") and self.polyground_workspace:
-            self.polyground_workspace.save_layout()
-        super().closeEvent(event)
-
 
     def _retry_load_mesh_editor(self):
         layout = self.mesh_editor_placeholder.layout()
@@ -4730,12 +4344,6 @@ class MainWindow(QMainWindow):
         elif index == 4:
             import vispy.scene.cameras as cams
             self.view.camera = cams.MagnifyCamera()
-
-        from preferences_dialog import load_preferences
-        prefs = load_preferences()
-        invert = prefs.get("invert_mouse_rotation", True)
-        if hasattr(self.view.camera, "flip"):
-            self.view.camera.flip = (False, invert, False)
             
         # Re-center and re-scale if we have loaded points
         if self._last_points is not None and len(self._last_points) > 0:
@@ -6529,7 +6137,7 @@ class StartupManager:
         self.window = MainWindow()
         if os.path.exists(self.icon_path):
             self.window.setWindowIcon(QIcon(self.icon_path))
-        self.window.showMaximized()
+        self.window.show()
         if self.splash:
             self.splash.finish(self.window)
         QTimer.singleShot(500, self.window._check_startup_recovery)
