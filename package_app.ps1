@@ -137,14 +137,6 @@ if (Test-Path "app_icon.ico") {
     Copy-Item -Path "app_icon.ico" -Destination "dist/Proximap/"
 }
 
-# Copy offline background removal models
-Write-Host "  Copying offline background removal models..." -ForegroundColor DarkGray
-if (Test-Path "models") {
-    Copy-Item -Path "models" -Destination "dist/Proximap/" -Recurse
-} else {
-    Write-Warning "Models directory not found. Background removal will fail offline until models are placed in dist/Proximap/models/"
-}
-
 # Copy public directory containing toolbar icons
 Write-Host "  Copying UI icons and public assets..." -ForegroundColor DarkGray
 if (Test-Path "public") {

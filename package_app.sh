@@ -117,11 +117,12 @@ if [ -f "toolchain_map.json" ]; then
     cp "toolchain_map.json" "$MAC_OS_DIR/"
 fi
 
-echo "  Copying offline background removal models..."
-if [ -d "models" ]; then
-    cp -r "models" "$MAC_OS_DIR/"
-else
-    echo "  [WARNING] Models directory not found."
+echo "  Copying application icon for runtime usage..."
+if [ -f "app_icon.ico" ]; then
+    cp "app_icon.ico" "$MAC_OS_DIR/"
+fi
+if [ -f "app_icon.png" ]; then
+    cp "app_icon.png" "$MAC_OS_DIR/"
 fi
 
 echo "  Copying UI icons and public assets..."

@@ -394,7 +394,7 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
                 <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
                 <span>Select Images / Videos</span>
             </div>
-            <input type="file" id="fileInput" multiple accept="image/*,video/*" onchange="handleFilesSelected(this.files)">
+            <input type="file" id="fileInput" multiple accept="image/heic,image/heif,image/jpeg,image/jpg,image/png,image/webp,image/*,video/quicktime,video/mp4,video/x-m4v,video/*" onchange="handleFilesSelected(this.files)">
             <br>
             <div id="previewGrid" class="preview-grid" style="display: none;"></div>
             <br>
@@ -425,29 +425,41 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
             grid.innerHTML = '';
             grid.style.display = 'grid';
 
-            selectedFiles.forEach((file) => {
-                const item = document.createElement('div');
-                item.className = 'preview-item';
-                
-                if (file.type.startsWith('image/')) {
-                    const img = document.createElement('img');
-                    img.src = URL.createObjectURL(file);
-                    item.appendChild(img);
-                } else if (file.type.startsWith('video/')) {
-                    const video = document.createElement('video');
-                    video.src = URL.createObjectURL(file);
-                    item.appendChild(video);
-                    const badge = document.createElement('span');
-                    badge.className = 'video-badge';
-                    badge.innerText = 'VIDEO';
-                    item.appendChild(badge);
-                }
-                grid.appendChild(item);
-            });
-
             const btn = document.getElementById('uploadBtn');
             btn.style.display = 'block';
             btn.innerText = `Done — Send ${selectedFiles.length} File(s) to Proximap`;
+
+            // Render thumbnails asynchronously in small batches to keep mobile UI fluid
+            let index = 0;
+            function renderBatch() {
+                const batchSize = 6;
+                const end = Math.min(index + batchSize, selectedFiles.length);
+                for (let i = index; i < end; i++) {
+                    const file = selectedFiles[i];
+                    const item = document.createElement('div');
+                    item.className = 'preview-item';
+                    
+                    if (file.type.startsWith('image/') || /\\.(heic|heif|jpg|jpeg|png|webp)$/i.test(file.name)) {
+                        const img = document.createElement('img');
+                        img.src = URL.createObjectURL(file);
+                        item.appendChild(img);
+                    } else {
+                        const video = document.createElement('video');
+                        video.src = URL.createObjectURL(file);
+                        item.appendChild(video);
+                        const badge = document.createElement('span');
+                        badge.className = 'video-badge';
+                        badge.innerText = 'VIDEO';
+                        item.appendChild(badge);
+                    }
+                    grid.appendChild(item);
+                }
+                index = end;
+                if (index < selectedFiles.length) {
+                    requestAnimationFrame(renderBatch);
+                }
+            }
+            renderBatch();
         }
 
         function startUpload() {

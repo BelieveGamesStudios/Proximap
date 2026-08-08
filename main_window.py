@@ -31,7 +31,7 @@ app.use_app("pyside6")
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
-        return getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+        return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
 os.environ["U2NET_HOME"] = os.path.join(get_base_dir(), "models")
@@ -1624,6 +1624,15 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Proximap 1.4.0")
         self.setMinimumSize(1100, 750)
+        
+        base_dir = get_base_dir()
+        icon_path = os.path.join(base_dir, "app_icon.ico")
+        if not os.path.exists(icon_path):
+            icon_path = os.path.join(base_dir, "public", "app_icon.png")
+        if os.path.exists(icon_path):
+            from PySide6.QtGui import QIcon
+            self.setWindowIcon(QIcon(icon_path))
+            
         self.image_list = []
         self.worker = None
         
