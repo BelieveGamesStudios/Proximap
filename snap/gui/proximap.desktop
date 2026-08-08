@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Proximap
+Comment=3D Scene Reconstruction & Photogrammetry Desktop Dashboard
+Exec=proximap
+Icon=${SNAP}/meta/gui/proximap.png
+Terminal=false
+Type=Application
+Categories=Graphics;3DGraphics;Science;
+Keywords=photogrammetry;3d;reconstruction;colmap;openmvs;
+StartupWMClass=Proximap

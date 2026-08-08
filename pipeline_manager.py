@@ -39,7 +39,7 @@ from hardware_profiler import run_safe_subprocess, get_memory_budget, get_recomm
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
-        return getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+        return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
 
@@ -864,9 +864,9 @@ class PipelineWorker(QThread):
                 "--image_path", working_image_dir,
                 "--ImageReader.camera_model", "PINHOLE",
                 "--ImageReader.single_camera", single_camera_val,
-                "--FeatureExtraction.use_gpu", "1",
-                "--FeatureExtraction.max_image_size", str(colmap_max_image_size),
-                "--FeatureExtraction.num_threads", str(num_threads),
+                "--SiftExtraction.use_gpu", "1",
+                "--SiftExtraction.max_image_size", str(colmap_max_image_size),
+                "--SiftExtraction.num_threads", str(num_threads),
                 "--SiftExtraction.max_num_features", str(colmap_max_num_features),
                 "--SiftExtraction.first_octave", str(colmap_first_octave),
             ]
@@ -876,9 +876,9 @@ class PipelineWorker(QThread):
                 "--image_path", working_image_dir,
                 "--ImageReader.camera_model", "PINHOLE",
                 "--ImageReader.single_camera", single_camera_val,
-                "--FeatureExtraction.use_gpu", "0",
-                "--FeatureExtraction.max_image_size", str(colmap_max_image_size),
-                "--FeatureExtraction.num_threads", str(num_threads),
+                "--SiftExtraction.use_gpu", "0",
+                "--SiftExtraction.max_image_size", str(colmap_max_image_size),
+                "--SiftExtraction.num_threads", str(num_threads),
                 "--SiftExtraction.max_num_features", str(colmap_max_num_features),
                 "--SiftExtraction.first_octave", str(colmap_first_octave),
             ]
