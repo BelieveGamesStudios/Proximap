@@ -2905,7 +2905,6 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
-=======
     def _retry_load_mesh_editor(self):
         layout = self.mesh_editor_placeholder.layout()
         if layout:
@@ -2957,7 +2956,6 @@ class MainWindow(QMainWindow):
         self._mesh_editor_loading = True
         QApplication.setOverrideCursor(Qt.WaitCursor)
         QTimer.singleShot(100, self._load_mesh_editor)
->>>>>>> main
 
     def _update_system_badge(self):
         """Calculates system resource quality badge and updates style dynamically."""
