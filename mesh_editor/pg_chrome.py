@@ -5,8 +5,9 @@ Provides a modern, Blender-inspired chrome header bar with modular segmented con
 
 import sys
 import os
-from PySide6.QtCore import Qt, Signal, QSize
-from PySide6.QtGui import QColor, QFont, QAction, QIcon
+import webbrowser
+from PySide6.QtCore import Qt, Signal, QSize, QUrl
+from PySide6.QtGui import QColor, QFont, QAction, QIcon, QDesktopServices
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QLabel, 
     QComboBox, QToolButton, QMenu, QFrame, QSizePolicy, QDialog
@@ -344,6 +345,10 @@ class PolygroundChromeBar(QFrame):
         right_layout.addWidget(self.preset_combo)
         self.save_indicator = None
 
+        # Initial visibility based on default_idx
+        if default_idx == 0:
+            self.right_region.setVisible(False)
+
         # Initial layout update
         self._update_region_geometries()
 
@@ -354,7 +359,8 @@ class PolygroundChromeBar(QFrame):
     def _update_region_geometries(self):
         """Calculates exact positions to anchor center_region to top bar midpoint."""
         self.left_region.adjustSize()
-        self.right_region.adjustSize()
+        if self.right_region.isVisible():
+            self.right_region.adjustSize()
         self.center_region.adjustSize()
 
         h = self.height()
@@ -364,10 +370,11 @@ class PolygroundChromeBar(QFrame):
         self.left_region.move(10, (h - left_h) // 2)
 
         # Right region anchored right (10px margin)
-        right_w = self.right_region.width()
-        right_h = self.right_region.height()
+        right_w = self.right_region.width() if self.right_region.isVisible() else 0
+        right_h = self.right_region.height() if self.right_region.isVisible() else 0
         right_x = max(0, self.width() - right_w - 10)
-        self.right_region.move(right_x, (h - right_h) // 2)
+        if self.right_region.isVisible():
+            self.right_region.move(right_x, (h - right_h) // 2)
 
         # Center region mathematically anchored to horizontal midpoint of window
         center_w = self.center_region.width()
@@ -376,7 +383,7 @@ class PolygroundChromeBar(QFrame):
 
         # Prevent overlapping when squeezed
         left_bound = 10 + self.left_region.width() + 10
-        right_bound = right_x - 10
+        right_bound = right_x - 10 if self.right_region.isVisible() else self.width() - 10
         if center_x < left_bound:
             center_x = left_bound
         elif center_x + center_w > right_bound:
@@ -385,21 +392,10 @@ class PolygroundChromeBar(QFrame):
         self.center_region.move(center_x, (h - center_h) // 2)
 
     def _show_about_dialog(self):
-        """Displays modal About Proximap dialog window."""
-        dialog = QDialog(self.window())
-        dialog.setWindowTitle("About Proximap")
-        dialog.setFixedSize(380, 240)
-        dialog.setStyleSheet("""
-            QDialog {
-                background-color: #1A1A1A;
-                color: #E0E0E0;
-                border: 1px solid #333333;
-                border-radius: 8px;
-            }
-        """)
-
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(24, 24, 24, 24)
+        """Redirects to Proximap GitHub repository link."""
+        url = "https://github.com/BelieveGamesStudios/Proximap"
+        if not QDesktopServices.openUrl(QUrl(url)):
+            webbrowser.open(url)
 
     @property
     def mode_notch(self):
@@ -410,46 +406,6 @@ class PolygroundChromeBar(QFrame):
             if vp and hasattr(vp, "mode_notch"):
                 return vp.mode_notch
         return None
-        layout.setSpacing(10)
-
-        brand = QLabel("✦ PROXIMAP", dialog)
-        brand.setStyleSheet("font-size: 18px; font-weight: bold; color: #00E676; letter-spacing: 1px;")
-
-        org = QLabel("ProximaXR Spatial Technologies", dialog)
-        org.setStyleSheet("font-size: 13px; font-weight: bold; color: #FFFFFF;")
-
-        desc = QLabel("v1.0.0 — Spatial Computing & 3D Mesh Editor Suite\nHigh-Performance Reconstruction & Photogrammetry Workbench.", dialog)
-        desc.setStyleSheet("font-size: 11px; color: #AAAAAA;")
-        desc.setWordWrap(True)
-
-        contact = QLabel("Contact: fumz@proximaxr.space", dialog)
-        contact.setStyleSheet("font-size: 11px; color: #00E676;")
-
-        btn_close = QPushButton("Close", dialog)
-        btn_close.setFixedSize(90, 30)
-        btn_close.setCursor(Qt.PointingHandCursor)
-        btn_close.setStyleSheet("""
-            QPushButton {
-                background-color: #00E676;
-                color: #121212;
-                font-weight: bold;
-                border: none;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #00C853;
-            }
-        """)
-        btn_close.clicked.connect(dialog.accept)
-
-        layout.addWidget(brand)
-        layout.addWidget(org)
-        layout.addWidget(desc)
-        layout.addWidget(contact)
-        layout.addStretch()
-        layout.addWidget(btn_close, 0, Qt.AlignRight)
-
-        dialog.exec()
 
     def attach_native_mac_menu(self, window):
         """macOS compatibility shim to replicate app menu on native menu bar if running on Darwin."""

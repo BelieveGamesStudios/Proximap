@@ -22,6 +22,7 @@ def load_preferences() -> dict:
         "camera_mode": "Arcball Camera",
         "invert_mouse_rotation": True,
         "show_controls": True,
+        "show_session_recovery": True,
         "reconstruction_bg_color": "#1A1A1A",
         "polyground_bg_color": "#1E1E1E",
         "polyground_grid_color": "#333333"
@@ -225,9 +226,13 @@ class PreferencesDialog(QDialog):
 
         grp_rec_gen = QGroupBox("3D Reconstruction Settings", self.general_tab)
         grp_rec_gen.setStyleSheet("QGroupBox { font-weight: bold; color: #00E676; border: 1px solid #333; border-radius: 4px; margin-top: 10px; padding-top: 15px; }")
-        rec_gen_layout = QHBoxLayout(grp_rec_gen)
+        rec_gen_layout = QVBoxLayout(grp_rec_gen)
         rec_gen_layout.setContentsMargins(12, 12, 12, 12)
-        rec_gen_layout.setSpacing(12)
+        rec_gen_layout.setSpacing(10)
+
+        startup_layout = QHBoxLayout()
+        startup_layout.setContentsMargins(0, 0, 0, 0)
+        startup_layout.setSpacing(12)
 
         lbl_startup = QLabel("Default Startup Workspace:", grp_rec_gen)
         lbl_startup.setStyleSheet("color: #FFFFFF; font-size: 13px; font-weight: normal;")
@@ -255,9 +260,28 @@ class PreferencesDialog(QDialog):
         """)
         self.combo_startup.currentTextChanged.connect(self._on_startup_preference_changed)
 
-        rec_gen_layout.addWidget(lbl_startup)
-        rec_gen_layout.addWidget(self.combo_startup)
-        rec_gen_layout.addStretch()
+        startup_layout.addWidget(lbl_startup)
+        startup_layout.addWidget(self.combo_startup)
+        startup_layout.addStretch()
+
+        rec_gen_layout.addLayout(startup_layout)
+
+        chk_recovery = QCheckBox("Show Session Recovery Modal on Startup", grp_rec_gen)
+        chk_recovery.setChecked(self.prefs.get("show_session_recovery", True))
+        chk_recovery.setStyleSheet("color: #FFFFFF;")
+
+        def _on_toggle_recovery(val):
+            save_preferences({"show_session_recovery": val})
+            try:
+                from main_window import load_app_settings, save_app_settings
+                settings = load_app_settings()
+                settings["dont_ask_recovery_on_startup"] = not val
+                save_app_settings(settings)
+            except Exception:
+                pass
+
+        chk_recovery.toggled.connect(_on_toggle_recovery)
+        rec_gen_layout.addWidget(chk_recovery)
 
         gen_layout.addWidget(grp_rec_gen)
 
@@ -447,6 +471,7 @@ class PreferencesDialog(QDialog):
             }
         """)
         btn_install_addon.setToolTip("Install an add-on from a .zip package or .py file")
+        btn_install_addon.setEnabled(self.addon_manager is not None)
         btn_install_addon.clicked.connect(self._install_addon_clicked)
         ctrl_layout.addWidget(btn_install_addon)
 
@@ -456,6 +481,7 @@ class PreferencesDialog(QDialog):
         ctrl_layout.addWidget(btn_open_folder)
 
         btn_refresh = QPushButton("Refresh List", self.addons_tab)
+        btn_refresh.setEnabled(self.addon_manager is not None)
         btn_refresh.clicked.connect(self.populate_addons)
         ctrl_layout.addWidget(btn_refresh)
 
@@ -503,6 +529,12 @@ class PreferencesDialog(QDialog):
                 item.widget().deleteLater()
 
         self.addon_widgets.clear()
+        if not self.addon_manager:
+            lbl_empty = QLabel("Add-ons are unavailable because the Mesh Editor failed to load.")
+            lbl_empty.setStyleSheet("color: #FF5252; font-size: 13px; padding: 20px;")
+            self.scroll_layout.addWidget(lbl_empty)
+            return
+
         self.addon_manager.refresh_discovery()
 
         addons = self.addon_manager.discovered_addons.values()
@@ -518,6 +550,8 @@ class PreferencesDialog(QDialog):
             self.addon_widgets.append(item_widget)
 
     def _install_addon_clicked(self):
+        if not self.addon_manager:
+            return
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Install Add-on Package or Script",

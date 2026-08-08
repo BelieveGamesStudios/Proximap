@@ -834,6 +834,10 @@ class ViewerWrapperWidget(QFrame):
             self.mode_select.setMinimumWidth(200)
             self.bg_btn.setText("BG Color")
 
+        main_win = self.window()
+        if main_win and hasattr(main_win, "_position_overlay"):
+            main_win._position_overlay()
+
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             self.setStyleSheet("background-color: #213328; border: 2px dashed #00E676; border-radius: 8px;")
@@ -2341,7 +2345,7 @@ class MainWindow(QMainWindow):
         initial_controls = prefs.get("show_controls", True)
         self.viewer_widget.show_controls_cb.setChecked(initial_controls)
         self.viewer_widget.show_controls_cb.stateChanged.connect(self._on_show_controls_changed)
-        self.overlay_label.setVisible(initial_controls)
+        self.overlay_label.setVisible(False)
         if initial_controls:
             self._update_overlay_content()
         
@@ -2524,14 +2528,18 @@ class MainWindow(QMainWindow):
             return
 
         if index == 0:
-            # 3D Reconstruction Tab (Index 0): Hide Mode Notch & Setup Reconstruction Menus
+            # 3D Reconstruction Tab (Index 0): Hide Mode Notch & Layout Presets
             if hasattr(self.chrome_bar, "mode_notch") and self.chrome_bar.mode_notch:
                 self.chrome_bar.mode_notch.setVisible(False)
+            if hasattr(self.chrome_bar, "right_region") and self.chrome_bar.right_region:
+                self.chrome_bar.right_region.setVisible(False)
             self._setup_reconstruction_menu_actions()
         elif index == 1:
-            # Polyground Workspace Tab (Index 1): Show Mode Notch (Object/Edit) & Polyground Menus
+            # Polyground Workspace Tab (Index 1): Show Mode Notch & Layout Presets
             if hasattr(self.chrome_bar, "mode_notch") and self.chrome_bar.mode_notch:
                 self.chrome_bar.mode_notch.setVisible(True)
+            if hasattr(self.chrome_bar, "right_region") and self.chrome_bar.right_region:
+                self.chrome_bar.right_region.setVisible(True)
             self._setup_window_menu()
             self._setup_chrome_menu_actions()
 
@@ -2651,6 +2659,8 @@ class MainWindow(QMainWindow):
         a_fullscreen.setCheckable(True)
         a_fullscreen.setChecked(self.isFullScreen())
         a_fullscreen.triggered.connect(self._toggle_fullscreen)
+
+        self._setup_help_menu()
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
@@ -2876,17 +2886,16 @@ class MainWindow(QMainWindow):
             a_pref.triggered.connect(self._open_preferences_dialog)
 
         # 3. Help Menu
+        self._setup_help_menu()
+
+    def _setup_help_menu(self):
+        if not hasattr(self, "chrome_bar") or not self.chrome_bar:
+            return
         help_menu = self.chrome_bar.help_menu
         help_menu.clear()
 
-        a_docs = help_menu.addAction("Proximap Documentation")
-        a_docs.triggered.connect(lambda: QMessageBox.information(self, "Documentation", "Visit https://proximaxr.space for documentation."))
-
-        a_shortcuts = help_menu.addAction("Keyboard Shortcuts")
-        a_shortcuts.triggered.connect(lambda: QMessageBox.information(self, "Shortcuts", "Translate: W | Rotate: E | Scale: R\nUndo: Ctrl+Z | Redo: Ctrl+Y | Delete: Del"))
-
-        a_about = help_menu.addAction("About Proximap")
-        a_about.triggered.connect(lambda: QMessageBox.about(self, "About Proximap", "Proximap v1.0.0\nProximaXR Spatial Technologies\nContact: fumz@proximaxr.space"))
+        a_docs = help_menu.addAction("Quick start")
+        a_docs.triggered.connect(lambda: webbrowser.open("https://www.proximap.space/news/95e64147-f795-4a64-b2ea-f614b3e78489"))
 
     def _open_preferences_dialog(self):
         try:
@@ -4409,6 +4418,11 @@ class MainWindow(QMainWindow):
         if not meta:
             return
         
+        from preferences_dialog import load_preferences
+        prefs = load_preferences()
+        if not prefs.get("show_session_recovery", True):
+            return
+
         settings = load_app_settings()
         if settings.get("dont_ask_recovery_on_startup", False):
             return
@@ -5561,33 +5575,48 @@ class MainWindow(QMainWindow):
                 pass
         super().closeEvent(event)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._position_overlay()
+        QTimer.singleShot(100, self._position_overlay)
+        QTimer.singleShot(500, self._position_overlay)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_overlay()
 
     def _position_overlay(self):
-        if hasattr(self, 'overlay_label') and self.overlay_label.isVisible():
-            container_w = self.viewer_widget.container_area.width()
-            container_h = self.viewer_widget.container_area.height()
-            
-            label_w = self.overlay_label.width()
-            label_h = self.overlay_label.height()
-            if label_w <= 16 or label_h <= 16:
-                label_size = self.overlay_label.sizeHint()
-                label_w = label_size.width()
-                label_h = label_size.height()
-                
-            margin = 15
-            x = container_w - label_w - margin
-            y = container_h - label_h - margin
-            self.overlay_label.setGeometry(x, y, label_w, label_h)
-            self.overlay_label.raise_()
+        if not hasattr(self, 'overlay_label') or not hasattr(self, 'viewer_widget'):
+            return
+
+        should_show = self.viewer_widget.show_controls_cb.isChecked()
+        if not should_show:
+            self.overlay_label.setVisible(False)
+            return
+
+        container_w = self.viewer_widget.container_area.width()
+        container_h = self.viewer_widget.container_area.height()
+
+        if container_w <= 50 or container_h <= 50:
+            return
+
+        self._update_overlay_content()
+        size = self.overlay_label.sizeHint()
+        label_w = size.width()
+        label_h = size.height()
+
+        margin = 15
+        x = max(10, container_w - label_w - margin)
+        y = max(10, container_h - label_h - margin)
+        self.overlay_label.setGeometry(x, y, label_w, label_h)
+        self.overlay_label.setVisible(True)
+        self.overlay_label.raise_()
 
     def _on_show_controls_changed(self, state):
-        visible = (state == Qt.Checked.value or state == 2)
-        self.overlay_label.setVisible(visible)
-        if visible:
-            self._update_overlay_content()
+        visible = (state == Qt.Checked.value or state == 2 or state is True)
+        if not visible:
+            self.overlay_label.setVisible(False)
+        else:
             self._position_overlay()
 
     def _update_overlay_content(self):
