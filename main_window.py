@@ -4129,6 +4129,10 @@ class MainWindow(QMainWindow):
             )
             if reply == QMessageBox.Yes:
                 self._start_processing(resume_from_step=step)
+            else:
+                self._set_process_btn_state("ready" if len(self.image_list) > 0 else "idle")
+        else:
+            self._set_process_btn_state("ready" if len(self.image_list) > 0 else "idle")
 
     def _save_project(self):
         mvs_dir = self.viewer_widget.current_mvs_dir

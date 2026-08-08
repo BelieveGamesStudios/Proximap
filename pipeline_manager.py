@@ -834,7 +834,10 @@ class PipelineWorker(QThread):
         except Exception as e:
             self.log_message.emit(f"[WARNING] Could not check image dimensions: {e}. Defaulting to single camera model.")
 
-        if resume_requested and is_checkpoint_valid:
+        skip_features_and_matching = resume_requested and is_checkpoint_valid and self.resume_from_step in ["sparse_reconstruction", "dense_reconstruction", "features_matched"]
+        skip_features_only = resume_requested and is_checkpoint_valid and self.resume_from_step == "features_extracted"
+
+        if skip_features_and_matching:
             self.log_message.emit(
                 "[RESUME] Valid checkpoint database detected! "
                 "Skipping Step 2 (Feature Extraction) and Step 3 (Feature Matching)."
@@ -853,74 +856,86 @@ class PipelineWorker(QThread):
             self.progress_changed.emit(40)
 
         else:
-            # -----------------------------------------------------------------
-            # SIFT path: existing COLMAP feature_extractor + exhaustive_matcher
-            # -----------------------------------------------------------------
-            self.status_changed.emit("Step 2/9: Extracting SIFT Features...")
+            if skip_features_only:
+                self.log_message.emit(
+                    "[RESUME] SIFT features already extracted in database! "
+                    "Skipping Step 2 (Feature Extraction) and proceeding directly to Step 3 (Feature Matching)."
+                )
+                db_stats = self._query_colmap_database_stats(database_path)
+                if db_stats["feature_counts"]:
+                    self._feature_counts = db_stats["feature_counts"]
+                self._emit_feature_summary()
+                self.progress_changed.emit(25)
+            else:
+                # -----------------------------------------------------------------
+                # SIFT path: existing COLMAP feature_extractor + exhaustive_matcher
+                # -----------------------------------------------------------------
+                self.status_changed.emit("Step 2/9: Extracting SIFT Features...")
 
-            cmd_extract_gpu = [
-                colmap_exe, "feature_extractor",
-                "--database_path", database_path,
-                "--image_path", working_image_dir,
-                "--ImageReader.camera_model", "PINHOLE",
-                "--ImageReader.single_camera", single_camera_val,
-                "--SiftExtraction.use_gpu", "1",
-                "--SiftExtraction.max_image_size", str(colmap_max_image_size),
-                "--SiftExtraction.num_threads", str(num_threads),
-                "--SiftExtraction.max_num_features", str(colmap_max_num_features),
-                "--SiftExtraction.first_octave", str(colmap_first_octave),
-            ]
-            cmd_extract_cpu = [
-                colmap_exe, "feature_extractor",
-                "--database_path", database_path,
-                "--image_path", working_image_dir,
-                "--ImageReader.camera_model", "PINHOLE",
-                "--ImageReader.single_camera", single_camera_val,
-                "--SiftExtraction.use_gpu", "0",
-                "--SiftExtraction.max_image_size", str(colmap_max_image_size),
-                "--SiftExtraction.num_threads", str(num_threads),
-                "--SiftExtraction.max_num_features", str(colmap_max_num_features),
-                "--SiftExtraction.first_octave", str(colmap_first_octave),
-            ]
-            if self.has_plain_surfaces:
-                # Preview quality: lower SIFT thresholds as a best-effort fallback
-                additional_flags = [
-                    "--SiftExtraction.peak_threshold", "0.002",
-                    "--SiftExtraction.edge_threshold", "15"
+                cmd_extract_gpu = [
+                    colmap_exe, "feature_extractor",
+                    "--database_path", database_path,
+                    "--image_path", working_image_dir,
+                    "--ImageReader.camera_model", "PINHOLE",
+                    "--ImageReader.single_camera", single_camera_val,
+                    "--SiftExtraction.use_gpu", "1",
+                    "--SiftExtraction.max_image_size", str(colmap_max_image_size),
+                    "--SiftExtraction.num_threads", str(num_threads),
+                    "--SiftExtraction.max_num_features", str(colmap_max_num_features),
+                    "--SiftExtraction.first_octave", str(colmap_first_octave),
                 ]
-                cmd_extract_gpu.extend(additional_flags)
-                cmd_extract_cpu.extend(additional_flags)
-            self._feature_counts = []
-            if not self._run_with_gpu_fallback(
-                cmd_extract_gpu, cmd_extract_cpu, timeout=14400.0, env=colmap_env,
-                line_parser=self._parse_feature_extraction_line
-            ):
-                return False
+                cmd_extract_cpu = [
+                    colmap_exe, "feature_extractor",
+                    "--database_path", database_path,
+                    "--image_path", working_image_dir,
+                    "--ImageReader.camera_model", "PINHOLE",
+                    "--ImageReader.single_camera", single_camera_val,
+                    "--SiftExtraction.use_gpu", "0",
+                    "--SiftExtraction.max_image_size", str(colmap_max_image_size),
+                    "--SiftExtraction.num_threads", str(num_threads),
+                    "--SiftExtraction.max_num_features", str(colmap_max_num_features),
+                    "--SiftExtraction.first_octave", str(colmap_first_octave),
+                ]
+                if self.has_plain_surfaces:
+                    # Preview quality: lower SIFT thresholds as a best-effort fallback
+                    additional_flags = [
+                        "--SiftExtraction.peak_threshold", "0.002",
+                        "--SiftExtraction.edge_threshold", "15"
+                    ]
+                    cmd_extract_gpu.extend(additional_flags)
+                    cmd_extract_cpu.extend(additional_flags)
+                self._feature_counts = []
+                if not self._run_with_gpu_fallback(
+                    cmd_extract_gpu, cmd_extract_cpu, timeout=14400.0, env=colmap_env,
+                    line_parser=self._parse_feature_extraction_line
+                ):
+                    return False
 
-            db_stats = self._query_colmap_database_stats(database_path)
-            if db_stats["feature_counts"]:
-                self._feature_counts = db_stats["feature_counts"]
-            self._emit_feature_summary()
+                db_stats = self._query_colmap_database_stats(database_path)
+                if db_stats["feature_counts"]:
+                    self._feature_counts = db_stats["feature_counts"]
+                self._emit_feature_summary()
 
-            num_registered = db_stats["num_images"]
-            if num_registered < 2:
-                if len(self._feature_counts) >= 2:
-                    num_registered = len(self._feature_counts)
-                elif self._total_images >= 2:
-                    num_registered = self._total_images
-            if num_registered < 2:
-                self.log_message.emit(
-                    f"[ERROR] Only {num_registered} image(s) successfully registered in the database. "
-                    "Reconstruction requires at least 2 registered images. Aborting."
-                )
-                return False
-            elif num_registered < self._total_images:
-                self.log_message.emit(
-                    f"[WARNING] Only {num_registered} out of {self._total_images} images successfully registered. "
-                    "Some images may be skipped or corrupt."
-                )
+                num_registered = db_stats["num_images"]
+                if num_registered < 2:
+                    if len(self._feature_counts) >= 2:
+                        num_registered = len(self._feature_counts)
+                    elif self._total_images >= 2:
+                        num_registered = self._total_images
+                if num_registered < 2:
+                    self.log_message.emit(
+                        f"[ERROR] Only {num_registered} image(s) successfully registered in the database. "
+                        "Reconstruction requires at least 2 registered images. Aborting."
+                    )
+                    return False
+                elif num_registered < self._total_images:
+                    self.log_message.emit(
+                        f"[WARNING] Only {num_registered} out of {self._total_images} images successfully registered. "
+                        "Some images may be skipped or corrupt."
+                    )
 
-            self.progress_changed.emit(25)
+                self.progress_changed.emit(25)
+                self._backup_checkpoint("features_extracted")
 
             # Step 3: SIFT matching
             self.status_changed.emit("Step 3/9: Matching SIFT Features...")
@@ -1958,7 +1973,7 @@ class PipelineWorker(QThread):
             return False
 
     def _is_valid_checkpoint(self, db_path: str) -> bool:
-        """Checks if a COLMAP database exists and contains valid camera/image registration and verified feature matches."""
+        """Checks if a COLMAP database exists and contains valid camera/image registration or feature matches."""
         abs_db_path = os.path.abspath(db_path)
         if not os.path.exists(abs_db_path):
             return False
@@ -1969,10 +1984,8 @@ class PipelineWorker(QThread):
                 cur = conn.cursor()
                 cur.execute("SELECT COUNT(*) FROM images")
                 num_images = cur.fetchone()[0]
-                cur.execute("SELECT COUNT(*) FROM two_view_geometries WHERE rows > 0")
-                num_pairs = cur.fetchone()[0]
                 conn.close()
-                return num_images >= 2 and num_pairs >= 1
+                return num_images >= 2
             except Exception:
                 if attempt < 2:
                     time.sleep(0.3)
