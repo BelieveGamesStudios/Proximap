@@ -41,10 +41,9 @@ elif [ -f "app_icon.png" ]; then
 fi
 
 python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
-    --collect-all numpy --collect-all rembg --collect-all scipy \
-    --collect-all pymatting --collect-all vispy --collect-all imgui_bundle \
+    --collect-all numpy --collect-all scipy \
+    --collect-all vispy --collect-all imgui_bundle \
     --collect-all trimesh --collect-all pyrr --collect-all cv2 \
-    --collect-all mesh_editor --collect-all addons \
     --exclude-module PySide6.QtWebEngineCore \
     --exclude-module PySide6.QtWebEngineWidgets \
     --exclude-module PySide6.QtWebEngineQuick \
@@ -62,9 +61,7 @@ python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --exclude-module PySide6.QtSql \
     --exclude-module PySide6.QtXml \
     --exclude-module matplotlib \
-    --add-data "mesh_editor/shaders:mesh_editor/shaders" \
-    --add-data "addons:addons" \
-    --copy-metadata pymatting main_window.py
+    --add-data "mesh_editor/shaders:mesh_editor/shaders" main_window.py
 
 if [ ! -d "dist/Proximap.app" ]; then
     echo "PyInstaller compilation failed! 'dist/Proximap.app' not found."

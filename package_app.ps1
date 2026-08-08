@@ -57,9 +57,9 @@ $excludes = @(
 )
 
 if ($iconFlag) {
-    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --add-data "mesh_editor/shaders;mesh_editor/shaders" --copy-metadata pymatting $excludes main_window.py
+    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy --collect-all scipy --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --add-data "mesh_editor/shaders;mesh_editor/shaders" $excludes main_window.py
 } else {
-    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all rembg --collect-all scipy --collect-all pymatting --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --add-data "mesh_editor/shaders;mesh_editor/shaders" --copy-metadata pymatting $excludes main_window.py
+    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all scipy --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --add-data "mesh_editor/shaders;mesh_editor/shaders" $excludes main_window.py
 }
 
 

@@ -323,9 +323,6 @@ pip install --upgrade pip setuptools wheel
 
 # Install PyInstaller and core dependencies
 pip install PyInstaller pyside6 numpy scipy pillow psutil
-
-# Install optional deep learning models (for background removal)
-pip install rembg pymatting onnxruntime
 ```
 
 ### Create requirements.txt (Optional)
