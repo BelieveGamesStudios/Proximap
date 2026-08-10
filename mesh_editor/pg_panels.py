@@ -3,13 +3,13 @@ pg_panels.py - Modular panel components for the Polyground Mesh Editor docking w
 Contains OutlinerPanel, PropertiesPanel, StatsChip, and ToolShelfWidget.
 """
 
+import numpy as np
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton, 
     QFrame, QScrollArea, QListWidget, QSizePolicy, QToolButton
 )
-
 
 class OutlinerPanel(QWidget):
     """Outliner panel content displaying scene object hierarchy."""
@@ -180,6 +180,182 @@ class StatsChip(QFrame):
         if callable(self.get_stats_cb):
             verts, faces, tris = self.get_stats_cb()
             self.lbl_stats.setText(f"Verts: {verts:,}  |  Faces: {faces:,}  |  Tris: {tris:,}")
+
+
+class MeshInspectorCard(QFrame):
+    """
+    Native Mesh Inspector component anchored in the bottom-right corner of the OpenGL Viewport.
+    Displays Vertices, Faces (Tris), and Dimensions (X/Y/Z) for selected meshes in real-time.
+    """
+    def __init__(self, get_scene_cb, parent=None):
+        super().__init__(parent)
+        self.get_scene_cb = get_scene_cb
+        self.setObjectName("MeshInspectorCard")
+        self._init_ui()
+
+        # Update timer at 4Hz (250ms) to sync stats with viewport selection and transform changes
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.update_stats)
+        self.timer.start(250)
+
+    def _init_ui(self):
+        self.setStyleSheet("""
+            #MeshInspectorCard {
+                background-color: rgba(18, 18, 18, 0.85);
+                border: 1px solid #2D2D2D;
+                border-radius: 6px;
+                padding: 4px 8px;
+            }
+            #MeshInspectorCard:hover {
+                border-color: #00E676;
+            }
+            QLabel {
+                color: #CCCCCC;
+                font-family: 'JetBrains Mono', 'Courier New', monospace;
+                font-size: 10px;
+            }
+            QLabel#HeaderTitle {
+                color: #00E676;
+                font-weight: bold;
+                font-size: 10px;
+                letter-spacing: 0.5px;
+            }
+            QLabel#StatLabel {
+                color: #888888;
+                font-size: 10px;
+            }
+            QLabel#StatVal {
+                color: #FFFFFF;
+                font-weight: bold;
+                font-size: 10px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
+
+        # Header bar
+        lbl_header = QLabel("MESH INSPECTOR", self)
+        lbl_header.setObjectName("HeaderTitle")
+        layout.addWidget(lbl_header)
+
+        # Grid of metrics
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 2, 0, 2)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(2)
+
+        lbl_v = QLabel("Vertices:", self)
+        lbl_v.setObjectName("StatLabel")
+        self.lbl_verts = QLabel("0", self)
+        self.lbl_verts.setObjectName("StatVal")
+        grid.addWidget(lbl_v, 0, 0)
+        grid.addWidget(self.lbl_verts, 0, 1)
+
+        lbl_f = QLabel("Faces (Tris):", self)
+        lbl_f.setObjectName("StatLabel")
+        self.lbl_faces = QLabel("0", self)
+        self.lbl_faces.setObjectName("StatVal")
+        grid.addWidget(lbl_f, 1, 0)
+        grid.addWidget(self.lbl_faces, 1, 1)
+
+        lbl_d = QLabel("Size (X/Y/Z):", self)
+        lbl_d.setObjectName("StatLabel")
+        self.lbl_dims = QLabel("0 x 0 x 0 m", self)
+        self.lbl_dims.setObjectName("StatVal")
+        grid.addWidget(lbl_d, 2, 0)
+        grid.addWidget(self.lbl_dims, 2, 1)
+
+        layout.addLayout(grid)
+        self.update_stats()
+
+    def update_stats(self):
+        if not callable(self.get_scene_cb):
+            self._reset_labels()
+            return
+
+        scene = self.get_scene_cb()
+        if not scene:
+            self._reset_labels()
+            return
+
+        selected_objs = getattr(scene, "selected_objects", [])
+        if not selected_objs and hasattr(scene, "active_object") and scene.active_object:
+            selected_objs = [scene.active_object]
+
+        if not selected_objs:
+            self._reset_labels("Select a mesh")
+            return
+
+        total_verts = 0
+        total_faces = 0
+        min_bound = np.array([float('inf'), float('inf'), float('inf')])
+        max_bound = np.array([float('-inf'), float('-inf'), float('-inf')])
+
+        for obj in selected_objs:
+            # Case 1: Proximap Scene Object with obj.mesh
+            if hasattr(obj, "mesh") and obj.mesh is not None:
+                mesh = obj.mesh
+                if hasattr(mesh, "vertices") and mesh.vertices is not None and len(mesh.vertices) > 0:
+                    verts_count = len(mesh.vertices) // 3 if (isinstance(mesh.vertices, np.ndarray) and mesh.vertices.ndim == 1) else len(mesh.vertices)
+                    indices = getattr(mesh, "indices", None)
+                    faces_count = (len(indices) // 3 if (indices is not None and isinstance(indices, np.ndarray) and indices.ndim == 1) else len(indices)) if indices is not None else 0
+
+                    total_verts += verts_count
+                    total_faces += faces_count
+
+                    if hasattr(obj, "get_world_aabb"):
+                        w_min, w_max = obj.get_world_aabb()
+                        min_bound = np.minimum(min_bound, w_min)
+                        max_bound = np.maximum(max_bound, w_max)
+                    else:
+                        scaled_verts = (mesh.vertices.reshape(-1, 3) if mesh.vertices.ndim == 1 else mesh.vertices) * np.array(getattr(obj, "scale", [1, 1, 1]))
+                        min_bound = np.minimum(min_bound, scaled_verts.min(axis=0))
+                        max_bound = np.maximum(max_bound, scaled_verts.max(axis=0))
+
+            # Case 2: obj has mesh_data attribute
+            elif hasattr(obj, "mesh_data") and obj.mesh_data is not None:
+                verts = obj.mesh_data.vertices
+                faces = getattr(obj.mesh_data, "faces", getattr(obj.mesh_data, "indices", None))
+                verts_count = len(verts) // 3 if (isinstance(verts, np.ndarray) and verts.ndim == 1) else len(verts)
+                faces_count = (len(faces) // 3 if (faces is not None and isinstance(faces, np.ndarray) and faces.ndim == 1) else len(faces)) if faces is not None else 0
+                total_verts += verts_count
+                total_faces += faces_count
+
+                if verts_count > 0:
+                    scale = np.array(getattr(obj, "scale", [1, 1, 1]))
+                    scaled_verts = (verts.reshape(-1, 3) if verts.ndim == 1 else verts) * scale
+                    min_bound = np.minimum(min_bound, scaled_verts.min(axis=0))
+                    max_bound = np.maximum(max_bound, scaled_verts.max(axis=0))
+
+            # Case 3: Direct vertices attribute
+            elif hasattr(obj, "vertices") and obj.vertices is not None and len(obj.vertices) > 0:
+                verts = obj.vertices
+                faces = getattr(obj, "faces", None)
+                verts_count = len(verts) // 3 if (isinstance(verts, np.ndarray) and verts.ndim == 1) else len(verts)
+                faces_count = (len(faces) // 3 if (faces is not None and isinstance(faces, np.ndarray) and faces.ndim == 1) else len(faces)) if faces is not None else 0
+                total_verts += verts_count
+                total_faces += faces_count
+
+                scale = np.array(getattr(obj, "scale", [1, 1, 1]))
+                scaled_verts = (verts.reshape(-1, 3) if (isinstance(verts, np.ndarray) and verts.ndim == 1) else np.array(verts)) * scale
+                min_bound = np.minimum(min_bound, scaled_verts.min(axis=0))
+                max_bound = np.maximum(max_bound, scaled_verts.max(axis=0))
+
+        if total_verts == 0 or np.isinf(min_bound[0]):
+            self._reset_labels("Select a mesh")
+            return
+
+        dims = max_bound - min_bound
+        self.lbl_verts.setText(f"{total_verts:,}")
+        self.lbl_faces.setText(f"{total_faces:,}")
+        self.lbl_dims.setText(f"{dims[0]:.2f} x {dims[1]:.2f} x {dims[2]:.2f} m")
+
+    def _reset_labels(self, status: str = "Select a mesh"):
+        self.lbl_verts.setText("0")
+        self.lbl_faces.setText("0")
+        self.lbl_dims.setText(status)
 
 
 class ToolShelfWidget(QWidget):

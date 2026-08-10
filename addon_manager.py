@@ -56,8 +56,7 @@ class AddonManager(QObject):
                 print(f"[ADDONS] Warning: Failed to read addon preferences: {e}")
                 self.enabled_states = {}
         else:
-            # Default state: mesh_inspector enabled by default
-            self.enabled_states = {"mesh_inspector": True}
+            self.enabled_states = {}
 
     def save_prefs(self):
         prefs_file = get_addon_prefs_file()
@@ -183,8 +182,7 @@ class AddonManager(QObject):
         self.refresh_discovery()
 
         for addon_id, cls in self.discovered_addons.items():
-            # Check enabled state, default to enabled for mesh_inspector if missing
-            should_enable = self.enabled_states.get(addon_id, (addon_id == "mesh_inspector"))
+            should_enable = self.enabled_states.get(addon_id, False)
             if should_enable:
                 self.enable_addon(addon_id)
 

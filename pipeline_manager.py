@@ -1398,6 +1398,19 @@ class PipelineWorker(QThread):
                 "--global-seam-leveling", "0",       # Force turns off global color adjustment
             ]
             self._run_process_realtime(cmd_obj, timeout=1800.0, cwd=mvs_out, env=env)
+
+            # Auto-export GLB via trimesh so scene_dense_mesh_texture.glb is immediately available
+            try:
+                import trimesh
+                obj_file = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+                glb_file = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
+                if os.path.exists(obj_file):
+                    self.log_message.emit("[INFO] Pre-generating textured GLB mesh...")
+                    mesh_obj = trimesh.load(obj_file)
+                    mesh_obj.export(glb_file, file_type="glb")
+                    self.log_message.emit(f"[SUCCESS] GLB mesh successfully generated: {os.path.basename(glb_file)}")
+            except Exception as e:
+                self.log_message.emit(f"[WARNING] Automatic GLB conversion from OBJ skipped: {e}")
         else:
             self.log_message.emit("[WARNING] TextureMesh PLY pass failed. Skipping OBJ export pass.")
 

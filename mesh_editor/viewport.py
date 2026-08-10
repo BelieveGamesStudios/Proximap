@@ -90,11 +90,25 @@ class MeshEditorViewport(QOpenGLWidget):
         # Sync initial orientation
         self.nav_gizmo.update_orientation(self.camera.yaw, self.camera.pitch)
 
+        # Native Mesh Inspector Overlay Widget anchored in bottom-right corner
+        from mesh_editor.pg_panels import MeshInspectorCard
+        self.mesh_inspector = MeshInspectorCard(lambda: self.scene, self)
+        self.mesh_inspector.show()
+
+        self.selection_changed.connect(lambda *_: self.mesh_inspector.update_stats() if hasattr(self, "mesh_inspector") else None)
+        self.transform_changed.connect(lambda *_: self.mesh_inspector.update_stats() if hasattr(self, "mesh_inspector") else None)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        margin = 10
         if hasattr(self, 'nav_gizmo') and self.nav_gizmo:
-            margin = 10
             self.nav_gizmo.move(self.width() - self.nav_gizmo.width() - margin, margin)
+        if hasattr(self, 'mesh_inspector') and self.mesh_inspector:
+            insp_size = self.mesh_inspector.sizeHint()
+            x_pos = self.width() - insp_size.width() - margin
+            y_pos = self.height() - insp_size.height() - margin
+            self.mesh_inspector.move(max(margin, x_pos), max(margin, y_pos))
+            self.mesh_inspector.raise_()
 
     def _on_nav_gizmo_snap_requested(self, view_name):
         self.camera.snap_to_view(view_name)

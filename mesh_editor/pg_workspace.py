@@ -10,20 +10,22 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QFrame, QComboBox
 import PySide6QtAds as ads
 
-from mesh_editor.pg_panels import OutlinerPanel, PropertiesPanel, StatsChip, ToolShelfWidget
+from mesh_editor.pg_panels import OutlinerPanel, PropertiesPanel, StatsChip, MeshInspectorCard, ToolShelfWidget
 
 
 class ViewportDockContainer(QWidget):
     """
     Wrapper container for the QOpenGLWidget viewport, StatsChip corner overlay,
-    and Object Mode / Edit Mode dropdown notch overlay anchored in top-left.
+    Object Mode / Edit Mode dropdown notch overlay anchored in top-left,
+    and native MeshInspectorCard anchored in bottom-right.
     """
     mode_changed = Signal(str)
 
-    def __init__(self, viewport_widget: QWidget, get_stats_cb, parent=None):
+    def __init__(self, viewport_widget: QWidget, get_stats_cb, get_scene_cb=None, parent=None):
         super().__init__(parent)
         self.viewport_widget = viewport_widget
         self.get_stats_cb = get_stats_cb
+        self.get_scene_cb = get_scene_cb if get_scene_cb is not None else (lambda: getattr(viewport_widget, 'scene', None))
         self._init_ui()
 
     def _init_ui(self):
@@ -76,6 +78,10 @@ class ViewportDockContainer(QWidget):
         self.stats_chip = StatsChip(self.get_stats_cb, self)
         self.stats_chip.show()
 
+        # Native Mesh Inspector Card anchored in bottom-right corner
+        self.mesh_inspector = MeshInspectorCard(self.get_scene_cb, self)
+        self.mesh_inspector.show()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         margin = 12
@@ -88,6 +94,13 @@ class ViewportDockContainer(QWidget):
         y_pos = self.height() - chip_size.height() - margin
         self.stats_chip.move(margin, max(margin, y_pos))
         self.stats_chip.raise_()
+
+        # Position Mesh Inspector card in bottom-right with 12px margin
+        insp_size = self.mesh_inspector.sizeHint()
+        x_pos = self.width() - insp_size.width() - margin
+        y_pos_insp = self.height() - insp_size.height() - margin
+        self.mesh_inspector.move(max(margin, x_pos), max(margin, y_pos_insp))
+        self.mesh_inspector.raise_()
 
 
 class PolygroundWorkspace(QWidget):
@@ -158,8 +171,25 @@ class PolygroundWorkspace(QWidget):
         self.is_initialized = True
 
         # 1. Viewport Dock (Non-floatable to prevent QOpenGLWidget context destruction)
-        self.viewport_container = ViewportDockContainer(self.editor.viewport, self._get_stats, self)
+        self.viewport_container = ViewportDockContainer(
+            self.editor.viewport, 
+            self._get_stats, 
+            lambda: getattr(self.editor.viewport, 'scene', None), 
+            self
+        )
         self.viewport_container.mode_changed.connect(self._on_mode_changed)
+
+        if hasattr(self.editor, 'viewport'):
+            if hasattr(self.editor.viewport, 'selection_changed'):
+                try:
+                    self.editor.viewport.selection_changed.connect(lambda *_: self.viewport_container.mesh_inspector.update_stats())
+                except Exception:
+                    pass
+            if hasattr(self.editor.viewport, 'transform_changed'):
+                try:
+                    self.editor.viewport.transform_changed.connect(lambda *_: self.viewport_container.mesh_inspector.update_stats())
+                except Exception:
+                    pass
         viewport_dock = ads.CDockWidget("3D Viewport", self)
         viewport_dock.setWidget(self.viewport_container)
         viewport_dock.setFeature(ads.CDockWidget.DockWidgetFloatable, False)

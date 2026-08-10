@@ -1770,6 +1770,9 @@ class MainWindow(QMainWindow):
         self.badge.setAlignment(Qt.AlignCenter)
         self._update_system_badge()
         
+        self.browse_files_btn = QPushButton("Select Images/Videos", step1_box)
+        self.browse_files_btn.clicked.connect(self._open_files_dialog)
+
         self.browse_btn = QPushButton("Select Images/Videos Directory", step1_box)
         self.browse_btn.clicked.connect(self._open_dir_dialog)
         
@@ -1860,6 +1863,7 @@ class MainWindow(QMainWindow):
         step1_layout.addWidget(self.img_count_label)
         step1_layout.addWidget(self.camera_label)
         step1_layout.addWidget(self.badge)
+        step1_layout.addWidget(self.browse_files_btn)
         step1_layout.addWidget(self.browse_btn)
         step1_layout.addWidget(self.mobile_import_btn)
         step1_layout.addWidget(self.addon_container)
@@ -3037,6 +3041,54 @@ class MainWindow(QMainWindow):
             if images or videos:
                 self._route_import(images, videos, append_to_existing=True)
 
+    def _open_files_dialog(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select Images/Videos", self.last_accessed_dir, 
+            "Supported Files (*.png *.jpg *.jpeg *.tif *.tiff *.mp4 *.mov *.avi *.mkv);;Image Files (*.png *.jpg *.jpeg *.tif *.tiff);;Video Files (*.mp4 *.mov *.avi *.mkv)"
+        )
+        if files:
+            self.last_accessed_dir = os.path.dirname(files[0])
+            images = []
+            videos = []
+            ignored = []
+            for f in files:
+                normalized = os.path.normpath(f)
+                ext = os.path.splitext(normalized)[1].lower()
+                if ext in IMAGE_EXTS:
+                    images.append(normalized)
+                elif ext in VIDEO_EXTS:
+                    videos.append(normalized)
+                else:
+                    ignored.append(os.path.basename(normalized))
+            if ignored:
+                self._warn_ignored_files(ignored)
+            if images or videos:
+                self._route_import(images, videos, append_to_existing=False)
+
+    def _open_files_dialog(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select Images/Videos", self.last_accessed_dir, 
+            "Supported Files (*.png *.jpg *.jpeg *.tif *.tiff *.mp4 *.mov *.avi *.mkv);;Image Files (*.png *.jpg *.jpeg *.tif *.tiff);;Video Files (*.mp4 *.mov *.avi *.mkv)"
+        )
+        if files:
+            self.last_accessed_dir = os.path.dirname(files[0])
+            images = []
+            videos = []
+            ignored = []
+            for f in files:
+                normalized = os.path.normpath(f)
+                ext = os.path.splitext(normalized)[1].lower()
+                if ext in IMAGE_EXTS:
+                    images.append(normalized)
+                elif ext in VIDEO_EXTS:
+                    videos.append(normalized)
+                else:
+                    ignored.append(os.path.basename(normalized))
+            if ignored:
+                self._warn_ignored_files(ignored)
+            if images or videos:
+                self._route_import(images, videos, append_to_existing=False)
+
     def _open_dir_dialog(self):
         dir_path = QFileDialog.getExistingDirectory(self, "Select Images/Videos Folder", self.last_accessed_dir)
         if dir_path:
@@ -3263,6 +3315,7 @@ class MainWindow(QMainWindow):
         # self.ref_cloud_btn.setEnabled(False)
         
         # 3. Disable images directory browse/mobile import
+        self.browse_files_btn.setEnabled(False)
         self.browse_btn.setEnabled(False)
         self.mobile_import_btn.setEnabled(False)
 
@@ -3286,6 +3339,7 @@ class MainWindow(QMainWindow):
 
     def _exit_standalone_mode(self):
         # 1. Enable main buttons again
+        self.browse_files_btn.setEnabled(True)
         self.browse_btn.setEnabled(True)
         self.mobile_import_btn.setEnabled(True)
         # self.ref_cloud_btn.setEnabled(True)
@@ -3319,6 +3373,7 @@ class MainWindow(QMainWindow):
         self._cleanup_extraction_ui(cancelled=True)
 
     def _cleanup_extraction_ui(self, cancelled=False):
+        self.browse_files_btn.setEnabled(True)
         self.browse_btn.setEnabled(True)
         self.mobile_import_btn.setEnabled(True)
         
@@ -3336,6 +3391,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Extraction failed.")
 
     def _on_all_extractions_finished(self):
+        self.browse_files_btn.setEnabled(True)
         self.browse_btn.setEnabled(True)
         self.mobile_import_btn.setEnabled(True)
         
@@ -3600,6 +3656,7 @@ class MainWindow(QMainWindow):
 
         
         self._set_process_btn_state("progress")
+        self.browse_files_btn.setEnabled(False)
         self.browse_btn.setEnabled(False)
         self.mobile_import_btn.setEnabled(False)
         self._set_export_actions_enabled(False)
@@ -3663,6 +3720,7 @@ class MainWindow(QMainWindow):
         if image_dir is None:
             self.console_text.append("[ERROR] Could not stage images. Aborting reconstruction.")
             self._set_process_btn_state("ready")
+            self.browse_files_btn.setEnabled(True)
             self.browse_btn.setEnabled(True)
             self.mobile_import_btn.setEnabled(True)
             # self.ref_cloud_btn.setEnabled(True)
@@ -3787,6 +3845,7 @@ class MainWindow(QMainWindow):
             self._update_file_menu_states()
             return
 
+        self.browse_files_btn.setEnabled(True)
         self.browse_btn.setEnabled(True)
         self.mobile_import_btn.setEnabled(True)
         self.view_scene_btn.setEnabled(True)
@@ -3935,18 +3994,32 @@ class MainWindow(QMainWindow):
                     shutil.copy2(src_glb, file_path)
                     self.console_text.append(f"[EXPORT] GLB mesh successfully written to {file_path}")
                 elif os.path.exists(src_obj):
-                    self.console_text.append("[INFO] Converting OBJ to GLB using obj2gltf...")
+                    self.console_text.append("[INFO] Converting OBJ to GLB using trimesh...")
                     try:
-                        import subprocess
-                        import sys
-                        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-                        # Run obj2gltf to convert obj to glb with embedded textures (-b)
-                        subprocess.run(["obj2gltf", "-i", src_obj, "-o", file_path, "-b"], capture_output=True, text=True, check=True, shell=True, creationflags=creationflags)
+                        import trimesh
+                        mesh_obj = trimesh.load(src_obj)
+                        mesh_obj.export(file_path, file_type="glb")
                         self.console_text.append(f"[EXPORT] GLB mesh successfully written to {file_path}")
                     except Exception as e:
-                        self.console_text.append(f"[ERROR] Failed to convert to GLB. Ensure Node.js and obj2gltf are installed: {e}")
+                        self.console_text.append(f"[ERROR] Failed to convert OBJ to GLB: {e}")
                 else:
-                    self.console_text.append(f"[ERROR] Could not find reconstructed GLB or OBJ file at {mvs_out}")
+                    src_ply = None
+                    for candidate in ["scene_dense_mesh_texture.ply", "scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+                        path = os.path.join(mvs_out, candidate)
+                        if os.path.exists(path):
+                            src_ply = path
+                            break
+                    if src_ply:
+                        self.console_text.append("[INFO] Converting PLY mesh to GLB using trimesh...")
+                        try:
+                            import trimesh
+                            mesh_ply = trimesh.load(src_ply, force="mesh")
+                            mesh_ply.export(file_path, file_type="glb")
+                            self.console_text.append(f"[EXPORT] GLB mesh successfully written to {file_path}")
+                        except Exception as e:
+                            self.console_text.append(f"[ERROR] Failed to convert PLY to GLB: {e}")
+                    else:
+                        self.console_text.append(f"[ERROR] Could not find any reconstructed mesh files at {mvs_out}")
             elif fmt == ".usdz":
                 src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
                 src_glb = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
@@ -5276,16 +5349,31 @@ class MainWindow(QMainWindow):
             if os.path.exists(src_obj):
                 self.console_text.append("[BRIDGE] Pre-converting reconstructed OBJ to GLB for upload...")
                 try:
-                    import subprocess
-                    import sys
-                    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-                    subprocess.run(["obj2gltf", "-i", src_obj, "-o", src_glb, "-b"], capture_output=True, text=True, check=True, shell=True, creationflags=creationflags)
+                    import trimesh
+                    mesh_obj = trimesh.load(src_obj)
+                    mesh_obj.export(src_glb, file_type="glb")
                 except Exception as e:
-                    self.console_text.append(f"[BRIDGE ERROR] Could not convert model to GLB. Ensure obj2gltf is installed: {e}")
+                    self.console_text.append(f"[BRIDGE ERROR] Could not convert model to GLB: {e}")
                     return
             else:
-                self.console_text.append("[BRIDGE ERROR] No reconstructed mesh found. Please run reconstruction first.")
-                return
+                src_ply = None
+                for candidate in ["scene_dense_mesh_texture.ply", "scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+                    path = os.path.join(mvs_out, candidate)
+                    if os.path.exists(path):
+                        src_ply = path
+                        break
+                if src_ply:
+                    self.console_text.append("[BRIDGE] Pre-converting reconstructed PLY to GLB for upload...")
+                    try:
+                        import trimesh
+                        mesh_ply = trimesh.load(src_ply, force="mesh")
+                        mesh_ply.export(src_glb, file_type="glb")
+                    except Exception as e:
+                        self.console_text.append(f"[BRIDGE ERROR] Could not convert model to GLB: {e}")
+                        return
+                else:
+                    self.console_text.append("[BRIDGE ERROR] No reconstructed mesh found. Please run reconstruction first.")
+                    return
 
         self.console_text.append(f"[BRIDGE] Initializing local server to host model: {src_glb}")
         
@@ -5499,7 +5587,22 @@ class MainWindow(QMainWindow):
         if fmt == ".glb":
             target_file = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
             if not os.path.exists(target_file):
-                target_file = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+                src_obj = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+                src_ply = None
+                for candidate in ["scene_dense_mesh_texture.ply", "scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+                    path = os.path.join(mvs_out, candidate)
+                    if os.path.exists(path):
+                        src_ply = path
+                        break
+                src = src_obj if os.path.exists(src_obj) else src_ply
+                if src:
+                    try:
+                        self.console_text.append("[MOBILE BRIDGE] Pre-converting reconstructed mesh to GLB...")
+                        import trimesh
+                        mesh = trimesh.load(src, force="mesh") if src.endswith(".ply") else trimesh.load(src)
+                        mesh.export(target_file, file_type="glb")
+                    except Exception as e:
+                        self.console_text.append(f"[ERROR] Failed to convert mesh to GLB for mobile export: {e}")
         elif fmt == ".obj":
             target_file = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
         elif fmt == ".usdz":

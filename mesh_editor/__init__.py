@@ -514,6 +514,7 @@ class MeshEditorWidget(QWidget):
         addon_vlayout.addWidget(self.addon_container)
         
         scroll_layout.addWidget(self.addon_box, stretch=0)
+        self.update_addon_panels()
 
         
         scroll_area.setWidget(scroll_content)
@@ -1739,8 +1740,6 @@ class MeshEditorWidget(QWidget):
             self.addon_container_layout.addWidget(collapsible_card)
             panel_added = True
 
-        if not panel_added:
-            lbl_hint = QLabel("<i>No active add-ons. Manage in Edit → Preferences</i>", self.addon_container)
-            lbl_hint.setStyleSheet("color: #666666; font-size: 10px; border: none; margin-top: 4px;")
-            self.addon_container_layout.addWidget(lbl_hint)
+        if hasattr(self, "addon_box"):
+            self.addon_box.setVisible(panel_added)
 
