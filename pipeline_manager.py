@@ -1082,6 +1082,9 @@ class PipelineWorker(QThread):
             if db_stats["match_counts"]:
                 self._match_counts = db_stats["match_counts"]
             self._emit_matching_summary(database_path)
+            if self._total_images > 1 and db_stats["num_pairs"] == 0:
+                self._emit_no_verified_pairs_failure(database_path, db_stats)
+                return False
             self.progress_changed.emit(40)
             self._backup_checkpoint("features_extracted")
 
@@ -2119,6 +2122,8 @@ class PipelineWorker(QThread):
         stats = {
             "num_images": 0,
             "feature_counts": [],
+            "raw_num_pairs": 0,
+            "raw_match_counts": [],
             "num_pairs": 0,
             "match_counts": [],
         }
@@ -2143,6 +2148,12 @@ class PipelineWorker(QThread):
                     stats["feature_counts"].append(row[1])
                 
                 # Match counts per pair (from two_view_geometries, which has verified matches)
+                cursor.execute("SELECT pair_id, rows FROM matches WHERE rows > 0")
+                for row in cursor.fetchall():
+                    stats["raw_num_pairs"] += 1
+                    stats["raw_match_counts"].append(row[1])
+
+                # Match counts per pair (from two_view_geometries, which has verified matches)
                 cursor.execute("SELECT pair_id, rows FROM two_view_geometries WHERE rows > 0")
                 for row in cursor.fetchall():
                     stats["num_pairs"] += 1
@@ -2157,6 +2168,60 @@ class PipelineWorker(QThread):
                     self.log_message.emit(f"[WARNING] Could not read COLMAP database ({abs_db_path}): {e}")
         
         return stats
+
+    def _emit_no_verified_pairs_failure(self, db_path: str, db_stats: dict):
+        """Explain a zero-match COLMAP database before mapper emits a vague SfM failure."""
+        low_feature_rows = []
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT images.name, keypoints.rows
+                FROM images
+                JOIN keypoints ON images.image_id = keypoints.image_id
+                ORDER BY keypoints.rows ASC
+                LIMIT 5
+                """
+            )
+            low_feature_rows = cursor.fetchall()
+            conn.close()
+        except Exception:
+            low_feature_rows = []
+
+        raw_pairs = db_stats.get("raw_num_pairs", 0)
+        raw_matches = sum(db_stats.get("raw_match_counts", []))
+        verified_pairs = db_stats.get("num_pairs", 0)
+
+        if raw_pairs == 0:
+            match_reason = (
+                "COLMAP did not find raw descriptor matches between the imported images."
+            )
+        else:
+            match_reason = (
+                f"COLMAP found {raw_matches:,} raw matches across {raw_pairs} pair(s), "
+                "but all failed geometric verification."
+            )
+
+        low_feature_text = ""
+        if low_feature_rows:
+            formatted = ", ".join(
+                f"{os.path.basename(str(name))}: {int(rows):,} features"
+                for name, rows in low_feature_rows
+            )
+            low_feature_text = f"\n  Lowest-feature images: {formatted}"
+
+        self.log_message.emit(
+            "[FAILED] Feature matching produced 0 verified image pairs, so SfM cannot start.\n"
+            f"  Images in database: {db_stats.get('num_images', 0)}\n"
+            f"  Raw matched pairs: {raw_pairs}\n"
+            f"  Verified matched pairs: {verified_pairs}\n"
+            f"  Diagnosis: {match_reason}"
+            f"{low_feature_text}\n"
+            "  Fix: use a real overlapping photo sequence of the same scene/object, "
+            "avoid flat/blurred/generated screenshots, and aim for 60-80% overlap between neighboring shots."
+        )
 
     def _emit_feature_summary(self):
         if not self._feature_counts:
@@ -2364,5 +2429,4 @@ class PipelineWorker(QThread):
             import traceback
             self.log_message.emit(traceback.format_exc())
             return False
-
 

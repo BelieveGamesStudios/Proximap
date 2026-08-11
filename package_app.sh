@@ -8,6 +8,21 @@ echo "============================================="
 echo " Starting Proximap Commercial Packaging (macOS)"
 echo "============================================="
 
+PYTHON_BIN="${PYTHON_BIN:-}"
+if [ -z "$PYTHON_BIN" ]; then
+    if [ -x ".venv/bin/python" ]; then
+        PYTHON_BIN=".venv/bin/python"
+    else
+        PYTHON_BIN="python3"
+    fi
+fi
+
+if ! "$PYTHON_BIN" -m PyInstaller --version > /dev/null 2>&1; then
+    echo "[ERROR] PyInstaller is not installed for: $PYTHON_BIN"
+    echo "        Install dependencies in the project virtualenv, or run with PYTHON_BIN=/path/to/python."
+    exit 1
+fi
+
 # 1. Cleanup old build directories and logs
 echo "[1/5] Cleaning up old build/dist files and logs..."
 rm -rf build dist *.log
@@ -40,7 +55,7 @@ elif [ -f "app_icon.png" ]; then
     fi
 fi
 
-python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
+"$PYTHON_BIN" -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all numpy --collect-all scipy \
     --collect-all vispy --collect-all imgui_bundle \
     --collect-all trimesh --collect-all pyrr --collect-all cv2 \

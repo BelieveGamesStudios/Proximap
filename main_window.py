@@ -10,7 +10,7 @@ try:
         QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
         QLabel, QPushButton, QProgressBar, QRadioButton, QButtonGroup,
         QFrame, QFileDialog, QTextEdit, QStackedWidget, QComboBox,
-        QScrollArea, QTabWidget, QGridLayout, QCheckBox, QSlider,
+        QScrollArea, QTabWidget, QGridLayout, QCheckBox, QSlider, QStackedLayout,
         QMessageBox, QDialog, QColorDialog, QMenu, QSizePolicy, QInputDialog,
         QLineEdit, QSpinBox, QDoubleSpinBox
     )
@@ -28,6 +28,36 @@ except ModuleNotFoundError as e:
 
 from vispy import app, scene
 app.use_app("pyside6")
+
+def force_opaque_background(widget, color: str):
+    palette = widget.palette()
+    palette.setColor(QPalette.Window, QColor(color))
+    widget.setPalette(palette)
+    widget.setAutoFillBackground(True)
+    widget.setAttribute(Qt.WA_StyledBackground, True)
+
+class OpaqueWidget(QWidget):
+    def __init__(self, color: str = "#121212", parent=None):
+        super().__init__(parent)
+        self._opaque_color = QColor(color)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self._opaque_color)
+        painter.end()
+        super().paintEvent(event)
+
+
+class OpaqueLabel(QLabel):
+    def __init__(self, text: str = "", color: str = "#101010", parent=None):
+        super().__init__(text, parent)
+        self._opaque_color = QColor(color)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self._opaque_color)
+        painter.end()
+        super().paintEvent(event)
 
 def get_base_dir():
     if getattr(sys, 'frozen', False):
@@ -168,7 +198,7 @@ def is_session_backup_valid() -> bool:
 
 
 from PySide6.QtCore import Qt, QSize, Signal, QTimer, QThread
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QFont, QWindow, QPixmap, QImage
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QFont, QWindow, QPixmap, QImage, QColor, QPalette, QPainter
 
 import hardware_profiler
 
@@ -637,8 +667,10 @@ class ViewerWrapperWidget(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._opaque_color = QColor("#1A1A1A")
         self.setAcceptDrops(True)
         self.setObjectName("ViewerWrapperWidget")
+        force_opaque_background(self, "#1A1A1A")
         self.setStyleSheet("background-color: #1A1A1A; border: 1px solid #2B2B2B; border-radius: 8px;")
         
         # Main layout
@@ -794,15 +826,20 @@ class ViewerWrapperWidget(QFrame):
         layout.addWidget(self.control_bar)
         
         # Container for the embedded window
-        self.container_area = QWidget(self)
-        self.container_area_layout = QVBoxLayout(self.container_area)
+        self.container_area = OpaqueWidget("#101010", self)
+        force_opaque_background(self.container_area, "#101010")
+        self.container_area.setStyleSheet("background-color: #101010; border: none;")
+        self.container_area_layout = QStackedLayout(self.container_area)
         self.container_area_layout.setContentsMargins(0, 0, 0, 0)
         self.container_area_layout.setSpacing(0)
+        self._canvas_widget = None
         
         # A simple fallback label when no viewer is running
-        self.fallback_label = QLabel("Drag Images/Videos Here or Process to View 3D Scene", self.container_area)
+        self.fallback_label = OpaqueLabel("Drag Images/Videos Here or Process to View 3D Scene", "#101010", self.container_area)
         self.fallback_label.setAlignment(Qt.AlignCenter)
-        self.fallback_label.setStyleSheet("color: #737373; font-size: 14px;")
+        self.fallback_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        force_opaque_background(self.fallback_label, "#101010")
+        self.fallback_label.setStyleSheet("background-color: #101010; color: #737373; font-size: 14px;")
         self.container_area_layout.addWidget(self.fallback_label)
         
         layout.addWidget(self.container_area)
@@ -813,6 +850,34 @@ class ViewerWrapperWidget(QFrame):
         self.cam_select.currentIndexChanged.connect(self.camera_changed.emit)
         
         self.current_mvs_dir = None
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self._opaque_color)
+        painter.end()
+        super().paintEvent(event)
+
+    def set_canvas_widget(self, widget):
+        self._canvas_widget = widget
+        widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        widget.hide()
+        self.container_area_layout.addWidget(widget)
+        self.show_fallback()
+
+    def show_fallback(self, text: str = None):
+        if text is not None:
+            self.fallback_label.setText(text)
+        self.fallback_label.show()
+        if self._canvas_widget is not None:
+            self._canvas_widget.hide()
+        self.container_area_layout.setCurrentWidget(self.fallback_label)
+
+    def show_canvas(self):
+        if self._canvas_widget is None:
+            return
+        self.container_area_layout.setCurrentWidget(self._canvas_widget)
+        self.fallback_label.hide()
+        self._canvas_widget.show()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1167,6 +1232,10 @@ class PhotosGridWidget(QWidget):
     """
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._opaque_color = QColor("#121212")
+        self.setObjectName("PhotosGrid")
+        force_opaque_background(self, "#121212")
+        self.setStyleSheet("background-color: #121212;")
         self.layout = QGridLayout(self)
         self.layout.setSpacing(10)
         self.layout.setContentsMargins(10, 10, 10, 10)
@@ -1175,6 +1244,12 @@ class PhotosGridWidget(QWidget):
         self.thumbnail_size = 100
         self.item_widgets = {}  # Map path -> PhotoItemWidget for dynamic updates
         self.current_cols = 0
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self._opaque_color)
+        painter.end()
+        super().paintEvent(event)
         
     def set_images(self, image_paths):
         self.image_paths = image_paths
@@ -1253,10 +1328,20 @@ class PhotosTabWidget(QWidget):
     """
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._opaque_color = QColor("#121212")
+        self.setObjectName("PhotosTab")
+        force_opaque_background(self, "#121212")
+        self.setStyleSheet("background-color: #121212;")
         self.image_list = []
         self.thumbnail_cache = {}  # Map path -> QPixmap
         self.loader_thread = None
         self.init_ui()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), self._opaque_color)
+        painter.end()
+        super().paintEvent(event)
         
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -1711,7 +1796,9 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.main_tabs)
         
         # 3D Reconstruction Tab
-        reconstruction_tab = QWidget(self.main_tabs)
+        reconstruction_tab = OpaqueWidget("#121212", self.main_tabs)
+        reconstruction_tab.setObjectName("ReconstructionTab")
+        force_opaque_background(reconstruction_tab, "#121212")
         main_layout = QHBoxLayout(reconstruction_tab)
         main_layout.setContentsMargins(15, 15, 15, 15)
         main_layout.setSpacing(15)
@@ -2264,7 +2351,10 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(sidebar)
         
         # Right Side Display Panel
-        right_panel = QWidget(self)
+        right_panel = OpaqueWidget("#121212", self)
+        right_panel.setObjectName("RightPanel")
+        force_opaque_background(right_panel, "#121212")
+        right_panel.setStyleSheet("background-color: #121212;")
         right_layout = QVBoxLayout(right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(15)
@@ -2289,15 +2379,6 @@ class MainWindow(QMainWindow):
         self.viewer_widget.action_upload_proximap.triggered.connect(self._upload_to_proximap)
 
         
-        # Initialize VisPy Canvas
-        self.canvas = scene.SceneCanvas(keys='interactive', show=False, bgcolor=self.viewport_bg_color)
-        if hasattr(self.canvas, '_keys_check') and 'escape' in self.canvas._keys_check:
-            del self.canvas._keys_check['escape']
-        self.view = self.canvas.central_widget.add_view()
-        self.view.camera = 'arcball' # Default camera mode is Arcball
-        
-        # Add native VisPy canvas widget to the layout
-        self.viewer_widget.container_area_layout.addWidget(self.canvas.native)
         self.viewer_widget.bg_btn.clicked.connect(self._choose_bg_color)
         
         # Initialize floating camera controls overlay
@@ -2680,6 +2761,12 @@ class MainWindow(QMainWindow):
             QMainWindow {
                 background-color: #121212;
             }
+            QWidget#ReconstructionTab,
+            QWidget#RightPanel,
+            QWidget#PhotosTab,
+            QWidget#PhotosGrid {
+                background-color: #121212;
+            }
             #Sidebar {
                 background-color: #1A1A1A;
                 border-right: 1px solid #2B2B2B;
@@ -2840,6 +2927,9 @@ class MainWindow(QMainWindow):
             }
             QTabWidget#BottomTabs::pane {
                 border: 1px solid #2B2B2B;
+                background-color: #151515;
+            }
+            QTabWidget#BottomTabs QWidget {
                 background-color: #151515;
             }
             QTabWidget#BottomTabs QTabBar::tab {
@@ -4457,6 +4547,18 @@ class MainWindow(QMainWindow):
         if path:
             self._reload_viewer(path)
 
+    def _ensure_viewer_canvas(self):
+        if self.canvas is not None and self.view is not None:
+            return
+
+        self.canvas = scene.SceneCanvas(keys='interactive', show=False, bgcolor=self.viewport_bg_color)
+        if hasattr(self.canvas, '_keys_check') and 'escape' in self.canvas._keys_check:
+            del self.canvas._keys_check['escape']
+        self.view = self.canvas.central_widget.add_view()
+        self.view.camera = 'arcball'
+        self.viewer_widget.set_canvas_widget(self.canvas.native)
+        self._on_camera_changed(self.viewer_widget.cam_select.currentIndex())
+
     def _on_camera_changed(self, index):
         if self.view is None:
             return
@@ -4958,10 +5060,10 @@ class MainWindow(QMainWindow):
         self._clear_visuals()
 
         if points is None or len(points) == 0:
-            self.canvas.native.hide()
-            self.viewer_widget.fallback_label.setText("No valid 3D points or faces could be parsed.")
-            self.viewer_widget.fallback_label.show()
+            self.viewer_widget.show_fallback("No valid 3D points or faces could be parsed.")
             return
+
+        self._ensure_viewer_canvas()
 
         if mode == 2 and faces is not None and len(faces) > 0:
             mesh_colors = None
@@ -4990,8 +5092,7 @@ class MainWindow(QMainWindow):
             self.markers_visual.set_data(pos=points, face_color=marker_colors, size=2, edge_width=0)
 
         self._last_points = points
-        self.canvas.native.show()
-        self.viewer_widget.fallback_label.hide()
+        self.viewer_widget.show_canvas()
 
         bbox_min = np.min(points, axis=0)
         bbox_max = np.max(points, axis=0)
@@ -5009,6 +5110,7 @@ class MainWindow(QMainWindow):
         from PIL import Image
         
         self._clear_visuals()
+        self._ensure_viewer_canvas()
         
         points = None
         colors = None
@@ -5175,16 +5277,13 @@ class MainWindow(QMainWindow):
             # Cameras exist even if sparse points array is empty
             pass
         else:
-            self.canvas.native.hide()
-            self.viewer_widget.fallback_label.setText("No valid 3D points or faces could be parsed.")
-            self.viewer_widget.fallback_label.show()
+            self.viewer_widget.show_fallback("No valid 3D points or faces could be parsed.")
             return
             
         # Store points reference for camera switches
         self._last_points = points
         
-        self.canvas.native.show()
-        self.viewer_widget.fallback_label.hide()
+        self.viewer_widget.show_canvas()
         
         # Center and zoom camera
         ref_pts = points if (points is not None and len(points) > 0) else None
@@ -5219,10 +5318,10 @@ class MainWindow(QMainWindow):
 
     def _reload_viewer(self, file_path):
         if not os.path.exists(file_path):
-            self.viewer_widget.fallback_label.setText(
+            self._clear_visuals()
+            self.viewer_widget.show_fallback(
                 f"File not found: {os.path.basename(file_path)}\nRun reconstruction to generate this file first."
             )
-            self.viewer_widget.fallback_label.show()
             self.console_text.append(f"[WARNING] 3D file not found: {file_path}")
             return
 
@@ -5230,10 +5329,7 @@ class MainWindow(QMainWindow):
         mode_names = ["Sparse Point Cloud", "Dense Point Cloud", "Textured Mesh"]
         mode_name = mode_names[mode] if mode < len(mode_names) else "3D Scene"
 
-        self.viewer_widget.fallback_label.setText(f"Loading {mode_name}...\n(Parsing geometry in background…)")
-        self.viewer_widget.fallback_label.show()
-        if self.canvas and self.canvas.native:
-            self.canvas.native.hide()
+        self.viewer_widget.show_fallback(f"Loading {mode_name}...\n(Parsing geometry in background…)")
         QApplication.processEvents()
 
         # For mode 0 (sparse), keep existing sync path (reads COLMAP binary, fast)
@@ -5249,8 +5345,7 @@ class MainWindow(QMainWindow):
             )
             self._viewer_load_worker.error.connect(lambda err: (
                 self.console_text.append(f"[ERROR] VisPy background load failed: {err}"),
-                self.viewer_widget.fallback_label.setText(f"Rendering failed:\n{err}"),
-                self.viewer_widget.fallback_label.show()
+                self.viewer_widget.show_fallback(f"Rendering failed:\n{err}")
             ))
             self._viewer_load_worker.start()
         else:
@@ -5260,10 +5355,7 @@ class MainWindow(QMainWindow):
                 self.console_text.append(f"[INFO] Successfully rendered {os.path.basename(file_path)} in VisPy canvas.")
             except Exception as e:
                 self.console_text.append(f"[ERROR] VisPy rendering failed: {e}")
-                self.viewer_widget.fallback_label.setText(f"Rendering failed:\n{e}")
-                self.viewer_widget.fallback_label.show()
-                if self.canvas and self.canvas.native:
-                    self.canvas.native.hide()
+                self.viewer_widget.show_fallback(f"Rendering failed:\n{e}")
 
     def _on_viewer_data_ready(self, points, colors, faces, texcoords, texture_path, file_path, mode):
         """Called on the UI thread once ViewerLoadWorker has finished parsing."""
@@ -5272,17 +5364,11 @@ class MainWindow(QMainWindow):
             self.console_text.append(f"[INFO] Successfully rendered {os.path.basename(file_path)} in VisPy canvas.")
         except Exception as e:
             self.console_text.append(f"[ERROR] VisPy rendering failed: {e}")
-            self.viewer_widget.fallback_label.setText(f"Rendering failed:\n{e}")
-            self.viewer_widget.fallback_label.show()
-            if self.canvas and self.canvas.native:
-                self.canvas.native.hide()
+            self.viewer_widget.show_fallback(f"Rendering failed:\n{e}")
 
     def _terminate_viewer(self):
         self._clear_visuals()
-        self.viewer_widget.fallback_label.setText("3D Viewer Idle")
-        self.viewer_widget.fallback_label.show()
-        if self.canvas and self.canvas.native:
-            self.canvas.native.hide()
+        self.viewer_widget.show_fallback("3D Viewer Idle")
 
     def _choose_bg_color(self):
         from PySide6.QtGui import QColor
