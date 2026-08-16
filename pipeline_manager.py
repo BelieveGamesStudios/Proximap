@@ -86,13 +86,14 @@ class PipelineWorker(QThread):
     log_message = Signal(str)
     finished = Signal(bool, str)
 
-    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, mapper_mode: str = "incremental", ref_cloud_path: str = None, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, resume_from_step: str = None, parent=None):
+    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, auto_cleanup: bool = False, mapper_mode: str = "incremental", ref_cloud_path: str = None, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, resume_from_step: str = None, parent=None):
         super().__init__(parent)
         self.image_dir = os.path.abspath(image_dir) if image_dir else image_dir
         self.output_dir = os.path.abspath(output_dir) if output_dir else output_dir
         self.quality_preset = quality_preset
         self.gpu_mode = gpu_mode
         self.has_plain_surfaces = has_plain_surfaces
+        self.auto_cleanup = auto_cleanup
         # When plain/smooth surfaces is selected, use GLOMAP global mapper instead of incremental mapper
         if self.has_plain_surfaces:
             self.mapper_mode = "global"
@@ -1316,9 +1317,10 @@ class PipelineWorker(QThread):
         self.progress_changed.emit(88)
 
         # =========================================================================
-        # STEP 8/9 — Mesh Geometry Refinement (Multi-Scale)
+        # STEP 8 — Mesh Geometry Refinement (Multi-Scale)
         # =========================================================================
-        self.status_changed.emit("Step 8/9: Refining Mesh Geometry...")
+        total_steps = 10 if self.auto_cleanup else 9
+        self.status_changed.emit(f"Step 8/{total_steps}: Refining Mesh Geometry...")
         mvs_refine_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["RefineMesh"])
 
         if not os.path.exists(os.path.join(mvs_out, mesh_input)):
@@ -1350,16 +1352,47 @@ class PipelineWorker(QThread):
             texture_input_scene = target_scene
             self.log_message.emit(f"[WARNING] RefineMesh failed or produced no output. Texturing will use {target_scene}.")
 
-        self.progress_changed.emit(94)
+        self.progress_changed.emit(91 if self.auto_cleanup else 94)
 
         # =========================================================================
-        # STEP 9/9 — Texture Projection
+        # STEP 8.5 (Conditional) — PyMeshLab Auto Cleanup & Decimation
         # =========================================================================
-        self.status_changed.emit("Step 9/9: Projecting Textures onto Mesh...")
+        if self.auto_cleanup:
+            self.status_changed.emit(f"Step 9/{total_steps}: Auto-Cleaning Mesh...")
+            cleanup_input_ply = None
+            for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+                candidate_path = os.path.join(mvs_out, candidate)
+                if os.path.exists(candidate_path):
+                    cleanup_input_ply = candidate_path
+                    break
+
+            if cleanup_input_ply:
+                cleaned_ply_path = os.path.join(mvs_out, "scene_dense_mesh_cleaned.ply")
+                try:
+                    from mesh_cleanup import run_mesh_cleanup
+                    cleanup_params = self.custom_params.get("cleanup_params") if self.custom_params else None
+                    cleanup_ok = run_mesh_cleanup(cleanup_input_ply, cleaned_ply_path, self.log_message.emit, cleanup_params=cleanup_params)
+                    if cleanup_ok and os.path.exists(cleaned_ply_path):
+                        self.log_message.emit("[INFO] Auto Cleanup completed successfully. Cleaned mesh ready for texturing.")
+                    else:
+                        self.log_message.emit("[WARNING] Auto Cleanup failed or produced no output. Texturing will use refined mesh.")
+                except Exception as e:
+                    self.log_message.emit(f"[WARNING] Error running mesh cleanup: {e}. Continuing pipeline.")
+            else:
+                self.log_message.emit("[WARNING] No suitable PLY mesh found for Auto Cleanup. Skipping cleanup stage.")
+
+            self.progress_changed.emit(95)
+
+        # =========================================================================
+        # STEP 9/10 — Texture Projection
+        # =========================================================================
+        step_num = 10 if self.auto_cleanup else 9
+        self.status_changed.emit(f"Step {step_num}/{total_steps}: Projecting Textures onto Mesh...")
         mvs_texture_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["TextureMesh"])
 
         texture_mesh_ply = None
-        for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+        candidates = ["scene_dense_mesh_cleaned.ply", "scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"] if self.auto_cleanup else ["scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]
+        for candidate in candidates:
             if os.path.exists(os.path.join(mvs_out, candidate)):
                 texture_mesh_ply = candidate
                 break
@@ -1419,17 +1452,31 @@ class PipelineWorker(QThread):
         return True
     def _run_simulated_pipeline(self) -> bool:
         """Runs a visual simulation of the pipeline for testing UI and fallback states."""
-        steps = [
-            ("Step 1/9: Preparing Images...", 10, 0.8),
-            ("Step 2/9: Extracting SIFT Features...", 25, 1.2),
-            ("Step 3/9: Matching SIFT Features...", 40, 1.0),
-            ("Step 4/9: Estimating Camera Poses (SfM)...", 60, 1.5),
-            ("Step 5/9: Exporting Scene to OpenMVS...", 70, 0.6),
-            ("Step 6/9: Generating Dense Point Cloud...", 80, 1.5),
-            ("Step 7/9: Reconstructing Surface Mesh...", 88, 1.0),
-            ("Step 8/9: Refining Mesh Geometry...", 94, 1.0),
-            ("Step 9/9: Projecting Textures onto Mesh...", 99, 0.8),
-        ]
+        if self.auto_cleanup:
+            steps = [
+                ("Step 1/10: Preparing Images...", 10, 0.8),
+                ("Step 2/10: Extracting SIFT Features...", 25, 1.2),
+                ("Step 3/10: Matching SIFT Features...", 40, 1.0),
+                ("Step 4/10: Estimating Camera Poses (SfM)...", 60, 1.5),
+                ("Step 5/10: Exporting Scene to OpenMVS...", 70, 0.6),
+                ("Step 6/10: Generating Dense Point Cloud...", 80, 1.5),
+                ("Step 7/10: Reconstructing Surface Mesh...", 88, 1.0),
+                ("Step 8/10: Refining Mesh Geometry...", 92, 1.0),
+                ("Step 9/10: Auto-Cleaning Mesh...", 96, 0.8),
+                ("Step 10/10: Projecting Textures onto Mesh...", 99, 0.8),
+            ]
+        else:
+            steps = [
+                ("Step 1/9: Preparing Images...", 10, 0.8),
+                ("Step 2/9: Extracting SIFT Features...", 25, 1.2),
+                ("Step 3/9: Matching SIFT Features...", 40, 1.0),
+                ("Step 4/9: Estimating Camera Poses (SfM)...", 60, 1.5),
+                ("Step 5/9: Exporting Scene to OpenMVS...", 70, 0.6),
+                ("Step 6/9: Generating Dense Point Cloud...", 80, 1.5),
+                ("Step 7/9: Reconstructing Surface Mesh...", 88, 1.0),
+                ("Step 8/9: Refining Mesh Geometry...", 94, 1.0),
+                ("Step 9/9: Projecting Textures onto Mesh...", 99, 0.8),
+            ]
 
         for status, progress, duration in steps:
             if not self.is_running:

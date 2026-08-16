@@ -1906,6 +1906,13 @@ class MainWindow(QMainWindow):
             "and automatically uses GLOMAP global mapper for camera pose estimation.\n\n"
             "Dynamically throttles feature and match limits based on dataset size and system memory pressure."
         )
+
+        self.auto_cleanup_checkbox = QCheckBox("Auto Cleanup", step2_box)
+        self.auto_cleanup_checkbox.setChecked(False)
+        self.auto_cleanup_checkbox.setToolTip(
+            "Automates mesh repair and 50% quadric edge collapse decimation between refinement and texturing.\n"
+            "Default: Off."
+        )
         
         # Advanced Options Collapsible Panel
         self.advanced_toggle_btn = QPushButton("▸  Advanced Options", step2_box)
@@ -2158,6 +2165,57 @@ class MainWindow(QMainWindow):
         custom_grid.addWidget(lbl_texture_res, 12, 0)
         custom_grid.addWidget(self.custom_texture_res_combo, 12, 1)
         
+        # Auto Cleanup Settings Section
+        cleanup_sec = QLabel("Auto Cleanup Settings", self.custom_settings_container)
+        cleanup_sec.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676; margin-top: 6px; border: none; background: transparent;")
+        custom_grid.addWidget(cleanup_sec, 13, 0, 1, 2)
+
+        self.custom_cleanup_check = QCheckBox("Enable Auto Cleanup Stage", self.custom_settings_container)
+        self.custom_cleanup_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
+        self.custom_cleanup_check.setChecked(self.auto_cleanup_checkbox.isChecked())
+        custom_grid.addWidget(self.custom_cleanup_check, 14, 0, 1, 2)
+
+        lbl_decimation = QLabel("Face Reduction (%):", self.custom_settings_container)
+        lbl_decimation.setStyleSheet(lbl_style)
+        self.custom_cleanup_decimation_spin = QSpinBox(self.custom_settings_container)
+        self.custom_cleanup_decimation_spin.setRange(10, 90)
+        self.custom_cleanup_decimation_spin.setSingleStep(5)
+        self.custom_cleanup_decimation_spin.setSuffix("%")
+        self.custom_cleanup_decimation_spin.setValue(50)
+        self.custom_cleanup_decimation_spin.setToolTip("Target face reduction percentage for mesh decimation (default: 50%).")
+        self.custom_cleanup_decimation_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_decimation, 15, 0)
+        custom_grid.addWidget(self.custom_cleanup_decimation_spin, 15, 1)
+
+        lbl_max_hole = QLabel("Max Hole Size (faces):", self.custom_settings_container)
+        lbl_max_hole.setStyleSheet(lbl_style)
+        self.custom_cleanup_max_hole_spin = QSpinBox(self.custom_settings_container)
+        self.custom_cleanup_max_hole_spin.setRange(5, 500)
+        self.custom_cleanup_max_hole_spin.setSingleStep(5)
+        self.custom_cleanup_max_hole_spin.setValue(30)
+        self.custom_cleanup_max_hole_spin.setToolTip("Maximum hole size in faces to automatically close during mesh repair.")
+        self.custom_cleanup_max_hole_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        custom_grid.addWidget(lbl_max_hole, 16, 0)
+        custom_grid.addWidget(self.custom_cleanup_max_hole_spin, 16, 1)
+
+        self.custom_cleanup_remove_duplicates_check = QCheckBox("Remove Duplicate Faces & Vertices", self.custom_settings_container)
+        self.custom_cleanup_remove_duplicates_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
+        self.custom_cleanup_remove_duplicates_check.setChecked(True)
+        custom_grid.addWidget(self.custom_cleanup_remove_duplicates_check, 17, 0, 1, 2)
+
+        self.custom_cleanup_repair_nonmanifold_check = QCheckBox("Repair Non-Manifold Edges", self.custom_settings_container)
+        self.custom_cleanup_repair_nonmanifold_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
+        self.custom_cleanup_repair_nonmanifold_check.setChecked(True)
+        custom_grid.addWidget(self.custom_cleanup_repair_nonmanifold_check, 18, 0, 1, 2)
+
+        self.custom_cleanup_close_holes_check = QCheckBox("Close Mesh Holes", self.custom_settings_container)
+        self.custom_cleanup_close_holes_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
+        self.custom_cleanup_close_holes_check.setChecked(True)
+        custom_grid.addWidget(self.custom_cleanup_close_holes_check, 19, 0, 1, 2)
+
+        self.auto_cleanup_checkbox.toggled.connect(self._sync_auto_cleanup_to_custom)
+        self.custom_cleanup_check.toggled.connect(self._sync_custom_to_auto_cleanup)
+        
         advanced_layout.addWidget(self.custom_settings_toggle)
         advanced_layout.addWidget(self.mapper_label)
         advanced_layout.addWidget(self.mapper_combo)
@@ -2221,6 +2279,7 @@ class MainWindow(QMainWindow):
         step2_layout.addWidget(self.gpu_label)
         step2_layout.addWidget(self.gpu_combo)
         step2_layout.addWidget(self.plain_surfaces_checkbox)
+        step2_layout.addWidget(self.auto_cleanup_checkbox)
         step2_layout.addWidget(self.advanced_toggle_btn)
         step2_layout.addWidget(self.advanced_panel)
         step2_layout.addWidget(self.standalone_panel)
@@ -3325,6 +3384,7 @@ class MainWindow(QMainWindow):
         self.gpu_label.setVisible(False)
         self.gpu_combo.setVisible(False)
         self.plain_surfaces_checkbox.setVisible(False)
+        self.auto_cleanup_checkbox.setVisible(False)
         self.advanced_toggle_btn.setVisible(False)
         self.advanced_panel.setVisible(False)
 
@@ -3353,6 +3413,7 @@ class MainWindow(QMainWindow):
         self.gpu_label.setVisible(True)
         self.gpu_combo.setVisible(True)
         self.plain_surfaces_checkbox.setVisible(True)
+        self.auto_cleanup_checkbox.setVisible(True)
         self.advanced_toggle_btn.setVisible(True)
         self.advanced_panel.setVisible(False)
 
@@ -3505,6 +3566,7 @@ class MainWindow(QMainWindow):
                 "quality_preset": self.quality_combo.currentText().lower(),
                 "gpu_mode": self.gpu_combo.currentText().lower(),
                 "has_plain_surfaces": self.plain_surfaces_checkbox.isChecked(),
+                "auto_cleanup": self.auto_cleanup_checkbox.isChecked(),
                 "mapper_mode": self.mapper_combo.currentText().lower() if hasattr(self, 'mapper_combo') else "incremental",
                 "mesh_mode": "poisson" if hasattr(self, 'mesh_mode_combo') and self.mesh_mode_combo.currentIndex() == 1 else "default",
                 "poisson_depth": self.poisson_depth_slider.value() if hasattr(self, 'poisson_depth_slider') else 9
@@ -3529,6 +3591,18 @@ class MainWindow(QMainWindow):
         if hasattr(self, "custom_guided_check"):
             self.custom_guided_check.setEnabled(True)
             self.custom_guided_check.setToolTip("")
+
+    def _sync_auto_cleanup_to_custom(self, checked):
+        if hasattr(self, 'custom_cleanup_check') and self.custom_cleanup_check.isChecked() != checked:
+            self.custom_cleanup_check.blockSignals(True)
+            self.custom_cleanup_check.setChecked(checked)
+            self.custom_cleanup_check.blockSignals(False)
+
+    def _sync_custom_to_auto_cleanup(self, checked):
+        if hasattr(self, 'auto_cleanup_checkbox') and self.auto_cleanup_checkbox.isChecked() != checked:
+            self.auto_cleanup_checkbox.blockSignals(True)
+            self.auto_cleanup_checkbox.setChecked(checked)
+            self.auto_cleanup_checkbox.blockSignals(False)
 
 
     def _on_mesh_mode_changed(self, index):
@@ -3665,6 +3739,7 @@ class MainWindow(QMainWindow):
         self.quality_combo.setEnabled(False)
         self.gpu_combo.setEnabled(False)
         self.plain_surfaces_checkbox.setEnabled(False)
+        self.auto_cleanup_checkbox.setEnabled(False)
         self.mapper_combo.setEnabled(False)
         self.mesh_mode_combo.setEnabled(False)
         self.poisson_depth_slider.setEnabled(False)
@@ -3740,6 +3815,7 @@ class MainWindow(QMainWindow):
         gpu_mode = gpu_modes[self.gpu_combo.currentIndex()]
         mapper_mode = mapper_modes[self.mapper_combo.currentIndex()]
         has_plain = self.plain_surfaces_checkbox.isChecked()
+        auto_cleanup = self.auto_cleanup_checkbox.isChecked()
         mesh_mode = "poisson" if self.mesh_mode_combo.currentIndex() == 1 else "default"
         poisson_depth = self.poisson_depth_slider.value()
 
@@ -3765,7 +3841,15 @@ class MainWindow(QMainWindow):
                 "densify_res": str(self.custom_densify_res_combo.currentIndex()),
                 "densify_views": str(self.custom_densify_views_spin.value()),
                 "refine_scales": str(self.custom_refine_scales_spin.value()),
-                "texture_res": str(self.custom_texture_res_combo.currentIndex())
+                "texture_res": str(self.custom_texture_res_combo.currentIndex()),
+                "cleanup_params": {
+                    "enable_cleanup": self.custom_cleanup_check.isChecked(),
+                    "target_reduction_pct": self.custom_cleanup_decimation_spin.value(),
+                    "remove_duplicates": self.custom_cleanup_remove_duplicates_check.isChecked(),
+                    "repair_nonmanifold": self.custom_cleanup_repair_nonmanifold_check.isChecked(),
+                    "close_holes": self.custom_cleanup_close_holes_check.isChecked(),
+                    "max_hole_size": self.custom_cleanup_max_hole_spin.value()
+                }
             }
 
         from pipeline_manager import PipelineWorker
@@ -3775,6 +3859,7 @@ class MainWindow(QMainWindow):
             quality_preset=quality_preset, 
             gpu_mode=gpu_mode, 
             has_plain_surfaces=has_plain,
+            auto_cleanup=auto_cleanup,
             mapper_mode=mapper_mode,
             ref_cloud_path=None,
             mesh_mode=mesh_mode,
@@ -3851,6 +3936,7 @@ class MainWindow(QMainWindow):
         self.view_scene_btn.setEnabled(True)
         self.gpu_combo.setEnabled(True)
         self.plain_surfaces_checkbox.setEnabled(True)
+        self.auto_cleanup_checkbox.setEnabled(True)
         self.custom_settings_toggle.setEnabled(True)
         self._on_custom_settings_toggled(self.custom_settings_toggle.isChecked())
         self.advanced_toggle_btn.setEnabled(True)
@@ -4161,6 +4247,8 @@ class MainWindow(QMainWindow):
                     self.gpu_combo.setCurrentIndex(idx)
             if "has_plain_surfaces" in meta:
                 self.plain_surfaces_checkbox.setChecked(bool(meta["has_plain_surfaces"]))
+            if "auto_cleanup" in meta:
+                self.auto_cleanup_checkbox.setChecked(bool(meta["auto_cleanup"]))
             if "mapper_mode" in meta and hasattr(self, 'mapper_combo'):
                 mapper_str = str(meta["mapper_mode"]).lower()
                 mapper_idx = 1 if mapper_str == "global" else 0
@@ -4217,6 +4305,21 @@ class MainWindow(QMainWindow):
 
                 if "texture_res" in cparams and hasattr(self, 'custom_texture_res_combo'):
                     self.custom_texture_res_combo.setCurrentIndex(int(cparams["texture_res"]))
+
+                if "cleanup_params" in cparams and isinstance(cparams["cleanup_params"], dict):
+                    clean_p = cparams["cleanup_params"]
+                    if "enable_cleanup" in clean_p and hasattr(self, 'custom_cleanup_check'):
+                        self.custom_cleanup_check.setChecked(bool(clean_p["enable_cleanup"]))
+                    if "target_reduction_pct" in clean_p and hasattr(self, 'custom_cleanup_decimation_spin'):
+                        self.custom_cleanup_decimation_spin.setValue(int(clean_p["target_reduction_pct"]))
+                    if "max_hole_size" in clean_p and hasattr(self, 'custom_cleanup_max_hole_spin'):
+                        self.custom_cleanup_max_hole_spin.setValue(int(clean_p["max_hole_size"]))
+                    if "remove_duplicates" in clean_p and hasattr(self, 'custom_cleanup_remove_duplicates_check'):
+                        self.custom_cleanup_remove_duplicates_check.setChecked(bool(clean_p["remove_duplicates"]))
+                    if "repair_nonmanifold" in clean_p and hasattr(self, 'custom_cleanup_repair_nonmanifold_check'):
+                        self.custom_cleanup_repair_nonmanifold_check.setChecked(bool(clean_p["repair_nonmanifold"]))
+                    if "close_holes" in clean_p and hasattr(self, 'custom_cleanup_close_holes_check'):
+                        self.custom_cleanup_close_holes_check.setChecked(bool(clean_p["close_holes"]))
 
         # Enable view scene button and set mode
         mvs_dir = os.path.join(out_dir, "mvs")

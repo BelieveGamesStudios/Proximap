@@ -44,6 +44,7 @@ python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all numpy --collect-all scipy \
     --collect-all vispy --collect-all imgui_bundle \
     --collect-all trimesh --collect-all pyrr --collect-all cv2 \
+    --collect-all pymeshlab \
     --exclude-module PySide6.QtWebEngineCore \
     --exclude-module PySide6.QtWebEngineWidgets \
     --exclude-module PySide6.QtWebEngineQuick \
@@ -74,9 +75,15 @@ echo "[3/5] Setting up backend binary directories..."
 MAC_OS_DIR="dist/Proximap.app/Contents/MacOS"
 COLMAP_DIR="$MAC_OS_DIR/backend_bin/colmap"
 OPENMVS_DIR="$MAC_OS_DIR/backend_bin/openMVS"
+PYMESHLAB_DIR="$MAC_OS_DIR/backend_bin/PymeshLab"
 
 mkdir -p "$COLMAP_DIR"
 mkdir -p "$OPENMVS_DIR"
+mkdir -p "$PYMESHLAB_DIR"
+
+if [ -d "backend_bin/PymeshLab" ]; then
+    cp -r backend_bin/PymeshLab/* "$PYMESHLAB_DIR/" 2>/dev/null || true
+fi
 
 # 4. Copy backend binaries selectively
 echo "[4/5] Selectively copying backend toolchain dependencies..."

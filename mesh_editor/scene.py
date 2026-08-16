@@ -416,7 +416,7 @@ class Scene:
 
     @property
     def selected_object(self):
-        return self.active_object
+        return self.active_object or (self.selected_objects[-1] if self.selected_objects else None)
 
     @selected_object.setter
     def selected_object(self, value):

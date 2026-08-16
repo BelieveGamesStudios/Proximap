@@ -74,6 +74,11 @@ parts:
       - libxcb-util1
       - libxcb-xfixes0
       - libxcb-xkb1
+      - libglu1-mesa
+      - libgomp1
+      - libmuparser2v5
+      - libtbb12
+      - libxerces-c3.2t64
     override-build: |
       craftctl default
       mkdir -p "$CRAFT_PART_INSTALL/usr/share/applications"

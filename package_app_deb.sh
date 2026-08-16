@@ -35,6 +35,7 @@ python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all pillow --collect-all cv2 --collect-all trimesh \
     --collect-all pyrr --collect-all OpenGL --collect-all qrcode \
     --collect-all scipy --collect-all skimage --collect-all open3d \
+    --collect-all pymeshlab \
     --collect-all mesh_editor --collect-all addons \
     --exclude-module lightglue --exclude-module torch --exclude-module torchvision --exclude-module nvidia --exclude-module triton \
     --exclude-module PySide6.QtWebEngineCore \
@@ -99,7 +100,12 @@ cp -r dist/Proximap/* "$OPT_DIR/"
 echo "[4/6] Copying backend dependencies and assets..."
 COLMAP_DIR="$OPT_DIR/backend_bin/colmap"
 OPENMVS_DIR="$OPT_DIR/backend_bin/openMVS"
-mkdir -p "$COLMAP_DIR" "$OPENMVS_DIR"
+PYMESHLAB_DIR="$OPT_DIR/backend_bin/PymeshLab"
+mkdir -p "$COLMAP_DIR" "$OPENMVS_DIR" "$PYMESHLAB_DIR"
+
+if [ -d "backend_bin/PymeshLab" ]; then
+    cp -r backend_bin/PymeshLab/* "$PYMESHLAB_DIR/" 2>/dev/null || true
+fi
 
 if [ -d "backend_bin/colmap" ]; then
     cp -r backend_bin/colmap/* "$COLMAP_DIR/" 2>/dev/null || true
@@ -170,7 +176,7 @@ Architecture: ${ARCH}
 Maintainer: ${MAINTAINER}
 Section: graphics
 Priority: optional
-Depends: libc6, libgl1-mesa-glx | libgl1, libegl1, libxcb-xinerama0, colmap
+Depends: libc6, libgl1-mesa-glx | libgl1, libegl1, libxcb-xinerama0, colmap, libglu1-mesa, libgomp1, libmuparser2v5, libtbb12
 Description: ${DESCRIPTION}
  Proximap is an intuitive desktop 3D photogrammetry GUI dashboard.
  Automates COLMAP and OpenMVS pipelines for 3D reconstruction.
