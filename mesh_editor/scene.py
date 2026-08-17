@@ -450,42 +450,113 @@ class Scene:
         # 1. Convert mouse coordinates to Normalized Device Coordinates (NDC)
         ndc_x = (2.0 * mouse_x) / viewport_width - 1.0
         ndc_y = 1.0 - (2.0 * mouse_y) / viewport_height
-        
+
         # NDC ray starts at near plane and ends at far plane
         ray_ndc_near = np.array([ndc_x, ndc_y, -1.0, 1.0], dtype=np.float32)
-        ray_ndc_far = np.array([ndc_x, ndc_y, 1.0, 1.0], dtype=np.float32)
-        
+        ray_ndc_far  = np.array([ndc_x, ndc_y,  1.0, 1.0], dtype=np.float32)
+
         # 2. Get matrices
-        aspect = viewport_width / max(viewport_height, 1.0)
+        aspect   = viewport_width / max(viewport_height, 1.0)
         view_mat = camera.get_view_matrix()
         proj_mat = camera.get_projection_matrix(aspect)
-        
-        vp_mat = pyrr.matrix44.multiply(view_mat, proj_mat)
+
+        # pyrr uses row-vector convention: clip = v · V · P, so VP = V·P
+        vp_mat     = pyrr.matrix44.multiply(view_mat, proj_mat)
         inv_vp_mat = pyrr.matrix44.inverse(vp_mat)
-        
-        # 3. Unproject ray to world coordinates
+
+        # 3. Unproject ray endpoints to world coordinates
         world_near = pyrr.matrix44.apply_to_vector(inv_vp_mat, ray_ndc_near)
-        world_far = pyrr.matrix44.apply_to_vector(inv_vp_mat, ray_ndc_far)
-        
-        # Normalize projective coordinate w
+        world_far  = pyrr.matrix44.apply_to_vector(inv_vp_mat, ray_ndc_far)
+
+        # Perspective divide to recover world-space positions
         world_near = world_near[:3] / world_near[3]
-        world_far = world_far[:3] / world_far[3]
-        
+        world_far  = world_far[:3]  / world_far[3]
+
         ray_origin = world_near
-        ray_dir = world_far - world_near
-        ray_dir = ray_dir / np.linalg.norm(ray_dir)
-        
+        ray_dir    = world_far - world_near
+        ray_len    = np.linalg.norm(ray_dir)
+        if ray_len < 1e-12:
+            return None
+        ray_dir = ray_dir / ray_len
+
+        # Camera forward vector (into the scene) for depth pre-rejection
+        cam_pos     = camera.get_position()
+        cam_forward = camera.target - cam_pos
+        cam_fwd_len = np.linalg.norm(cam_forward)
+        if cam_fwd_len > 1e-12:
+            cam_forward = cam_forward / cam_fwd_len
+        else:
+            cam_forward = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+
         closest_hit_obj = None
         min_t = float('inf')
-        
-        # 4. Slab Method Ray-AABB Intersection check for each object
+
+        # 4. Ray-AABB intersection for each object
         for obj in self.objects:
             bounds_min, bounds_max = obj.get_world_aabb()
-            hit, t = self.ray_aabb_intersect(ray_origin, ray_dir, bounds_min, bounds_max)
-            if hit and t < min_t:
-                min_t = t
+
+            # --- Screen-space pre-rejection: skip objects whose projected AABB
+            #     is entirely outside the clicked NDC pixel column/row.
+            #     Cheap 2-D test before the full 3-D slab test.
+            corners_local = [
+                np.array([bounds_min[0], bounds_min[1], bounds_min[2], 1.0]),
+                np.array([bounds_min[0], bounds_min[1], bounds_max[2], 1.0]),
+                np.array([bounds_min[0], bounds_max[1], bounds_min[2], 1.0]),
+                np.array([bounds_min[0], bounds_max[1], bounds_max[2], 1.0]),
+                np.array([bounds_max[0], bounds_min[1], bounds_min[2], 1.0]),
+                np.array([bounds_max[0], bounds_min[1], bounds_max[2], 1.0]),
+                np.array([bounds_max[0], bounds_max[1], bounds_min[2], 1.0]),
+                np.array([bounds_max[0], bounds_max[1], bounds_max[2], 1.0]),
+            ]
+            ss_xs, ss_ys = [], []
+            all_behind = True
+            for c in corners_local:
+                clip = np.dot(c, vp_mat)          # row-vector · VP
+                if clip[3] > 0.001:               # in front of near plane
+                    all_behind = False
+                    ss_xs.append(clip[0] / clip[3])
+                    ss_ys.append(clip[1] / clip[3])
+                elif clip[3] <= 0.0:
+                    pass  # behind camera; do not contribute
+                else:
+                    all_behind = False
+
+            # All corners behind camera → definitely not visible, skip
+            if all_behind:
+                continue
+
+            # If we gathered screen-space projections, do a quick 2-D overlap
+            # check against the clicked NDC position with a small epsilon margin
+            if ss_xs:
+                margin = 0.05  # small tolerance in NDC units
+                if (max(ss_xs) < ndc_x - margin or min(ss_xs) > ndc_x + margin or
+                        max(ss_ys) < ndc_y - margin or min(ss_ys) > ndc_y + margin):
+                    continue   # projected AABB doesn't overlap the click point
+
+            # --- 3-D Slab Ray-AABB test ---
+            hit, t_near, t_far = self.ray_aabb_intersect_full(ray_origin, ray_dir, bounds_min, bounds_max)
+            if not hit:
+                continue
+
+            # Only accept hits where the *front face* of the AABB is in front of
+            # the camera (t_near >= 0).  If the ray starts inside the box, t_near
+            # is negative — use t_far but only if t_far is also positive (i.e. the
+            # box straddles the ray origin, meaning the object truly surrounds the
+            # camera eye, which is a legitimate closest-object pick).
+            if t_near >= 0.0:
+                t_hit = t_near
+            elif t_far >= 0.0:
+                # Ray origin is inside the AABB (camera inside the mesh bounds).
+                # In practice this should be uncommon; use t_far so we still pick it
+                # but give it a large bias so a proper front-face hit always wins.
+                t_hit = t_far + 1e6
+            else:
+                continue  # entire AABB is behind the ray origin → skip
+
+            if t_hit < min_t:
+                min_t = t_hit
                 closest_hit_obj = obj
-                
+
         if closest_hit_obj is not None:
             if shift_held:
                 if closest_hit_obj in self.selected_objects:
@@ -502,7 +573,7 @@ class Scene:
             if not shift_held:
                 self.selected_objects = []
                 self.active_object = None
-                
+
         return closest_hit_obj
 
     def perform_box_picking(self, x1: float, y1: float, x2: float, y2: float, viewport_width: float, viewport_height: float, camera: Camera, shift_held: bool = False):
@@ -578,31 +649,45 @@ class Scene:
         """
         Slab method for Ray-AABB intersection.
         Returns (has_hit: bool, t_intersection: float)
+        Legacy wrapper — prefer ray_aabb_intersect_full for picking.
+        """
+        hit, t_near, t_far = Scene.ray_aabb_intersect_full(origin, direction, box_min, box_max)
+        if not hit:
+            return False, 0.0
+        t_hit = t_near if t_near >= 0.0 else t_far
+        return True, t_hit
+
+    @staticmethod
+    def ray_aabb_intersect_full(origin, direction, box_min, box_max) -> tuple:
+        """
+        Slab method for Ray-AABB intersection.
+        Returns (has_hit: bool, t_near: float, t_far: float).
+        t_near is the entry distance and t_far is the exit distance along the ray.
+        Both can be negative if the box is fully or partially behind the ray origin.
+        The caller is responsible for deciding which t value to use.
         """
         t_min = -float('inf')
-        t_max = float('inf')
-        
+        t_max =  float('inf')
+
         for i in range(3):
-            if np.abs(direction[i]) < 1e-6:
-                # Ray is parallel to the slab; check if origin is inside the slab limits
+            if np.abs(direction[i]) < 1e-8:
+                # Ray is parallel to the slab; if origin is outside, no hit
                 if origin[i] < box_min[i] or origin[i] > box_max[i]:
-                    return False, 0.0
+                    return False, 0.0, 0.0
             else:
                 t1 = (box_min[i] - origin[i]) / direction[i]
                 t2 = (box_max[i] - origin[i]) / direction[i]
-                
+
                 t_entry = min(t1, t2)
-                t_exit = max(t1, t2)
-                
+                t_exit  = max(t1, t2)
+
                 t_min = max(t_min, t_entry)
                 t_max = min(t_max, t_exit)
-                
-        if t_min <= t_max and t_max >= 0.0:
-            # If t_min is negative, the ray origin is inside the bounding box
-            t_hit = t_min if t_min >= 0.0 else t_max
-            return True, t_hit
-            
-        return False, 0.0
+
+        if t_min <= t_max:
+            return True, t_min, t_max
+
+        return False, 0.0, 0.0
 
 
 def apply_texture_to_meshes(meshes, texture_path):
