@@ -320,7 +320,7 @@ class Gizmo:
 
         gl.glUseProgram(self.program)
         gl.glDisable(gl.GL_DEPTH_TEST)
-        gl.glLineWidth(2.5)
+        gl.glLineWidth(1.0)
 
         aspect    = width / max(height, 1.0)
         view_mat  = camera.get_view_matrix()
