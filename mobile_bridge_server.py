@@ -3,6 +3,8 @@ import sys
 import socket
 import logging
 import subprocess
+import zipfile
+import tempfile
 import werkzeug.serving
 from flask import Flask, request, jsonify, send_file, render_template_string
 from PySide6.QtCore import QThread, Signal
@@ -10,6 +12,9 @@ from PySide6.QtCore import QThread, Signal
 log = logging.getLogger("mobile_bridge_server")
 
 _FIREWALL_RULE_PREFIX = "ProximapMobileBridge"
+_MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".mp4", ".mov", ".m4v", ".avi", ".mkv"}
+_ZIP_MAX_FILES = 500
+_ZIP_MAX_BYTES = 4 * 1024 * 1024 * 1024  # 4 GB limit
 
 
 def get_local_ips():
@@ -450,6 +455,32 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
             border-radius: 4px;
             backdrop-filter: blur(4px);
         }
+        .zip-card {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 8px;
+            background-color: #1A1A1A;
+            border-radius: 6px;
+            text-align: center;
+        }
+        .zip-card svg {
+            width: 32px;
+            height: 32px;
+            fill: #00E676;
+        }
+        .zip-name {
+            font-size: 10px;
+            font-weight: 600;
+            color: #E0E0E0;
+            word-break: break-all;
+            max-height: 28px;
+            overflow: hidden;
+        }
         .btn-remove-file {
             position: absolute;
             top: 6px;
@@ -576,10 +607,10 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
                 </div>
                 <div class="picker-title">Drag & Drop or Click to Browse</div>
                 <div class="picker-subtitle">
-                    Supports <strong>.jpg</strong>, <strong>.jpeg</strong>, <strong>.png</strong>, <strong>.heic</strong>, <strong>.mp4</strong>, <strong>.mov</strong> files to send directly to desktop.
+                    Supports <strong>.jpg</strong>, <strong>.jpeg</strong>, <strong>.png</strong>, <strong>.heic</strong>, <strong>.mp4</strong>, <strong>.mov</strong>, <strong>.zip</strong> files to send directly to desktop.
                 </div>
             </div>
-            <input type="file" id="fileInput" multiple accept="image/*,video/*" onchange="handleFilesSelected(this.files)">
+            <input type="file" id="fileInput" multiple accept="image/*,video/*,.zip,application/zip,application/x-zip-compressed" onchange="handleFilesSelected(this.files)">
 
             <div id="previewContainer" style="display: none;">
                 <div class="grid-header">
@@ -597,7 +628,7 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
                     <line x1="12" y1="8" x2="12.01" y2="8"></line>
                 </svg>
                 <div class="info-text">
-                    Select multiple photos or videos from your iPhone gallery. All selected media will be sent directly to your active Proximap project.
+                    Select photos, videos, or a .zip archive from your device. Zip archives will be automatically extracted directly to your active Proximap project.
                 </div>
             </div>
         </div>
@@ -675,7 +706,20 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
                 };
                 item.appendChild(removeBtn);
 
-                if (file.type.startsWith('image/') || /\\.(heic|heif|jpg|jpeg|png|webp)$/i.test(file.name)) {
+                if (file.name.toLowerCase().endsWith('.zip') || file.type.includes('zip')) {
+                    const zipDiv = document.createElement('div');
+                    zipDiv.className = 'zip-card';
+                    zipDiv.innerHTML = `
+                        <svg viewBox="0 0 24 24"><path d="M20 6h-8l-2-2H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm-6 10h-2v-2h2v2zm0-4h-2v-2h2v2z"/></svg>
+                        <div class="zip-name">${file.name}</div>
+                    `;
+                    item.appendChild(zipDiv);
+
+                    const badge = document.createElement('span');
+                    badge.className = 'video-badge';
+                    badge.innerText = 'ZIP ARCHIVE';
+                    item.appendChild(badge);
+                } else if (file.type.startsWith('image/') || /\\.(heic|heif|jpg|jpeg|png|webp)$/i.test(file.name)) {
                     const img = document.createElement('img');
                     img.src = URL.createObjectURL(file);
                     item.appendChild(img);
@@ -877,12 +921,82 @@ class MobileBridgeServer(QThread):
             file = request.files["file"]
             if file.filename == "":
                 return jsonify({"error": "Empty filename"}), 400
-            
-            dest_path = os.path.join(self.save_dir, file.filename)
-            file.save(dest_path)
-            self.received_paths.append(dest_path)
-            self.file_received.emit(dest_path)
-            return jsonify({"status": "ok", "filename": file.filename})
+
+            filename_lower = file.filename.lower()
+
+            if filename_lower.endswith(".zip"):
+                temp_fd, temp_zip_path = tempfile.mkstemp(suffix=".zip", dir=self.save_dir)
+                os.close(temp_fd)
+                try:
+                    file.save(temp_zip_path)
+                    extracted_files = []
+
+                    with zipfile.ZipFile(temp_zip_path, 'r') as zf:
+                        infolist = zf.infolist()
+                        if len(infolist) > _ZIP_MAX_FILES:
+                            return jsonify({"error": f"ZIP contains too many files (max {_ZIP_MAX_FILES})"}), 400
+
+                        total_bytes = 0
+                        for member in infolist:
+                            if member.is_dir():
+                                continue
+                            
+                            clean_filename = os.path.basename(member.filename)
+                            if not clean_filename or clean_filename.startswith("._") or "__MACOSX" in member.filename:
+                                continue
+
+                            ext = os.path.splitext(clean_filename)[1].lower()
+                            if ext not in _MEDIA_EXTENSIONS:
+                                continue
+
+                            total_bytes += member.file_size
+                            if total_bytes > _ZIP_MAX_BYTES:
+                                log.warning(f"[MobileBridge] ZIP uncompressed size exceeds limit of {_ZIP_MAX_BYTES} bytes")
+                                break
+
+                            # Flatten structure & auto-suffix filename collisions (e.g. photo_1.jpg)
+                            base, file_ext = os.path.splitext(clean_filename)
+                            dest_path = os.path.join(self.save_dir, clean_filename)
+                            counter = 1
+                            while os.path.exists(dest_path):
+                                dest_path = os.path.join(self.save_dir, f"{base}_{counter}{file_ext}")
+                                counter += 1
+
+                            # Security check: ensure path stays within save_dir
+                            abs_dest = os.path.abspath(dest_path)
+                            abs_save_dir = os.path.abspath(self.save_dir)
+                            if not abs_dest.startswith(abs_save_dir):
+                                log.warning(f"[MobileBridge] Skipping unsafe zip member path: {member.filename}")
+                                continue
+
+                            with zf.open(member) as source, open(dest_path, "wb") as target:
+                                target.write(source.read())
+
+                            self.received_paths.append(dest_path)
+                            self.file_received.emit(dest_path)
+                            extracted_files.append(os.path.basename(dest_path))
+
+                    return jsonify({
+                        "status": "ok",
+                        "filename": file.filename,
+                        "extracted": len(extracted_files),
+                        "extracted_files": extracted_files
+                    })
+                except Exception as e:
+                    log.error(f"[MobileBridge] Error extracting zip upload {file.filename}: {e}")
+                    return jsonify({"error": f"Failed to extract ZIP archive: {str(e)}"}), 500
+                finally:
+                    if os.path.exists(temp_zip_path):
+                        try:
+                            os.remove(temp_zip_path)
+                        except Exception:
+                            pass
+            else:
+                dest_path = os.path.join(self.save_dir, file.filename)
+                file.save(dest_path)
+                self.received_paths.append(dest_path)
+                self.file_received.emit(dest_path)
+                return jsonify({"status": "ok", "filename": file.filename})
 
         @self.app.route("/done", methods=["POST"])
         def done():

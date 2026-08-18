@@ -180,8 +180,8 @@ import socketserver
 import threading
 import webbrowser
 
-IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.tif', '.tiff')
-VIDEO_EXTS = ('.mp4', '.mov', '.avi', '.mkv')
+IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.heic', '.heif', '.webp')
+VIDEO_EXTS = ('.mp4', '.mov', '.avi', '.mkv', '.m4v')
 
 CAMERA_CONTROLS = {
     0: "<b>Arcball Camera Controls:</b><br>"
@@ -712,8 +712,24 @@ class ViewerWrapperWidget(QFrame):
         
         self.file_menu.addMenu(self.export_mesh_menu)
         self.file_menu.addSeparator()
-        self.action_import_standalone = self.file_menu.addAction("Import Point Cloud")
-        self.action_mobile_import = self.file_menu.addAction("Import Images/Videos from Mobile Device")
+        
+        # Unified sub-menu for importing media, archives, & point clouds
+        self.import_menu = QMenu("Import", self.file_menu)
+        self.import_menu.setStyleSheet(self.file_menu.styleSheet())
+        
+        self.action_import_media = self.import_menu.addAction("Media Files (Images/Videos)...")
+        self.action_import_dir = self.import_menu.addAction("Media Directory / Folder...")
+        self.action_import_zip = self.import_menu.addAction("ZIP Archive (.zip)...")
+        self.import_menu.addSeparator()
+        self.action_import_mobile = self.import_menu.addAction("From Mobile Device (Local Network)...")
+        self.action_import_point_cloud = self.import_menu.addAction("Point Cloud (.ply, .las, .laz)...")
+        
+        # Backward compatibility aliases
+        self.action_import_standalone = self.action_import_point_cloud
+        self.action_mobile_import = self.action_import_mobile
+
+        self.file_menu.addMenu(self.import_menu)
+        self.file_menu.addSeparator()
         self.action_mobile_export = self.file_menu.addAction("Send 3D Model to Mobile")
         self.file_menu.addSeparator()
         self.action_upload_proximap = self.file_menu.addAction("Upload to Proximap")
@@ -2342,8 +2358,11 @@ class MainWindow(QMainWindow):
         self.viewer_widget.action_export_glb.triggered.connect(lambda: self._export_mesh(".glb"))
         self.viewer_widget.action_export_obj.triggered.connect(lambda: self._export_mesh(".obj"))
         self.viewer_widget.action_export_usdz.triggered.connect(lambda: self._export_mesh(".usdz"))
-        self.viewer_widget.action_mobile_import.triggered.connect(self._on_import_from_mobile_clicked)
-        self.viewer_widget.action_import_standalone.triggered.connect(self._import_standalone_cloud_clicked)
+        self.viewer_widget.action_import_media.triggered.connect(self._open_files_dialog)
+        self.viewer_widget.action_import_dir.triggered.connect(self._open_dir_dialog)
+        self.viewer_widget.action_import_zip.triggered.connect(self._open_zip_dialog)
+        self.viewer_widget.action_import_mobile.triggered.connect(self._on_import_from_mobile_clicked)
+        self.viewer_widget.action_import_point_cloud.triggered.connect(self._import_standalone_cloud_clicked)
         self.viewer_widget.action_mobile_export.triggered.connect(self._on_send_to_mobile_clicked)
         self.viewer_widget.action_upload_proximap.triggered.connect(self._upload_to_proximap)
 
@@ -3166,6 +3185,63 @@ class MainWindow(QMainWindow):
                 self._route_import(images, videos, append_to_existing=False)
             else:
                 self.console_text.append("[WARNING] No valid images or videos found in selected folder.")
+
+    def _open_zip_dialog(self):
+        zip_path, _ = QFileDialog.getOpenFileName(
+            self, "Select ZIP Archive", self.last_accessed_dir, "ZIP Archives (*.zip)"
+        )
+        if zip_path:
+            self.last_accessed_dir = os.path.dirname(zip_path)
+            extract_dir = os.path.join(
+                get_reconstruction_out_dir(), "zip_imports", os.path.splitext(os.path.basename(zip_path))[0]
+            )
+            os.makedirs(extract_dir, exist_ok=True)
+            
+            images = []
+            videos = []
+            ignored = []
+            
+            import zipfile
+            try:
+                with zipfile.ZipFile(zip_path, 'r') as zf:
+                    for member in zf.infolist():
+                        if member.is_dir():
+                            continue
+                        clean_filename = os.path.basename(member.filename)
+                        if not clean_filename or clean_filename.startswith("._") or "__MACOSX" in member.filename:
+                            continue
+                        
+                        ext = os.path.splitext(clean_filename)[1].lower()
+                        if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
+                            base, file_ext = os.path.splitext(clean_filename)
+                            dest_path = os.path.join(extract_dir, clean_filename)
+                            counter = 1
+                            while os.path.exists(dest_path):
+                                dest_path = os.path.join(extract_dir, f"{base}_{counter}{file_ext}")
+                                counter += 1
+                            
+                            with zf.open(member) as src, open(dest_path, "wb") as dst:
+                                dst.write(src.read())
+                            
+                            normalized = os.path.normpath(dest_path)
+                            if ext in IMAGE_EXTS:
+                                images.append(normalized)
+                            else:
+                                videos.append(normalized)
+                        else:
+                            ignored.append(clean_filename)
+                
+                if ignored:
+                    self._warn_ignored_files(ignored[:10])
+                
+                if images or videos:
+                    self.console_text.append(f"[INFO] Extracted {len(images)} image(s) and {len(videos)} video(s) from {os.path.basename(zip_path)}.")
+                    self._route_import(images, videos, append_to_existing=False)
+                else:
+                    self.console_text.append("[WARNING] No valid supported media found in selected ZIP archive.")
+            except Exception as e:
+                self.console_text.append(f"[ERROR] Failed to open/extract ZIP archive: {e}")
+                QMessageBox.critical(self, "ZIP Import Error", f"Failed to extract ZIP archive:\n{str(e)}")
 
     def _on_files_dropped(self, files: list):
         images = []
@@ -4524,11 +4600,11 @@ class MainWindow(QMainWindow):
             self.viewer_widget.action_save.setEnabled(False)
             self.viewer_widget.action_load.setEnabled(False)
             self.viewer_widget.action_recover.setEnabled(False)
-            self.viewer_widget.action_import_standalone.setEnabled(False)
+            self.viewer_widget.import_menu.setEnabled(False)
             return
 
         self.viewer_widget.action_new.setEnabled(True)
-        self.viewer_widget.action_import_standalone.setEnabled(True)
+        self.viewer_widget.import_menu.setEnabled(True)
             
         # We can save if we have a valid MVS directory containing reconstruction files/models
         mvs_dir = self.viewer_widget.current_mvs_dir
