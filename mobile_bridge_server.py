@@ -246,14 +246,38 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            background-color: #121212;
+            background-color: #0D0D0D;
             color: #E0E0E0;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            padding: 20px;
+            padding: 16px;
             display: flex;
             flex-direction: column;
             align-items: center;
             min-height: 100vh;
+        }
+        .app-header {
+            width: 100%;
+            max-width: 480px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 0 20px 0;
+            border-bottom: 1px solid #1F1F1F;
+            margin-bottom: 16px;
+        }
+        .brand-logo {
+            font-size: 18px;
+            font-weight: 800;
+            letter-spacing: 1px;
+            color: #FFFFFF;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .brand-logo span {
+            color: #00E676;
+            font-size: 22px;
+            line-height: 0;
         }
         .container {
             width: 100%;
@@ -262,103 +286,231 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
             flex-direction: column;
             gap: 16px;
         }
-        .header {
-            text-align: center;
-            padding: 16px 0;
-            border-bottom: 1px solid #292929;
+        .card {
+            background-color: #141414;
+            border: 1px solid #222222;
+            border-radius: 12px;
+            padding: 20px;
         }
-        .header h1 {
-            font-size: 20px;
+        .tab-header {
+            display: flex;
+            border-bottom: 1px solid #222222;
+            margin-bottom: 20px;
+        }
+        .tab-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 16px 12px 4px;
+            font-size: 12px;
+            font-weight: 700;
+            letter-spacing: 0.8px;
             color: #00E676;
-            margin-bottom: 4px;
+            border-bottom: 2px solid #00E676;
+            text-transform: uppercase;
         }
-        .header p {
-            font-size: 13px;
-            color: #9E9E9E;
+        .tab-item svg {
+            width: 16px;
+            height: 16px;
+            fill: currentColor;
         }
         .picker-box {
-            background-color: #1E1E1E;
-            border: 2px dashed #00E676;
+            background-color: #181818;
+            border: 2px dashed #2A2A2A;
             border-radius: 12px;
-            padding: 30px 20px;
+            padding: 36px 20px;
             text-align: center;
             cursor: pointer;
-            transition: background-color 0.2s;
+            transition: all 0.2s ease;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
         }
-        .picker-box:active { background-color: #292929; }
-        .picker-box svg {
-            width: 48px;
-            height: 48px;
+        .picker-box:active {
+            background-color: #1E1E1E;
+            border-color: #00E676;
+        }
+        .icon-square {
+            width: 52px;
+            height: 52px;
+            background-color: #222222;
+            border: 1px solid #2C2C2C;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .icon-square svg {
+            width: 26px;
+            height: 26px;
+            fill: #9E9E9E;
+            transition: fill 0.2s ease;
+        }
+        .picker-box:hover .icon-square svg,
+        .picker-box:active .icon-square svg {
             fill: #00E676;
-            margin-bottom: 12px;
         }
-        .picker-box span {
-            display: block;
-            font-size: 15px;
-            font-weight: 600;
+        .picker-title {
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.8px;
             color: #FFFFFF;
+            text-transform: uppercase;
+        }
+        .picker-subtitle {
+            font-size: 12px;
+            color: #757575;
+            line-height: 1.4;
+            max-width: 320px;
+        }
+        .picker-subtitle strong {
+            color: #A5A5A5;
+            font-weight: 600;
         }
         #fileInput { display: none; }
+
+        .info-card {
+            background-color: #181818;
+            border: 1px solid #222222;
+            border-radius: 8px;
+            padding: 12px 14px;
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+            margin-top: 16px;
+        }
+        .info-icon {
+            width: 20px;
+            height: 20px;
+            min-width: 20px;
+            color: #00E676;
+            margin-top: 1px;
+        }
+        .info-text {
+            font-size: 12px;
+            color: #9E9E9E;
+            line-height: 1.45;
+        }
+        .info-text strong {
+            color: #D0D0D0;
+        }
+
+        /* Preview Grid */
+        .grid-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-top: 16px;
+            margin-bottom: 8px;
+        }
+        .grid-title {
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.8px;
+            color: #A5A5A5;
+            text-transform: uppercase;
+        }
         .preview-grid {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
-            gap: 8px;
-            max-height: 280px;
+            gap: 10px;
+            max-height: 320px;
             overflow-y: auto;
-            background-color: #1E1E1E;
-            padding: 8px;
-            border-radius: 8px;
+            background-color: #181818;
+            padding: 10px;
+            border-radius: 10px;
+            border: 1px solid #222222;
         }
         .preview-item {
             position: relative;
             aspect-ratio: 1;
-            border-radius: 6px;
+            border-radius: 8px;
             overflow: hidden;
-            background-color: #2A2A2A;
+            background-color: #222222;
+            border: 1px solid #2A2A2A;
         }
         .preview-item img, .preview-item video {
             width: 100%;
             height: 100%;
             object-fit: cover;
+            display: block;
         }
         .video-badge {
             position: absolute;
-            bottom: 4px;
-            left: 4px;
-            background: rgba(0,0,0,0.7);
+            bottom: 6px;
+            left: 6px;
+            background: rgba(0,0,0,0.8);
             color: #00E676;
-            font-size: 10px;
-            padding: 2px 4px;
-            border-radius: 3px;
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+            padding: 2px 6px;
+            border-radius: 4px;
+            backdrop-filter: blur(4px);
         }
+        .btn-remove-file {
+            position: absolute;
+            top: 6px;
+            right: 6px;
+            width: 24px;
+            height: 24px;
+            border-radius: 50%;
+            background-color: rgba(0, 0, 0, 0.8);
+            border: 1px solid rgba(255, 255, 255, 0.25);
+            color: #FFFFFF;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.15s ease;
+            z-index: 5;
+            backdrop-filter: blur(4px);
+        }
+        .btn-remove-file:active {
+            background-color: #FF5252;
+            border-color: #FF5252;
+            transform: scale(1.1);
+        }
+        .btn-remove-file svg {
+            width: 12px;
+            height: 12px;
+            fill: currentColor;
+        }
+
         .btn-submit {
             background-color: #00E676;
-            color: #121212;
+            color: #0A0A0A;
             border: none;
-            border-radius: 8px;
+            border-radius: 10px;
             padding: 16px;
-            font-size: 16px;
-            font-weight: bold;
+            font-size: 15px;
+            font-weight: 700;
+            letter-spacing: 0.5px;
             cursor: pointer;
             width: 100%;
+            margin-top: 16px;
             display: none;
+            transition: background-color 0.2s;
         }
-        .btn-submit:disabled {
-            background-color: #444444;
-            color: #888888;
+        .btn-submit:active {
+            background-color: #00C853;
         }
+
         .progress-box {
             display: none;
             flex-direction: column;
-            gap: 8px;
-            background-color: #1E1E1E;
-            padding: 16px;
-            border-radius: 8px;
+            gap: 12px;
+            background-color: #141414;
+            border: 1px solid #222222;
+            padding: 24px 20px;
+            border-radius: 12px;
         }
         .progress-bar-bg {
-            background-color: #2A2A2A;
-            height: 12px;
-            border-radius: 6px;
+            background-color: #222222;
+            height: 10px;
+            border-radius: 5px;
             overflow: hidden;
         }
         .progress-bar-fill {
@@ -372,33 +524,82 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
             color: #B0B0B0;
             text-align: center;
         }
+
         .success-box {
             display: none;
             text-align: center;
-            padding: 30px;
-            background-color: #1E1E1E;
+            padding: 36px 20px;
+            background-color: #141414;
+            border: 1px solid #222222;
             border-radius: 12px;
         }
-        .success-box h2 { color: #00E676; margin-bottom: 8px; }
+        .success-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            background-color: rgba(0, 230, 118, 0.15);
+            border: 1px solid #00E676;
+            color: #00E676;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 16px auto;
+        }
+        .success-box h2 {
+            color: #FFFFFF;
+            font-size: 18px;
+            margin-bottom: 8px;
+        }
+        .success-box p {
+            color: #9E9E9E;
+            font-size: 13px;
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1>Proximap Mobile Import</h1>
-            <p>Send photos & videos directly to your PC</p>
-        </div>
+    <div class="app-header">
+        <div class="brand-logo">PROXIMAP <span>.</span></div>
+    </div>
 
-        <div id="uploadSection">
-            <div class="picker-box" onclick="document.getElementById('fileInput').click()">
-                <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
-                <span>Select Images / Videos</span>
+    <div class="container">
+        <div id="uploadSection" class="card">
+            <div class="tab-header">
+                <div class="tab-item">
+                    <svg viewBox="0 0 24 24"><path d="M9 16h6v-6h4l-7-7-7 7h4v6zm-4 2h14v2H5v-2z"/></svg>
+                    Upload Local Files
+                </div>
             </div>
-            <input type="file" id="fileInput" multiple accept="image/heic,image/heif,image/jpeg,image/jpg,image/png,image/webp,image/*,video/quicktime,video/mp4,video/x-m4v,video/*" onchange="handleFilesSelected(this.files)">
-            <br>
-            <div id="previewGrid" class="preview-grid" style="display: none;"></div>
-            <br>
+
+            <div class="picker-box" onclick="document.getElementById('fileInput').click()">
+                <div class="icon-square">
+                    <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
+                </div>
+                <div class="picker-title">Drag & Drop or Click to Browse</div>
+                <div class="picker-subtitle">
+                    Supports <strong>.jpg</strong>, <strong>.jpeg</strong>, <strong>.png</strong>, <strong>.heic</strong>, <strong>.mp4</strong>, <strong>.mov</strong> files to send directly to desktop.
+                </div>
+            </div>
+            <input type="file" id="fileInput" multiple accept="image/*,video/*" onchange="handleFilesSelected(this.files)">
+
+            <div id="previewContainer" style="display: none;">
+                <div class="grid-header">
+                    <div class="grid-title">Staged Media Preview</div>
+                </div>
+                <div id="previewGrid" class="preview-grid"></div>
+            </div>
+
             <button id="uploadBtn" class="btn-submit" onclick="startUpload()">Done — Send to Proximap</button>
+
+            <div class="info-card">
+                <svg class="info-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="16" x2="12" y2="12"></line>
+                    <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                </svg>
+                <div class="info-text">
+                    Select multiple photos or videos from your iPhone gallery. All selected media will be sent directly to your active Proximap project.
+                </div>
+            </div>
         </div>
 
         <div id="progressSection" class="progress-box">
@@ -409,8 +610,13 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
         </div>
 
         <div id="successSection" class="success-box">
-            <h2>✓ Transfer Complete!</h2>
-            <p>Your media files were sent to Proximap on your desktop.</p>
+            <div class="success-icon">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="20 6 9 17 4 12"></polyline>
+                </svg>
+            </div>
+            <h2>Transfer Complete!</h2>
+            <p>Your media files were successfully sent to Proximap on your desktop.</p>
         </div>
     </div>
 
@@ -419,47 +625,73 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
 
         function handleFilesSelected(files) {
             if (!files || files.length === 0) return;
-            selectedFiles = Array.from(files);
-
-            const grid = document.getElementById('previewGrid');
-            grid.innerHTML = '';
-            grid.style.display = 'grid';
-
-            const btn = document.getElementById('uploadBtn');
-            btn.style.display = 'block';
-            btn.innerText = `Done — Send ${selectedFiles.length} File(s) to Proximap`;
-
-            // Render thumbnails asynchronously in small batches to keep mobile UI fluid
-            let index = 0;
-            function renderBatch() {
-                const batchSize = 6;
-                const end = Math.min(index + batchSize, selectedFiles.length);
-                for (let i = index; i < end; i++) {
-                    const file = selectedFiles[i];
-                    const item = document.createElement('div');
-                    item.className = 'preview-item';
-                    
-                    if (file.type.startsWith('image/') || /\\.(heic|heif|jpg|jpeg|png|webp)$/i.test(file.name)) {
-                        const img = document.createElement('img');
-                        img.src = URL.createObjectURL(file);
-                        item.appendChild(img);
-                    } else {
-                        const video = document.createElement('video');
-                        video.src = URL.createObjectURL(file);
-                        item.appendChild(video);
-                        const badge = document.createElement('span');
-                        badge.className = 'video-badge';
-                        badge.innerText = 'VIDEO';
-                        item.appendChild(badge);
-                    }
-                    grid.appendChild(item);
-                }
-                index = end;
-                if (index < selectedFiles.length) {
-                    requestAnimationFrame(renderBatch);
+            const newFiles = Array.from(files);
+            for (let nf of newFiles) {
+                if (!selectedFiles.some(f => f.name === nf.name && f.size === nf.size)) {
+                    selectedFiles.push(nf);
                 }
             }
-            renderBatch();
+            renderPreviewGrid();
+            document.getElementById('fileInput').value = '';
+        }
+
+        function removeFile(index) {
+            if (index >= 0 && index < selectedFiles.length) {
+                selectedFiles.splice(index, 1);
+                renderPreviewGrid();
+            }
+        }
+
+        function renderPreviewGrid() {
+            const container = document.getElementById('previewContainer');
+            const grid = document.getElementById('previewGrid');
+            const btn = document.getElementById('uploadBtn');
+
+            grid.innerHTML = '';
+
+            if (selectedFiles.length === 0) {
+                container.style.display = 'none';
+                btn.style.display = 'none';
+                return;
+            }
+
+            container.style.display = 'block';
+            btn.style.display = 'block';
+            btn.innerText = `Done — Send ${selectedFiles.length} File${selectedFiles.length > 1 ? 's' : ''} to Proximap`;
+
+            selectedFiles.forEach((file, index) => {
+                const item = document.createElement('div');
+                item.className = 'preview-item';
+
+                // Create remove button
+                const removeBtn = document.createElement('button');
+                removeBtn.className = 'btn-remove-file';
+                removeBtn.type = 'button';
+                removeBtn.title = 'Remove item';
+                removeBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>`;
+                removeBtn.onclick = function(e) {
+                    e.stopPropagation();
+                    removeFile(index);
+                };
+                item.appendChild(removeBtn);
+
+                if (file.type.startsWith('image/') || /\\.(heic|heif|jpg|jpeg|png|webp)$/i.test(file.name)) {
+                    const img = document.createElement('img');
+                    img.src = URL.createObjectURL(file);
+                    item.appendChild(img);
+                } else {
+                    const video = document.createElement('video');
+                    video.src = URL.createObjectURL(file);
+                    item.appendChild(video);
+
+                    const badge = document.createElement('span');
+                    badge.className = 'video-badge';
+                    badge.innerText = 'VIDEO';
+                    item.appendChild(badge);
+                }
+
+                grid.appendChild(item);
+            });
         }
 
         function startUpload() {
@@ -477,7 +709,6 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
 
             function uploadNextFile() {
                 if (currentFileIndex >= selectedFiles.length) {
-                    // Signal finish
                     fetch('/done', { method: 'POST' })
                         .then(() => {
                             document.getElementById('progressSection').style.display = 'none';
@@ -496,13 +727,10 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
                 const xhr = new XMLHttpRequest();
                 xhr.open('POST', '/upload', true);
 
-                // Track upload progress for the current file
                 xhr.upload.onprogress = function(event) {
                     if (event.lengthComputable) {
                         const currentUploaded = event.loaded;
                         const totalUploadedBytes = previousCompletedBytes + currentUploaded;
-                        
-                        // Limit display percentage to 99% until /done finishes
                         const displayPct = Math.min(Math.round((totalUploadedBytes / totalBytes) * 100), 99);
                         fill.style.width = displayPct + '%';
                         status.innerText = `Uploading ${currentFileIndex + 1} of ${selectedFiles.length}: ${file.name} (${displayPct}%)`;
