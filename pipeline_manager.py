@@ -76,6 +76,19 @@ def get_default_vocab_tree_path() -> str | None:
     return None
 
 
+PIPELINE_STEPS = [
+    "image_preparation",
+    "features_extracted",
+    "features_matched",
+    "sparse_reconstruction",
+    "dense_reconstruction",
+    "mesh_reconstructed",
+    "mesh_refined",
+    "mesh_cleaned",
+    "mesh_textured"
+]
+
+
 class PipelineWorker(QThread):
     """
     Worker thread that executes the photogrammetry toolchain step-by-step.
@@ -85,6 +98,26 @@ class PipelineWorker(QThread):
     status_changed = Signal(str)
     log_message = Signal(str)
     finished = Signal(bool, str)
+
+    def _should_skip(self, target_step: str) -> bool:
+        """Returns True if resume_from_step is set and target_step comes strictly before resume_from_step."""
+        if not self.resume_from_step:
+            return False
+        
+        alias_map = {
+            "images_imported": "features_extracted",
+            "mesh_reconstruction": "mesh_textured"
+        }
+        res_step = alias_map.get(self.resume_from_step, self.resume_from_step)
+        tgt_step = alias_map.get(target_step, target_step)
+
+        if res_step not in PIPELINE_STEPS or tgt_step not in PIPELINE_STEPS:
+            return False
+
+        resume_idx = PIPELINE_STEPS.index(res_step)
+        target_idx = PIPELINE_STEPS.index(tgt_step)
+        return target_idx < resume_idx
+
 
     def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, auto_cleanup: bool = False, mapper_mode: str = "incremental", ref_cloud_path: str = None, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, resume_from_step: str = None, parent=None):
         super().__init__(parent)
@@ -621,17 +654,17 @@ class PipelineWorker(QThread):
         is_checkpoint_valid = self._is_valid_checkpoint(check_db_path)
 
         # Clean up stale reconstruction subdirectories to prevent legacy files impacting new scans
-        for subdir in ["colmap", "mvs"]:
-            if subdir == "colmap" and resume_requested and is_checkpoint_valid:
-                self.log_message.emit(f"[RESUME] Preserving valid database checkpoint at: {check_db_path}")
-                continue
-            sub_path = os.path.join(self.output_dir, subdir)
-            if os.path.exists(sub_path):
-                self.log_message.emit(f"[INFO] Cleaning up stale reconstruction directory: {sub_path}")
-                try:
-                    shutil.rmtree(sub_path)
-                except Exception as e:
-                    self.log_message.emit(f"[WARNING] Failed to clean output folder: {e}")
+        if resume_requested:
+            self.log_message.emit(f"[RESUME] Resuming session from step: '{self.resume_from_step}'. Preserving intermediate reconstruction outputs.")
+        else:
+            for subdir in ["colmap", "mvs"]:
+                sub_path = os.path.join(self.output_dir, subdir)
+                if os.path.exists(sub_path):
+                    self.log_message.emit(f"[INFO] Cleaning up stale reconstruction directory: {sub_path}")
+                    try:
+                        shutil.rmtree(sub_path)
+                    except Exception as e:
+                        self.log_message.emit(f"[WARNING] Failed to clean output folder: {e}")
 
         colmap_out = self._to_colmap_path(os.path.abspath(os.path.join(self.output_dir, "colmap")))
         mvs_out = self._to_colmap_path(os.path.abspath(os.path.join(self.output_dir, "mvs")))
@@ -760,12 +793,13 @@ class PipelineWorker(QThread):
                 texture_res = self.custom_params["texture_res"]
 
         total_steps = 10 if self.auto_cleanup else 9
-        skip_sfm = self.resume_from_step in ["sparse_reconstruction", "dense_reconstruction"]
-        skip_dense = self.resume_from_step == "dense_reconstruction"
 
-        if skip_sfm:
-            self.log_message.emit(f"[RESUME] Resuming session from checkpoint: '{self.resume_from_step}'. Skipping Steps 1-5 (SfM & Sparse Cloud already complete).")
-            self.progress_changed.emit(70)
+        # =========================================================================
+        # STEP 1 — Image Preparation
+        # =========================================================================
+        if self._should_skip("image_preparation"):
+            self.log_message.emit("[RESUME] Skipping Step 1 (Image Preparation already complete).")
+            self.progress_changed.emit(10)
             working_image_dir = os.path.join(self.output_dir, "input_images")
             if not os.path.exists(working_image_dir) or not any(f.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff')) for f in (os.listdir(working_image_dir) if os.path.exists(working_image_dir) else [])):
                 working_image_dir = self._prepare_images(
@@ -779,9 +813,6 @@ class PipelineWorker(QThread):
             except Exception:
                 self._total_images = 0
         else:
-            # =========================================================================
-            # STEP 1 — Image Preparation
-            # =========================================================================
             self.status_changed.emit(f"Step 1/{total_steps}: Preparing Images...")
             working_image_dir = self._prepare_images(
                 self.image_dir, self.output_dir, max_image_dim
@@ -793,7 +824,8 @@ class PipelineWorker(QThread):
                 ])
             except Exception:
                 self._total_images = 0
-        self.progress_changed.emit(10)
+            self.progress_changed.emit(10)
+            self._backup_checkpoint("image_preparation")
 
         # Dynamic SIFT parameter throttling based on dataset size, quality preset, and dynamic swap/memory pressure
         colmap_max_num_features, colmap_max_num_matches = self._get_throttled_sift_limits(self._total_images)
@@ -804,7 +836,7 @@ class PipelineWorker(QThread):
         os.makedirs(os.path.dirname(database_path), exist_ok=True)
         working_image_dir = self._to_colmap_path(working_image_dir)
         if os.path.exists(database_path):
-            if resume_requested and is_checkpoint_valid:
+            if resume_requested and (is_checkpoint_valid or self._should_skip("features_extracted")):
                 self.log_message.emit("[RESUME] Preserving valid COLMAP database checkpoint for reconstruction.")
             else:
                 try:
@@ -839,19 +871,92 @@ class PipelineWorker(QThread):
         except Exception as e:
             self.log_message.emit(f"[WARNING] Could not check image dimensions: {e}. Defaulting to single camera model.")
 
-        skip_features_and_matching = resume_requested and is_checkpoint_valid and self.resume_from_step in ["sparse_reconstruction", "dense_reconstruction", "features_matched"]
-        skip_features_only = resume_requested and is_checkpoint_valid and self.resume_from_step == "features_extracted"
-
-        if skip_features_and_matching:
+        # Step 2: Feature Extraction
+        if self._should_skip("features_extracted"):
             self.log_message.emit(
-                "[RESUME] Valid checkpoint database detected! "
-                "Skipping Step 2 (Feature Extraction) and Step 3 (Feature Matching)."
+                "[RESUME] SIFT features already extracted in database! "
+                "Skipping Step 2 (Feature Extraction)."
+            )
+            db_stats = self._query_colmap_database_stats(database_path)
+            if db_stats["feature_counts"]:
+                self._feature_counts = db_stats["feature_counts"]
+            self._emit_feature_summary()
+            self.progress_changed.emit(25)
+        else:
+            self.status_changed.emit(f"Step 2/{total_steps}: Extracting SIFT Features...")
+
+            cmd_extract_gpu = [
+                colmap_exe, "feature_extractor",
+                "--database_path", database_path,
+                "--image_path", working_image_dir,
+                "--ImageReader.camera_model", "PINHOLE",
+                "--ImageReader.single_camera", single_camera_val,
+                "--SiftExtraction.use_gpu", "1",
+                "--SiftExtraction.max_image_size", str(colmap_max_image_size),
+                "--SiftExtraction.num_threads", str(num_threads),
+                "--SiftExtraction.max_num_features", str(colmap_max_num_features),
+                "--SiftExtraction.first_octave", str(colmap_first_octave),
+            ]
+            cmd_extract_cpu = [
+                colmap_exe, "feature_extractor",
+                "--database_path", database_path,
+                "--image_path", working_image_dir,
+                "--ImageReader.camera_model", "PINHOLE",
+                "--ImageReader.single_camera", single_camera_val,
+                "--SiftExtraction.use_gpu", "0",
+                "--SiftExtraction.max_image_size", str(colmap_max_image_size),
+                "--SiftExtraction.num_threads", str(num_threads),
+                "--SiftExtraction.max_num_features", str(colmap_max_num_features),
+                "--SiftExtraction.first_octave", str(colmap_first_octave),
+            ]
+            if self.has_plain_surfaces:
+                additional_flags = [
+                    "--SiftExtraction.peak_threshold", "0.002",
+                    "--SiftExtraction.edge_threshold", "15"
+                ]
+                cmd_extract_gpu.extend(additional_flags)
+                cmd_extract_cpu.extend(additional_flags)
+            self._feature_counts = []
+            if not self._run_with_gpu_fallback(
+                cmd_extract_gpu, cmd_extract_cpu, timeout=14400.0, env=colmap_env,
+                line_parser=self._parse_feature_extraction_line
+            ):
+                return False
+
+            db_stats = self._query_colmap_database_stats(database_path)
+            if db_stats["feature_counts"]:
+                self._feature_counts = db_stats["feature_counts"]
+            self._emit_feature_summary()
+
+            num_registered = db_stats["num_images"]
+            if num_registered < 2:
+                if len(self._feature_counts) >= 2:
+                    num_registered = len(self._feature_counts)
+                elif self._total_images >= 2:
+                    num_registered = self._total_images
+            if num_registered < 2:
+                self.log_message.emit(
+                    f"[ERROR] Only {num_registered} image(s) successfully registered in the database. "
+                    "Reconstruction requires at least 2 registered images. Aborting."
+                )
+                return False
+            elif num_registered < self._total_images:
+                self.log_message.emit(
+                    f"[WARNING] Only {num_registered} out of {self._total_images} images successfully registered. "
+                    "Some images may be skipped or corrupt."
+                )
+
+            self.progress_changed.emit(25)
+            self._backup_checkpoint("features_extracted")
+
+        # Step 3: SIFT matching
+        if self._should_skip("features_matched"):
+            self.log_message.emit(
+                "[RESUME] Feature matches already generated in database! "
+                "Skipping Step 3 (Feature Matching)."
             )
             db_stats = self._query_colmap_database_stats(database_path)
             num_registered = db_stats["num_images"]
-            self.log_message.emit(
-                f"[RESUME] Loaded checkpoint database with {num_registered} registered images and {db_stats['num_pairs']} matched pairs."
-            )
             self._image_names_map = self._get_image_names_from_db(database_path)
             self._pairs_tested = (num_registered * (num_registered - 1)) // 2 if num_registered > 1 else 0
             self._pairs_matched = db_stats["num_pairs"]
@@ -859,90 +964,7 @@ class PipelineWorker(QThread):
                 self._match_counts = db_stats["match_counts"]
             self._emit_matching_summary(database_path)
             self.progress_changed.emit(40)
-
         else:
-            if skip_features_only:
-                self.log_message.emit(
-                    "[RESUME] SIFT features already extracted in database! "
-                    "Skipping Step 2 (Feature Extraction) and proceeding directly to Step 3 (Feature Matching)."
-                )
-                db_stats = self._query_colmap_database_stats(database_path)
-                if db_stats["feature_counts"]:
-                    self._feature_counts = db_stats["feature_counts"]
-                self._emit_feature_summary()
-                self.progress_changed.emit(25)
-            else:
-                # -----------------------------------------------------------------
-                # SIFT path: existing COLMAP feature_extractor + exhaustive_matcher
-                # -----------------------------------------------------------------
-                self.status_changed.emit(f"Step 2/{total_steps}: Extracting SIFT Features...")
-
-                cmd_extract_gpu = [
-                    colmap_exe, "feature_extractor",
-                    "--database_path", database_path,
-                    "--image_path", working_image_dir,
-                    "--ImageReader.camera_model", "PINHOLE",
-                    "--ImageReader.single_camera", single_camera_val,
-                    "--SiftExtraction.use_gpu", "1",
-                    "--SiftExtraction.max_image_size", str(colmap_max_image_size),
-                    "--SiftExtraction.num_threads", str(num_threads),
-                    "--SiftExtraction.max_num_features", str(colmap_max_num_features),
-                    "--SiftExtraction.first_octave", str(colmap_first_octave),
-                ]
-                cmd_extract_cpu = [
-                    colmap_exe, "feature_extractor",
-                    "--database_path", database_path,
-                    "--image_path", working_image_dir,
-                    "--ImageReader.camera_model", "PINHOLE",
-                    "--ImageReader.single_camera", single_camera_val,
-                    "--SiftExtraction.use_gpu", "0",
-                    "--SiftExtraction.max_image_size", str(colmap_max_image_size),
-                    "--SiftExtraction.num_threads", str(num_threads),
-                    "--SiftExtraction.max_num_features", str(colmap_max_num_features),
-                    "--SiftExtraction.first_octave", str(colmap_first_octave),
-                ]
-                if self.has_plain_surfaces:
-                    # Preview quality: lower SIFT thresholds as a best-effort fallback
-                    additional_flags = [
-                        "--SiftExtraction.peak_threshold", "0.002",
-                        "--SiftExtraction.edge_threshold", "15"
-                    ]
-                    cmd_extract_gpu.extend(additional_flags)
-                    cmd_extract_cpu.extend(additional_flags)
-                self._feature_counts = []
-                if not self._run_with_gpu_fallback(
-                    cmd_extract_gpu, cmd_extract_cpu, timeout=14400.0, env=colmap_env,
-                    line_parser=self._parse_feature_extraction_line
-                ):
-                    return False
-
-                db_stats = self._query_colmap_database_stats(database_path)
-                if db_stats["feature_counts"]:
-                    self._feature_counts = db_stats["feature_counts"]
-                self._emit_feature_summary()
-
-                num_registered = db_stats["num_images"]
-                if num_registered < 2:
-                    if len(self._feature_counts) >= 2:
-                        num_registered = len(self._feature_counts)
-                    elif self._total_images >= 2:
-                        num_registered = self._total_images
-                if num_registered < 2:
-                    self.log_message.emit(
-                        f"[ERROR] Only {num_registered} image(s) successfully registered in the database. "
-                        "Reconstruction requires at least 2 registered images. Aborting."
-                    )
-                    return False
-                elif num_registered < self._total_images:
-                    self.log_message.emit(
-                        f"[WARNING] Only {num_registered} out of {self._total_images} images successfully registered. "
-                        "Some images may be skipped or corrupt."
-                    )
-
-                self.progress_changed.emit(25)
-                self._backup_checkpoint("features_extracted")
-
-            # Step 3: SIFT matching
             self.status_changed.emit(f"Step 3/{total_steps}: Matching SIFT Features...")
             os.makedirs(os.path.dirname(database_path), exist_ok=True)
             if not os.path.exists(database_path):
@@ -1085,13 +1107,19 @@ class PipelineWorker(QThread):
                 self._match_counts = db_stats["match_counts"]
             self._emit_matching_summary(database_path)
             self.progress_changed.emit(40)
-            self._backup_checkpoint("features_extracted")
+            self._backup_checkpoint("features_matched")
 
 
-        if not skip_sfm:
-            # =========================================================================
-            # STEP 4/9 — Sparse Reconstruction (Mapper)
-            # =========================================================================
+        # =========================================================================
+        # STEP 4/9 — Sparse Reconstruction (Mapper) & STEP 5 — Export to OpenMVS
+        # =========================================================================
+        if self._should_skip("sparse_reconstruction"):
+            self.log_message.emit(
+                "[RESUME] Camera poses and sparse model already reconstructed! "
+                "Skipping Steps 4 & 5 (SfM & OpenMVS Export)."
+            )
+            self.progress_changed.emit(70)
+        else:
             self._triangulated_points = 0
             self._registered_count = 0
             sparse_dir = self._to_colmap_path(os.path.join(colmap_out, "sparse"))
@@ -1194,9 +1222,7 @@ class PipelineWorker(QThread):
             self._emit_sfm_summary()
             self.progress_changed.emit(60)
 
-            # =========================================================================
             # STEP 5 — Export to OpenMVS Format
-            # =========================================================================
             self.status_changed.emit(f"Step 5/{total_steps}: Exporting Scene to OpenMVS...")
 
             # Copy sparse model files to the parent sparse directory so InterfaceCOLMAP can find them
@@ -1226,7 +1252,7 @@ class PipelineWorker(QThread):
         # =========================================================================
         # STEP 6/9 — Dense Point Cloud Generation
         # =========================================================================
-        if skip_dense:
+        if self._should_skip("dense_reconstruction"):
             self.log_message.emit("[RESUME] Skipping Step 6 (Dense Point Cloud already complete).")
             self.progress_changed.emit(80)
         else:
@@ -1277,116 +1303,149 @@ class PipelineWorker(QThread):
             poisson_ok = self._run_poisson_reconstruction(mvs_out, self.poisson_depth)
             if poisson_ok:
                 self.log_message.emit("[POISSON] Poisson reconstruction completed successfully. Skipping OpenMVS meshing, refinement, and texturing.")
+                self._backup_checkpoint("mesh_reconstructed")
                 self.progress_changed.emit(99)
                 return True
             else:
                 self.log_message.emit("[WARNING] Poisson reconstruction failed. Falling back to default OpenMVS Delaunay meshing pipeline...")
 
-        self.status_changed.emit(f"Step 7/{total_steps}: Reconstructing Surface Mesh...")
-        mvs_mesh_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["ReconstructMesh"])
-
         dense_mvs = os.path.join(mvs_out, "scene_dense.mvs")
         target_scene = "scene_dense.mvs" if os.path.exists(dense_mvs) else "scene.mvs"
-        if target_scene == "scene.mvs":
-            self.log_message.emit("[WARNING] scene_dense.mvs not found. Meshing from sparse scene.mvs.")
 
-        if fused_mesh_name and os.path.exists(os.path.join(mvs_out, fused_mesh_name)):
-            self.log_message.emit(f"[INFO] Skipping ReconstructMesh (Delaunay) — using Reference Cloud fused Poisson mesh: {fused_mesh_name}")
-            mesh_input = fused_mesh_name
-        else:
-            cmd = [
-                mvs_mesh_exe,
-                target_scene,
-                "--remove-spurious", "20",
-                "--remove-spikes",   "1",
-                "--close-holes",     "30",
-                "--smooth",          "2",
-            ]
-            self._mesh_vertices = 0
-            self._mesh_faces = 0
-            self._spurious_removed = 0
-            self._spikes_removed = 0
-            self._holes_closed = 0
-            if not self._run_process_realtime(cmd, timeout=1800.0, cwd=mvs_out, env=env, line_parser=self._parse_mesh_line):
-                return False
-            self._emit_mesh_summary()
-            if target_scene == "scene_dense.mvs":
+        if self._should_skip("mesh_reconstructed"):
+            self.log_message.emit("[RESUME] Skipping Step 7 (Surface Mesh Reconstruction already complete).")
+            if os.path.exists(os.path.join(mvs_out, "scene_dense_mesh.ply")):
                 mesh_input = "scene_dense_mesh.ply"
+            elif os.path.exists(os.path.join(mvs_out, "scene_dense_mesh_refcloud.ply")):
+                mesh_input = "scene_dense_mesh_refcloud.ply"
             else:
                 mesh_input = "scene_mesh.ply"
+            self.progress_changed.emit(88)
+        else:
+            self.status_changed.emit(f"Step 7/{total_steps}: Reconstructing Surface Mesh...")
+            mvs_mesh_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["ReconstructMesh"])
 
-        self.progress_changed.emit(88)
+            if target_scene == "scene.mvs":
+                self.log_message.emit("[WARNING] scene_dense.mvs not found. Meshing from sparse scene.mvs.")
+
+            if fused_mesh_name and os.path.exists(os.path.join(mvs_out, fused_mesh_name)):
+                self.log_message.emit(f"[INFO] Skipping ReconstructMesh (Delaunay) — using Reference Cloud fused Poisson mesh: {fused_mesh_name}")
+                mesh_input = fused_mesh_name
+            else:
+                cmd = [
+                    mvs_mesh_exe,
+                    target_scene,
+                    "--remove-spurious", "20",
+                    "--remove-spikes",   "1",
+                    "--close-holes",     "30",
+                    "--smooth",          "2",
+                ]
+                self._mesh_vertices = 0
+                self._mesh_faces = 0
+                self._spurious_removed = 0
+                self._spikes_removed = 0
+                self._holes_closed = 0
+                if not self._run_process_realtime(cmd, timeout=1800.0, cwd=mvs_out, env=env, line_parser=self._parse_mesh_line):
+                    return False
+                self._emit_mesh_summary()
+                if target_scene == "scene_dense.mvs":
+                    mesh_input = "scene_dense_mesh.ply"
+                else:
+                    mesh_input = "scene_mesh.ply"
+
+            self._backup_checkpoint("mesh_reconstructed")
+            self.progress_changed.emit(88)
 
         # =========================================================================
         # STEP 8 — Mesh Geometry Refinement (Multi-Scale)
         # =========================================================================
-        total_steps = 10 if self.auto_cleanup else 9
-        self.status_changed.emit(f"Step 8/{total_steps}: Refining Mesh Geometry...")
-        mvs_refine_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["RefineMesh"])
-
+        refine_mvs_output = "scene_dense_mesh_refine.mvs"
         if not os.path.exists(os.path.join(mvs_out, mesh_input)):
             for candidate in ["scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
                 if os.path.exists(os.path.join(mvs_out, candidate)):
                     mesh_input = candidate
                     break
 
-        refine_mvs_output = "scene_dense_mesh_refine.mvs"
-        cmd = [
-            mvs_refine_exe,
-            target_scene,
-            "-m",              mesh_input,
-            "-o",              refine_mvs_output,
-            "--resolution-level", refine_res,
-            "--scales",        refine_scales,
-            "--gradient-step", "25.05",
-            "--max-face-area", "16",
-        ]
-
-        refine_ok = self._run_process_realtime(cmd, timeout=7200.0, cwd=mvs_out, env=env)
-        refined_mvs_path = os.path.join(mvs_out, refine_mvs_output)
-        refined_ply_path = os.path.join(mvs_out, "scene_dense_mesh_refine.ply")
-
-        if refine_ok and (os.path.exists(refined_mvs_path) or os.path.exists(refined_ply_path)):
-            texture_input_scene = refine_mvs_output if os.path.exists(refined_mvs_path) else target_scene
-            self.log_message.emit(f"[INFO] RefineMesh succeeded. Using {texture_input_scene} for texturing.")
+        if self._should_skip("mesh_refined"):
+            self.log_message.emit("[RESUME] Skipping Step 8 (Mesh Geometry Refinement already complete).")
+            refined_mvs_path = os.path.join(mvs_out, refine_mvs_output)
+            refined_ply_path = os.path.join(mvs_out, "scene_dense_mesh_refine.ply")
+            if os.path.exists(refined_mvs_path) or os.path.exists(refined_ply_path):
+                texture_input_scene = refine_mvs_output if os.path.exists(refined_mvs_path) else target_scene
+            else:
+                texture_input_scene = target_scene
+            self.progress_changed.emit(91 if self.auto_cleanup else 94)
         else:
-            texture_input_scene = target_scene
-            self.log_message.emit(f"[WARNING] RefineMesh failed or produced no output. Texturing will use {target_scene}.")
+            self.status_changed.emit(f"Step 8/{total_steps}: Refining Mesh Geometry...")
+            mvs_refine_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["RefineMesh"])
 
-        self.progress_changed.emit(91 if self.auto_cleanup else 94)
+            cmd = [
+                mvs_refine_exe,
+                target_scene,
+                "-m",              mesh_input,
+                "-o",              refine_mvs_output,
+                "--resolution-level", refine_res,
+                "--scales",        refine_scales,
+                "--gradient-step", "25.05",
+                "--max-face-area", "16",
+            ]
+
+            refine_ok = self._run_process_realtime(cmd, timeout=7200.0, cwd=mvs_out, env=env)
+            refined_mvs_path = os.path.join(mvs_out, refine_mvs_output)
+            refined_ply_path = os.path.join(mvs_out, "scene_dense_mesh_refine.ply")
+
+            if refine_ok and (os.path.exists(refined_mvs_path) or os.path.exists(refined_ply_path)):
+                texture_input_scene = refine_mvs_output if os.path.exists(refined_mvs_path) else target_scene
+                self.log_message.emit(f"[INFO] RefineMesh succeeded. Using {texture_input_scene} for texturing.")
+            else:
+                texture_input_scene = target_scene
+                self.log_message.emit(f"[WARNING] RefineMesh failed or produced no output. Texturing will use {target_scene}.")
+
+            self._backup_checkpoint("mesh_refined")
+            self.progress_changed.emit(91 if self.auto_cleanup else 94)
 
         # =========================================================================
         # STEP 8.5 (Conditional) — PyMeshLab Auto Cleanup & Decimation
         # =========================================================================
         if self.auto_cleanup:
-            self.status_changed.emit(f"Step 9/{total_steps}: Auto-Cleaning Mesh...")
-            cleanup_input_ply = None
-            for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
-                candidate_path = os.path.join(mvs_out, candidate)
-                if os.path.exists(candidate_path):
-                    cleanup_input_ply = candidate_path
-                    break
-
-            if cleanup_input_ply:
-                cleaned_ply_path = os.path.join(mvs_out, "scene_dense_mesh_cleaned.ply")
-                try:
-                    from mesh_cleanup import run_mesh_cleanup
-                    cleanup_params = self.custom_params.get("cleanup_params") if self.custom_params else None
-                    cleanup_ok = run_mesh_cleanup(cleanup_input_ply, cleaned_ply_path, self.log_message.emit, cleanup_params=cleanup_params)
-                    if cleanup_ok and os.path.exists(cleaned_ply_path):
-                        self.log_message.emit("[INFO] Auto Cleanup completed successfully. Cleaned mesh ready for texturing.")
-                    else:
-                        self.log_message.emit("[WARNING] Auto Cleanup failed or produced no output. Texturing will use refined mesh.")
-                except Exception as e:
-                    self.log_message.emit(f"[WARNING] Error running mesh cleanup: {e}. Continuing pipeline.")
+            if self._should_skip("mesh_cleaned"):
+                self.log_message.emit("[RESUME] Skipping Step 9 (Auto-Cleaning Mesh already complete).")
+                self.progress_changed.emit(95)
             else:
-                self.log_message.emit("[WARNING] No suitable PLY mesh found for Auto Cleanup. Skipping cleanup stage.")
+                self.status_changed.emit(f"Step 9/{total_steps}: Auto-Cleaning Mesh...")
+                cleanup_input_ply = None
+                for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+                    candidate_path = os.path.join(mvs_out, candidate)
+                    if os.path.exists(candidate_path):
+                        cleanup_input_ply = candidate_path
+                        break
 
-            self.progress_changed.emit(95)
+                if cleanup_input_ply:
+                    cleaned_ply_path = os.path.join(mvs_out, "scene_dense_mesh_cleaned.ply")
+                    try:
+                        from mesh_cleanup import run_mesh_cleanup
+                        cleanup_params = self.custom_params.get("cleanup_params") if self.custom_params else None
+                        cleanup_ok = run_mesh_cleanup(cleanup_input_ply, cleaned_ply_path, self.log_message.emit, cleanup_params=cleanup_params)
+                        if cleanup_ok and os.path.exists(cleaned_ply_path):
+                            self.log_message.emit("[INFO] Auto Cleanup completed successfully. Cleaned mesh ready for texturing.")
+                        else:
+                            self.log_message.emit("[WARNING] Auto Cleanup failed or produced no output. Texturing will use refined mesh.")
+                    except Exception as e:
+                        self.log_message.emit(f"[WARNING] Error running mesh cleanup: {e}. Continuing pipeline.")
+                else:
+                    self.log_message.emit("[WARNING] No suitable PLY mesh found for Auto Cleanup. Skipping cleanup stage.")
+
+                self._backup_checkpoint("mesh_cleaned")
+                self.progress_changed.emit(95)
 
         # =========================================================================
         # STEP 9/10 — Texture Projection
         # =========================================================================
+        if self._should_skip("mesh_textured"):
+            self.log_message.emit("[RESUME] Skipping Texture Projection (already complete).")
+            self.progress_changed.emit(99)
+            return True
+
         step_num = 10 if self.auto_cleanup else 9
         self.status_changed.emit(f"Step {step_num}/{total_steps}: Projecting Textures onto Mesh...")
         mvs_texture_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["TextureMesh"])
@@ -1449,8 +1508,9 @@ class PipelineWorker(QThread):
             self.log_message.emit("[WARNING] TextureMesh PLY pass failed. Skipping OBJ export pass.")
 
         self.progress_changed.emit(99)
-        self._backup_checkpoint("mesh_reconstruction")
+        self._backup_checkpoint("mesh_textured")
         return True
+
     def _run_simulated_pipeline(self) -> bool:
         """Runs a visual simulation of the pipeline for testing UI and fallback states."""
         if self.auto_cleanup:

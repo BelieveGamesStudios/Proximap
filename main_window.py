@@ -1737,6 +1737,7 @@ class MainWindow(QMainWindow):
             
         self.image_list = []
         self.worker = None
+        self._last_failed_stage = None
         
         # Load hardware properties
         self.total_ram_gb = hardware_profiler.get_total_memory() / (1024**3)
@@ -2325,6 +2326,31 @@ class MainWindow(QMainWindow):
         self.process_btn.setObjectName("ProcessBtn")
         self.process_btn.setEnabled(False)
         self.process_btn.clicked.connect(self._start_processing)
+
+        self.resume_hint_label = QLabel("", step2_box)
+        self.resume_hint_label.setStyleSheet("color: #FFB300; font-size: 11px; font-weight: bold; margin-top: 2px;")
+        self.resume_hint_label.setAlignment(Qt.AlignCenter)
+        self.resume_hint_label.setWordWrap(True)
+        self.resume_hint_label.setVisible(False)
+
+        self.start_fresh_btn = QPushButton("Or start fresh", step2_box)
+        self.start_fresh_btn.setCursor(Qt.PointingHandCursor)
+        self.start_fresh_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                color: #888888;
+                font-size: 11px;
+                text-decoration: underline;
+                padding: 2px;
+                margin-bottom: 2px;
+            }
+            QPushButton:hover {
+                color: #00E676;
+            }
+        """)
+        self.start_fresh_btn.setVisible(False)
+        self.start_fresh_btn.clicked.connect(self._start_fresh)
         
         self.progress_bar = QProgressBar(step2_box)
         self.progress_bar.setValue(0)
@@ -2334,6 +2360,8 @@ class MainWindow(QMainWindow):
         self.status_label.setStyleSheet("color: #a3a3a3; font-style: italic;")
 
         step2_layout.addWidget(self.process_btn)
+        step2_layout.addWidget(self.resume_hint_label)
+        step2_layout.addWidget(self.start_fresh_btn)
         step2_layout.addWidget(self.progress_bar)
         step2_layout.addWidget(self.status_label)
         scroll_content_layout.addWidget(step2_box)
@@ -2403,7 +2431,7 @@ class MainWindow(QMainWindow):
         self.auto_cleanup_checkbox.toggled.connect(self._sync_auto_cleanup_to_mc)
         self.mc_enabled.toggled.connect(self._sync_mc_to_auto_cleanup)
         
-        self.cleanup_btn = QPushButton("✦  Run Mesh Cleanup", self.step3_box)
+        self.cleanup_btn = QPushButton("Run Mesh Cleanup", self.step3_box)
         self.cleanup_btn.setObjectName("ProcessBtn")
         self.cleanup_btn.setEnabled(False)
         self.cleanup_btn.clicked.connect(self._start_cleanup_only)
@@ -2413,33 +2441,6 @@ class MainWindow(QMainWindow):
         step3_layout.addWidget(self.mc_options_container)
         step3_layout.addWidget(self.cleanup_btn)
         scroll_content_layout.addWidget(self.step3_box)
-        
-        # Step 3 Export Mesh option has been moved to the file header menu.
-        
-        # 3D Visualizer Toggle Button
-        self.view_scene_btn = QPushButton("Show 3D Viewer", scroll_content)
-        self.view_scene_btn.setEnabled(False)
-        self.view_scene_btn.clicked.connect(self._toggle_viewer_mode)
-        self.view_scene_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #333333;
-                color: #ffffff;
-                border: 1px solid #444444;
-                padding: 10px;
-                font-size: 13px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #444444;
-                border-color: #00E676;
-            }
-            QPushButton:disabled {
-                background-color: #202020;
-                color: #555555;
-                border-color: #2D2D2D;
-            }
-        """)
-        scroll_content_layout.addWidget(self.view_scene_btn)
         
         scroll_content_layout.addStretch()
         
@@ -2826,7 +2827,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'cleanup_btn'):
             return
         if state == "idle":
-            self.cleanup_btn.setText("✦  Run Mesh Cleanup")
+            self.cleanup_btn.setText("Run Mesh Cleanup")
             self.cleanup_btn.setEnabled(False)
             self.cleanup_btn.setStyleSheet("""
                 QPushButton#ProcessBtn {
@@ -2836,7 +2837,7 @@ class MainWindow(QMainWindow):
                 }
             """)
         elif state == "ready":
-            self.cleanup_btn.setText("✦  Run Mesh Cleanup")
+            self.cleanup_btn.setText("Run Mesh Cleanup")
             self.cleanup_btn.setEnabled(True)
             self.cleanup_btn.setStyleSheet("""
                 QPushButton#ProcessBtn {
@@ -2882,13 +2883,50 @@ class MainWindow(QMainWindow):
                 }
             """)
 
+    def _get_stage_display_name(self, stage_key: str) -> str:
+        step_map = {
+            "image_preparation": "Image Preparation",
+            "features_extracted": "SIFT Feature Extraction",
+            "features_matched": "Feature Matching",
+            "sparse_reconstruction": "Camera Poses & Sparse Cloud (SfM)",
+            "dense_reconstruction": "Dense Point Cloud",
+            "mesh_reconstructed": "Surface Mesh Reconstruction",
+            "mesh_refined": "Mesh Geometry Refinement",
+            "mesh_cleaned": "Mesh Auto Cleanup",
+            "mesh_textured": "Texture Projection",
+        }
+        return step_map.get(stage_key, stage_key.replace("_", " ").title())
+
+    def _retry_with_resume(self):
+        if getattr(self, '_last_failed_stage', None):
+            self.console_text.append(f"[RETRY] Resuming reconstruction from stage: '{self._last_failed_stage}'...")
+            self._start_processing(resume_from_step=self._last_failed_stage)
+        else:
+            self.console_text.append("[RETRY] Retrying reconstruction from beginning...")
+            self._start_processing(resume_from_step=None)
+
+    def _start_fresh(self):
+        self._last_failed_stage = None
+        self.console_text.append("[START] Starting fresh reconstruction from beginning...")
+        self._start_processing(resume_from_step=None)
+
     def _set_process_btn_state(self, state: str):
         """
         Dynamically updates process button colors, text, and enabled state.
         """
+        try:
+            self.process_btn.clicked.disconnect()
+        except RuntimeError:
+            pass
+
         if state == "idle":
             self.process_btn.setText("▶  Start Reconstruction")
             self.process_btn.setEnabled(False)
+            self.process_btn.clicked.connect(self._start_processing)
+            if hasattr(self, 'resume_hint_label'):
+                self.resume_hint_label.setVisible(False)
+            if hasattr(self, 'start_fresh_btn'):
+                self.start_fresh_btn.setVisible(False)
             self.process_btn.setStyleSheet("""
                 QPushButton#ProcessBtn {
                     background-color: #202020;
@@ -2899,6 +2937,11 @@ class MainWindow(QMainWindow):
         elif state == "ready":
             self.process_btn.setText("▶  Start Reconstruction")
             self.process_btn.setEnabled(True)
+            self.process_btn.clicked.connect(self._start_processing)
+            if hasattr(self, 'resume_hint_label'):
+                self.resume_hint_label.setVisible(False)
+            if hasattr(self, 'start_fresh_btn'):
+                self.start_fresh_btn.setVisible(False)
             self.process_btn.setStyleSheet("""
                 QPushButton#ProcessBtn {
                     background-color: #00E676;
@@ -2917,6 +2960,10 @@ class MainWindow(QMainWindow):
         elif state == "progress":
             self.process_btn.setText("Reconstruction in Progress...")
             self.process_btn.setEnabled(False)
+            if hasattr(self, 'resume_hint_label'):
+                self.resume_hint_label.setVisible(False)
+            if hasattr(self, 'start_fresh_btn'):
+                self.start_fresh_btn.setVisible(False)
             self.process_btn.setStyleSheet("""
                 QPushButton#ProcessBtn {
                     background-color: #FF9100;
@@ -2927,6 +2974,21 @@ class MainWindow(QMainWindow):
         elif state == "failed":
             self.process_btn.setText("Retry Reconstruction")
             self.process_btn.setEnabled(True)
+            self.process_btn.clicked.connect(self._retry_with_resume)
+
+            if getattr(self, '_last_failed_stage', None):
+                stage_display = self._get_stage_display_name(self._last_failed_stage)
+                if hasattr(self, 'resume_hint_label'):
+                    self.resume_hint_label.setText(f"Resuming from: {stage_display}")
+                    self.resume_hint_label.setVisible(True)
+                if hasattr(self, 'start_fresh_btn'):
+                    self.start_fresh_btn.setVisible(True)
+            else:
+                if hasattr(self, 'resume_hint_label'):
+                    self.resume_hint_label.setVisible(False)
+                if hasattr(self, 'start_fresh_btn'):
+                    self.start_fresh_btn.setVisible(False)
+
             self.process_btn.setStyleSheet("""
                 QPushButton#ProcessBtn {
                     background-color: #D50000;
@@ -3606,7 +3668,6 @@ class MainWindow(QMainWindow):
         self._enter_standalone_mode(has_colors)
 
         # 3. Kick off viewer preview in background (non-blocking)
-        self.view_scene_btn.setEnabled(True)
         self.viewer_widget.mode_select.blockSignals(True)
         self.viewer_widget.mode_select.setCurrentIndex(1)
         self.viewer_widget.mode_select.blockSignals(False)
@@ -4195,7 +4256,6 @@ class MainWindow(QMainWindow):
                 self.viewer_widget.mode_select.setCurrentIndex(0)
                 self.viewer_widget.mode_select.blockSignals(False)
                 self._reload_viewer(scene_mvs)
-                self.view_scene_btn.setEnabled(True)
 
     def _on_pipeline_finished(self, success: bool, msg: str):
         if hasattr(self, '_reconstruction_heartbeat') and self._reconstruction_heartbeat is not None:
@@ -4204,7 +4264,6 @@ class MainWindow(QMainWindow):
             self._reconstruction_heartbeat = None
         if hasattr(self, 'standalone_cloud_path') and self.standalone_cloud_path:
             # Standalone reconstruction mode finished cleanup
-            self.view_scene_btn.setEnabled(True)
             self.viewer_widget.action_import_standalone.setEnabled(True)
             self.standalone_cloud_clear_btn.setEnabled(True)
             self.standalone_poisson_slider.setEnabled(True)
@@ -4233,7 +4292,6 @@ class MainWindow(QMainWindow):
         self.browse_files_btn.setEnabled(True)
         self.browse_btn.setEnabled(True)
         self.mobile_import_btn.setEnabled(True)
-        self.view_scene_btn.setEnabled(True)
         self.gpu_combo.setEnabled(True)
         self.plain_surfaces_checkbox.setEnabled(True)
         self.auto_cleanup_checkbox.setEnabled(True)
@@ -4248,6 +4306,7 @@ class MainWindow(QMainWindow):
         # self.ref_cloud_clear_btn.setEnabled(True)
         
         if success:
+            self._last_failed_stage = None
             self._set_process_btn_state("ready")
             self.console_text.append(f"[FINISHED] {msg}")
             self._update_upload_button_state()
@@ -4278,6 +4337,26 @@ class MainWindow(QMainWindow):
             if mesh_path:
                 self._reload_viewer(mesh_path)
         else:
+            meta = load_session_metadata() or {}
+            last_completed = meta.get("last_completed_step")
+            
+            auto_cleanup = self.mc_enabled.isChecked() if hasattr(self, 'mc_enabled') else self.auto_cleanup_checkbox.isChecked()
+            resume_map = {
+                "image_preparation": "features_extracted",
+                "images_imported": "features_extracted",
+                "features_extracted": "features_matched",
+                "features_matched": "sparse_reconstruction",
+                "sparse_reconstruction": "dense_reconstruction",
+                "dense_reconstruction": "mesh_reconstructed",
+                "mesh_reconstructed": "mesh_refined",
+                "mesh_refined": "mesh_cleaned" if auto_cleanup else "mesh_textured",
+                "mesh_cleaned": "mesh_textured",
+            }
+            if last_completed in resume_map:
+                self._last_failed_stage = resume_map[last_completed]
+            else:
+                self._last_failed_stage = None
+
             self._set_process_btn_state("failed")
             self.console_text.append(f"[FAILED] Reconstruction failed: {msg}")
         self._update_file_menu_states()
@@ -4358,7 +4437,6 @@ class MainWindow(QMainWindow):
         self.browse_files_btn.setEnabled(True)
         self.browse_btn.setEnabled(True)
         self.mobile_import_btn.setEnabled(True)
-        self.view_scene_btn.setEnabled(True)
         self.gpu_combo.setEnabled(True)
         self.plain_surfaces_checkbox.setEnabled(True)
         self.auto_cleanup_checkbox.setEnabled(True)
@@ -4751,7 +4829,6 @@ class MainWindow(QMainWindow):
         # Enable view scene button and set mode
         mvs_dir = os.path.join(out_dir, "mvs")
         self.viewer_widget.set_mvs_directory(mvs_dir)
-        self.view_scene_btn.setEnabled(True)
         self._update_upload_button_state()
 
         self.viewer_widget.mode_select.blockSignals(True)
@@ -4872,7 +4949,6 @@ class MainWindow(QMainWindow):
         
         # Update viewer state
         self.viewer_widget.set_mvs_directory(mvs_dir)
-        self.view_scene_btn.setEnabled(True)
         self._update_upload_button_state()
         
         # Determine the best view mode and load it immediately
@@ -4929,7 +5005,6 @@ class MainWindow(QMainWindow):
         # 3. Terminate & clear 3D viewer
         self.viewer_widget.current_mvs_dir = None
         self._terminate_viewer()
-        self.view_scene_btn.setEnabled(False)
 
         # 4. Re-enable Step 1 buttons and restore photogrammetry settings panel
         self._exit_standalone_mode()
