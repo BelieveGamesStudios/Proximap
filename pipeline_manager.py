@@ -2413,3 +2413,154 @@ class PipelineWorker(QThread):
             return False
 
 
+class CleanupAndTextureWorker(PipelineWorker):
+    """
+    Dedicated worker thread for executing Mesh Cleanup + TextureMesh standalone.
+    Operates directly on existing reconstructed meshes without re-running SfM or MVS densification.
+    """
+    def __init__(self, output_dir: str, cleanup_params: dict = None, custom_params: dict = None, quality_preset: str = "medium", parent=None):
+        super().__init__(
+            image_dir=None,
+            output_dir=output_dir,
+            quality_preset=quality_preset,
+            gpu_mode="auto",
+            has_plain_surfaces=False,
+            auto_cleanup=True,
+            mapper_mode="incremental",
+            ref_cloud_path=None,
+            mesh_mode="default",
+            poisson_depth=9,
+            custom_params=custom_params or {},
+            resume_from_step=None,
+            parent=parent
+        )
+        self.cleanup_params = cleanup_params or {}
+        if custom_params and "cleanup_params" in custom_params:
+            self.cleanup_params = custom_params["cleanup_params"]
+
+    def run(self):
+        try:
+            self.status_changed.emit("Initializing Mesh Cleanup & Texturing...")
+            self.progress_changed.emit(5)
+            time.sleep(0.3)
+
+            has_binaries = self._verify_binaries()
+            mvs_out = os.path.join(self.output_dir, "mvs")
+            base_dir = get_base_dir()
+            env = self._get_safe_env()
+
+            if not os.path.exists(mvs_out):
+                self.log_message.emit(f"[ERROR] MVS directory does not exist: {mvs_out}")
+                self.finished.emit(False, "MVS directory not found.")
+                return
+
+            # Find base mesh candidate to clean
+            cleanup_input_ply = None
+            for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+                candidate_path = os.path.join(mvs_out, candidate)
+                if os.path.exists(candidate_path):
+                    cleanup_input_ply = candidate_path
+                    break
+
+            if not cleanup_input_ply:
+                self.log_message.emit("[ERROR] No suitable base mesh PLY found for cleanup.")
+                self.finished.emit(False, "No mesh found to clean.")
+                return
+
+            # STEP 1: Mesh Cleanup & Repair
+            self.status_changed.emit("Step 1/2: Auto-Cleaning & Decimating Mesh...")
+            self.progress_changed.emit(20)
+            cleaned_ply_path = os.path.join(mvs_out, "scene_dense_mesh_cleaned.ply")
+
+            from mesh_cleanup import run_mesh_cleanup
+            self.log_message.emit(f"[CLEANUP] Starting cleanup on {os.path.basename(cleanup_input_ply)}...")
+            cleanup_ok = run_mesh_cleanup(cleanup_input_ply, cleaned_ply_path, self.log_message.emit, cleanup_params=self.cleanup_params)
+            
+            if not cleanup_ok or not os.path.exists(cleaned_ply_path):
+                self.log_message.emit("[WARNING] Cleanup did not produce a cleaned mesh. Falling back to source mesh for texturing.")
+                texture_mesh_ply = os.path.basename(cleanup_input_ply)
+            else:
+                self.log_message.emit("[INFO] Mesh cleanup successful. Cleaned mesh ready for texturing.")
+                texture_mesh_ply = "scene_dense_mesh_cleaned.ply"
+
+            self.progress_changed.emit(50)
+
+            # STEP 2: Texture Projection
+            self.status_changed.emit("Step 2/2: Projecting Textures onto Mesh...")
+            
+            # Determine texture input scene
+            texture_input_scene = "scene.mvs"
+            for scene_cand in ["scene_dense_mesh_refine.mvs", "scene_dense.mvs", "scene.mvs"]:
+                if os.path.exists(os.path.join(mvs_out, scene_cand)):
+                    texture_input_scene = scene_cand
+                    break
+
+            texture_res = "1"
+            if self.custom_params and "texture_res" in self.custom_params:
+                texture_res = str(self.custom_params["texture_res"])
+            elif self.quality_preset == "preview":
+                texture_res = "2"
+            elif self.quality_preset == "ultra":
+                texture_res = "0"
+
+            if has_binaries and "openMVS" in self.toolchain_map and "TextureMesh" in self.toolchain_map["openMVS"]:
+                mvs_texture_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["TextureMesh"])
+                cmd_ply = [
+                    mvs_texture_exe,
+                    texture_input_scene,
+                    "-m",                    texture_mesh_ply,
+                    "-o",                    "scene_dense_mesh_texture.mvs",
+                    "--resolution-level",    texture_res,
+                    "--cost-smoothness-ratio", "0.1",
+                    "--empty-color",         "0",
+                    "--local-seam-leveling",  "0",
+                    "--global-seam-leveling", "0",
+                ]
+                self.log_message.emit(f"[RUN] Texturing PLY: {' '.join(cmd_ply)}")
+                texture_ply_ok = self._run_process_realtime(cmd_ply, timeout=1800.0, cwd=mvs_out, env=env)
+                
+                self.progress_changed.emit(80)
+                if texture_ply_ok:
+                    cmd_obj = [
+                        mvs_texture_exe,
+                        texture_input_scene,
+                        "-m",                    texture_mesh_ply,
+                        "-o",                    "scene_dense_mesh_texture.obj",
+                        "--export-type",         "obj",
+                        "--resolution-level",    texture_res,
+                        "--cost-smoothness-ratio", "0.1",
+                        "--empty-color",         "0",
+                        "--local-seam-leveling",  "0",
+                        "--global-seam-leveling", "0",
+                    ]
+                    self.log_message.emit(f"[RUN] Texturing OBJ: {' '.join(cmd_obj)}")
+                    self._run_process_realtime(cmd_obj, timeout=1800.0, cwd=mvs_out, env=env)
+
+                    # Auto-export GLB via trimesh
+                    try:
+                        import trimesh
+                        obj_file = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+                        glb_file = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
+                        if os.path.exists(obj_file):
+                            self.log_message.emit("[INFO] Pre-generating textured GLB mesh...")
+                            mesh_obj = trimesh.load(obj_file)
+                            mesh_obj.export(glb_file, file_type="glb")
+                            self.log_message.emit(f"[SUCCESS] GLB mesh successfully generated: {os.path.basename(glb_file)}")
+                    except Exception as e:
+                        self.log_message.emit(f"[WARNING] Automatic GLB conversion from OBJ skipped: {e}")
+                else:
+                    self.log_message.emit("[WARNING] TextureMesh pass failed.")
+            else:
+                self.log_message.emit("[WARNING] OpenMVS TextureMesh binary not found. Skipping texture projection.")
+
+            self.progress_changed.emit(100)
+            self.status_changed.emit("Mesh Cleanup & Texturing Complete")
+            self.finished.emit(True, "Mesh cleanup and texturing completed successfully.")
+        except Exception as e:
+            self.log_message.emit(f"[ERROR] Cleanup and texturing worker failed: {e}")
+            import traceback
+            self.log_message.emit(traceback.format_exc())
+            self.finished.emit(False, str(e))
+
+
+

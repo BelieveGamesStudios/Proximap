@@ -12,7 +12,7 @@ try:
         QFrame, QFileDialog, QTextEdit, QStackedWidget, QComboBox,
         QScrollArea, QTabWidget, QGridLayout, QCheckBox, QSlider,
         QMessageBox, QDialog, QColorDialog, QMenu, QSizePolicy, QInputDialog,
-        QLineEdit, QSpinBox, QDoubleSpinBox
+        QLineEdit, QSpinBox, QDoubleSpinBox, QAbstractSpinBox
     )
 except ModuleNotFoundError as e:
     missing_mod = getattr(e, 'name', 'PySide6')
@@ -206,6 +206,92 @@ CAMERA_CONTROLS = {
        "• Scroll: Localized magnifying zoom<br>"
        "• Shift + Mouse Move: Adjust focus area"
 }
+
+
+# ---------------------------------------------------------------------------
+# Stepper Widget: Wraps a SpinBox with dedicated '-' and '+' buttons
+# ---------------------------------------------------------------------------
+class SpinBoxStepper(QWidget):
+    """
+    Wraps a QSpinBox or QDoubleSpinBox with dedicated '-' and '+' push buttons.
+    Hides native arrow buttons to provide reliable, touch/click-friendly targets.
+    """
+    def __init__(self, spinbox, parent=None):
+        super().__init__(parent)
+        self.spin = spinbox
+        self.spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.spin.setAlignment(Qt.AlignCenter)
+        self.spin.setStyleSheet("""
+            QSpinBox, QDoubleSpinBox {
+                background-color: #1E1E1E;
+                color: #ffffff;
+                border: 1px solid #333333;
+                border-radius: 3px;
+                padding: 2px 4px;
+                font-size: 11px;
+                min-height: 20px;
+            }
+        """)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        btn_style = """
+            QPushButton {
+                background-color: #2D2D2D;
+                color: #00E676;
+                font-weight: bold;
+                font-size: 13px;
+                border: 1px solid #444444;
+                border-radius: 3px;
+                min-width: 22px;
+                max-width: 22px;
+                min-height: 22px;
+                max-height: 22px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #383838;
+                border-color: #00E676;
+                color: #ffffff;
+            }
+            QPushButton:pressed {
+                background-color: #00E676;
+                color: #121212;
+            }
+            QPushButton:disabled {
+                background-color: #1C1C1C;
+                color: #555555;
+                border-color: #2A2A2A;
+            }
+        """
+
+        self.btn_minus = QPushButton("-", self)
+        self.btn_minus.setCursor(Qt.PointingHandCursor)
+        self.btn_minus.setStyleSheet(btn_style)
+        self.btn_minus.clicked.connect(self._step_down)
+
+        self.btn_plus = QPushButton("+", self)
+        self.btn_plus.setCursor(Qt.PointingHandCursor)
+        self.btn_plus.setStyleSheet(btn_style)
+        self.btn_plus.clicked.connect(self._step_up)
+
+        layout.addWidget(self.btn_minus)
+        layout.addWidget(self.spin, stretch=1)
+        layout.addWidget(self.btn_plus)
+
+    def _step_down(self):
+        self.spin.stepBy(-1)
+
+    def _step_up(self):
+        self.spin.stepBy(1)
+
+    def setEnabled(self, enabled: bool):
+        super().setEnabled(enabled)
+        self.spin.setEnabled(enabled)
+        self.btn_minus.setEnabled(enabled)
+        self.btn_plus.setEnabled(enabled)
 
 
 # ---------------------------------------------------------------------------
@@ -2085,9 +2171,9 @@ class MainWindow(QMainWindow):
         self.custom_features_spin.setRange(1000, 65536)
         self.custom_features_spin.setSingleStep(1000)
         self.custom_features_spin.setValue(8000)
-        self.custom_features_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        self.custom_features_stepper = SpinBoxStepper(self.custom_features_spin, self.custom_settings_container)
         custom_grid.addWidget(lbl_features, 3, 0)
-        custom_grid.addWidget(self.custom_features_spin, 3, 1)
+        custom_grid.addWidget(self.custom_features_stepper, 3, 1)
 
         # Exhaustive Max Matches
         lbl_matches = QLabel("Max Num Matches:", self.custom_settings_container)
@@ -2096,9 +2182,9 @@ class MainWindow(QMainWindow):
         self.custom_matches_spin.setRange(4096, 262144)
         self.custom_matches_spin.setSingleStep(4096)
         self.custom_matches_spin.setValue(16384)
-        self.custom_matches_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        self.custom_matches_stepper = SpinBoxStepper(self.custom_matches_spin, self.custom_settings_container)
         custom_grid.addWidget(lbl_matches, 4, 0)
-        custom_grid.addWidget(self.custom_matches_spin, 4, 1)
+        custom_grid.addWidget(self.custom_matches_stepper, 4, 1)
 
         # Exhaustive Block Size
         self.lbl_block_size = QLabel("Exhaustive Block Size:", self.custom_settings_container)
@@ -2108,9 +2194,9 @@ class MainWindow(QMainWindow):
         self.custom_block_size_spin.setSingleStep(5)
         self.custom_block_size_spin.setValue(50)
         self.custom_block_size_spin.setToolTip("Block size for COLMAP exhaustive_matcher. Lower values (e.g. 20) reduce RAM consumption during matrix matching.")
-        self.custom_block_size_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        self.custom_block_size_stepper = SpinBoxStepper(self.custom_block_size_spin, self.custom_settings_container)
         custom_grid.addWidget(self.lbl_block_size, 5, 0)
-        custom_grid.addWidget(self.custom_block_size_spin, 5, 1)
+        custom_grid.addWidget(self.custom_block_size_stepper, 5, 1)
 
         # Guided Matching
         self.custom_guided_check = QCheckBox("Use Guided Matching", self.custom_settings_container)
@@ -2123,8 +2209,6 @@ class MainWindow(QMainWindow):
         self.custom_ba_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
         self.custom_ba_check.setChecked(False)
         custom_grid.addWidget(self.custom_ba_check, 7, 0, 1, 2)
-
-
 
         # OpenMVS section
         openmvs_sec = QLabel("OpenMVS Settings", self.custom_settings_container)
@@ -2152,9 +2236,9 @@ class MainWindow(QMainWindow):
         self.custom_densify_views_spin = QSpinBox(self.custom_settings_container)
         self.custom_densify_views_spin.setRange(1, 16)
         self.custom_densify_views_spin.setValue(4)
-        self.custom_densify_views_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        self.custom_densify_views_stepper = SpinBoxStepper(self.custom_densify_views_spin, self.custom_settings_container)
         custom_grid.addWidget(lbl_densify_views, 10, 0)
-        custom_grid.addWidget(self.custom_densify_views_spin, 10, 1)
+        custom_grid.addWidget(self.custom_densify_views_stepper, 10, 1)
 
         # Mesh Refinement Scales
         lbl_refine_scales = QLabel("Mesh Refinement Scales:", self.custom_settings_container)
@@ -2162,9 +2246,9 @@ class MainWindow(QMainWindow):
         self.custom_refine_scales_spin = QSpinBox(self.custom_settings_container)
         self.custom_refine_scales_spin.setRange(1, 5)
         self.custom_refine_scales_spin.setValue(2)
-        self.custom_refine_scales_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
+        self.custom_refine_scales_stepper = SpinBoxStepper(self.custom_refine_scales_spin, self.custom_settings_container)
         custom_grid.addWidget(lbl_refine_scales, 11, 0)
-        custom_grid.addWidget(self.custom_refine_scales_spin, 11, 1)
+        custom_grid.addWidget(self.custom_refine_scales_stepper, 11, 1)
 
         # Texturing Resolution
         lbl_texture_res = QLabel("Texturing Res:", self.custom_settings_container)
@@ -2180,57 +2264,6 @@ class MainWindow(QMainWindow):
         self.custom_texture_res_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
         custom_grid.addWidget(lbl_texture_res, 12, 0)
         custom_grid.addWidget(self.custom_texture_res_combo, 12, 1)
-        
-        # Auto Cleanup Settings Section
-        cleanup_sec = QLabel("Auto Cleanup Settings", self.custom_settings_container)
-        cleanup_sec.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676; margin-top: 6px; border: none; background: transparent;")
-        custom_grid.addWidget(cleanup_sec, 13, 0, 1, 2)
-
-        self.custom_cleanup_check = QCheckBox("Enable Auto Cleanup Stage", self.custom_settings_container)
-        self.custom_cleanup_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
-        self.custom_cleanup_check.setChecked(self.auto_cleanup_checkbox.isChecked())
-        custom_grid.addWidget(self.custom_cleanup_check, 14, 0, 1, 2)
-
-        lbl_decimation = QLabel("Face Reduction (%):", self.custom_settings_container)
-        lbl_decimation.setStyleSheet(lbl_style)
-        self.custom_cleanup_decimation_spin = QSpinBox(self.custom_settings_container)
-        self.custom_cleanup_decimation_spin.setRange(10, 90)
-        self.custom_cleanup_decimation_spin.setSingleStep(5)
-        self.custom_cleanup_decimation_spin.setSuffix("%")
-        self.custom_cleanup_decimation_spin.setValue(50)
-        self.custom_cleanup_decimation_spin.setToolTip("Target face reduction percentage for mesh decimation (default: 50%).")
-        self.custom_cleanup_decimation_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_decimation, 15, 0)
-        custom_grid.addWidget(self.custom_cleanup_decimation_spin, 15, 1)
-
-        lbl_max_hole = QLabel("Max Hole Size (faces):", self.custom_settings_container)
-        lbl_max_hole.setStyleSheet(lbl_style)
-        self.custom_cleanup_max_hole_spin = QSpinBox(self.custom_settings_container)
-        self.custom_cleanup_max_hole_spin.setRange(5, 500)
-        self.custom_cleanup_max_hole_spin.setSingleStep(5)
-        self.custom_cleanup_max_hole_spin.setValue(30)
-        self.custom_cleanup_max_hole_spin.setToolTip("Maximum hole size in faces to automatically close during mesh repair.")
-        self.custom_cleanup_max_hole_spin.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_max_hole, 16, 0)
-        custom_grid.addWidget(self.custom_cleanup_max_hole_spin, 16, 1)
-
-        self.custom_cleanup_remove_duplicates_check = QCheckBox("Remove Duplicate Faces & Vertices", self.custom_settings_container)
-        self.custom_cleanup_remove_duplicates_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
-        self.custom_cleanup_remove_duplicates_check.setChecked(True)
-        custom_grid.addWidget(self.custom_cleanup_remove_duplicates_check, 17, 0, 1, 2)
-
-        self.custom_cleanup_repair_nonmanifold_check = QCheckBox("Repair Non-Manifold Edges", self.custom_settings_container)
-        self.custom_cleanup_repair_nonmanifold_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
-        self.custom_cleanup_repair_nonmanifold_check.setChecked(True)
-        custom_grid.addWidget(self.custom_cleanup_repair_nonmanifold_check, 18, 0, 1, 2)
-
-        self.custom_cleanup_close_holes_check = QCheckBox("Close Mesh Holes", self.custom_settings_container)
-        self.custom_cleanup_close_holes_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
-        self.custom_cleanup_close_holes_check.setChecked(True)
-        custom_grid.addWidget(self.custom_cleanup_close_holes_check, 19, 0, 1, 2)
-
-        self.auto_cleanup_checkbox.toggled.connect(self._sync_auto_cleanup_to_custom)
-        self.custom_cleanup_check.toggled.connect(self._sync_custom_to_auto_cleanup)
         
         advanced_layout.addWidget(self.custom_settings_toggle)
         advanced_layout.addWidget(self.mapper_label)
@@ -2277,18 +2310,6 @@ class MainWindow(QMainWindow):
         standalone_layout.addWidget(self.vertex_color_toggle)
         self.standalone_panel.setVisible(False)
         
-        self.process_btn = QPushButton("▶  Start Processing", step2_box)
-        self.process_btn.setObjectName("ProcessBtn")
-        self.process_btn.setEnabled(False)
-        self.process_btn.clicked.connect(self._start_processing)
-        
-        self.progress_bar = QProgressBar(step2_box)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
-        
-        self.status_label = QLabel("Status: Idle", step2_box)
-        self.status_label.setStyleSheet("color: #a3a3a3; font-style: italic;")
-        
         step2_layout.addWidget(s2_title)
         step2_layout.addWidget(self.quality_label)
         step2_layout.addWidget(self.quality_combo)
@@ -2299,10 +2320,99 @@ class MainWindow(QMainWindow):
         step2_layout.addWidget(self.advanced_toggle_btn)
         step2_layout.addWidget(self.advanced_panel)
         step2_layout.addWidget(self.standalone_panel)
+        
+        self.process_btn = QPushButton("▶  Start Reconstruction", step2_box)
+        self.process_btn.setObjectName("ProcessBtn")
+        self.process_btn.setEnabled(False)
+        self.process_btn.clicked.connect(self._start_processing)
+        
+        self.progress_bar = QProgressBar(step2_box)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        
+        self.status_label = QLabel("Status: Idle", step2_box)
+        self.status_label.setStyleSheet("color: #a3a3a3; font-style: italic;")
+
         step2_layout.addWidget(self.process_btn)
         step2_layout.addWidget(self.progress_bar)
         step2_layout.addWidget(self.status_label)
         scroll_content_layout.addWidget(step2_box)
+        
+        # STEP 3: Mesh Cleanup
+        self.step3_box = QFrame(scroll_content)
+        self.step3_box.setObjectName("StepBox")
+        step3_layout = QVBoxLayout(self.step3_box)
+        
+        self.s3_title = QLabel("Step 3: Mesh Cleanup", self.step3_box)
+        self.s3_title.setStyleSheet("font-weight: bold; font-size: 14px; color: #00E676;")
+        
+        self.mc_enabled = QCheckBox("Enable Mesh Cleanup", self.step3_box)
+        self.mc_enabled.setChecked(False)
+        self.mc_enabled.setToolTip(
+            "Automates mesh repair and quadric edge collapse decimation between refinement and texturing."
+        )
+        
+        self.mc_options_container = QWidget(self.step3_box)
+        self.mc_options_container.setStyleSheet("border: none; background: transparent; padding: 0;")
+        mc_grid = QGridLayout(self.mc_options_container)
+        mc_grid.setContentsMargins(0, 4, 0, 0)
+        mc_grid.setSpacing(6)
+        
+        lbl_mc_style = "font-size: 11px; color: #aaaaaa; border: none; background: transparent;"
+        
+        lbl_reduction = QLabel("Face Reduction (%):", self.mc_options_container)
+        lbl_reduction.setStyleSheet(lbl_mc_style)
+        self.mc_reduction_spin = QSpinBox(self.mc_options_container)
+        self.mc_reduction_spin.setRange(10, 90)
+        self.mc_reduction_spin.setSingleStep(5)
+        self.mc_reduction_spin.setSuffix("%")
+        self.mc_reduction_spin.setValue(50)
+        self.mc_reduction_spin.setToolTip("Target face reduction percentage for mesh decimation (default: 50%).")
+        self.mc_reduction_stepper = SpinBoxStepper(self.mc_reduction_spin, self.mc_options_container)
+        mc_grid.addWidget(lbl_reduction, 0, 0)
+        mc_grid.addWidget(self.mc_reduction_stepper, 0, 1)
+        
+        lbl_max_hole = QLabel("Max Hole Size (faces):", self.mc_options_container)
+        lbl_max_hole.setStyleSheet(lbl_mc_style)
+        self.mc_max_hole_spin = QSpinBox(self.mc_options_container)
+        self.mc_max_hole_spin.setRange(5, 500)
+        self.mc_max_hole_spin.setSingleStep(5)
+        self.mc_max_hole_spin.setValue(30)
+        self.mc_max_hole_spin.setToolTip("Maximum hole size in faces to automatically close during mesh repair.")
+        self.mc_max_hole_stepper = SpinBoxStepper(self.mc_max_hole_spin, self.mc_options_container)
+        mc_grid.addWidget(lbl_max_hole, 1, 0)
+        mc_grid.addWidget(self.mc_max_hole_stepper, 1, 1)
+        
+        self.mc_remove_dups_check = QCheckBox("Remove Duplicate Faces & Vertices", self.mc_options_container)
+        self.mc_remove_dups_check.setStyleSheet("font-size: 11px; color: #cccccc; border: none; background: transparent;")
+        self.mc_remove_dups_check.setChecked(True)
+        mc_grid.addWidget(self.mc_remove_dups_check, 2, 0, 1, 2)
+        
+        self.mc_repair_nm_check = QCheckBox("Repair Non-Manifold Edges", self.mc_options_container)
+        self.mc_repair_nm_check.setStyleSheet("font-size: 11px; color: #cccccc; border: none; background: transparent;")
+        self.mc_repair_nm_check.setChecked(True)
+        mc_grid.addWidget(self.mc_repair_nm_check, 3, 0, 1, 2)
+        
+        self.mc_close_holes_check = QCheckBox("Close Mesh Holes", self.mc_options_container)
+        self.mc_close_holes_check.setStyleSheet("font-size: 11px; color: #cccccc; border: none; background: transparent;")
+        self.mc_close_holes_check.setChecked(True)
+        mc_grid.addWidget(self.mc_close_holes_check, 4, 0, 1, 2)
+        
+        self.mc_options_container.setEnabled(False)
+        self.mc_enabled.toggled.connect(self._on_mc_enabled_toggled)
+        self.auto_cleanup_checkbox.toggled.connect(self._sync_auto_cleanup_to_mc)
+        self.mc_enabled.toggled.connect(self._sync_mc_to_auto_cleanup)
+        
+        self.cleanup_btn = QPushButton("✦  Run Mesh Cleanup", self.step3_box)
+        self.cleanup_btn.setObjectName("ProcessBtn")
+        self.cleanup_btn.setEnabled(False)
+        self.cleanup_btn.clicked.connect(self._start_cleanup_only)
+        
+        step3_layout.addWidget(self.s3_title)
+        step3_layout.addWidget(self.mc_enabled)
+        step3_layout.addWidget(self.mc_options_container)
+        step3_layout.addWidget(self.cleanup_btn)
+        scroll_content_layout.addWidget(self.step3_box)
         
         # Step 3 Export Mesh option has been moved to the file header menu.
         
@@ -2506,6 +2616,7 @@ class MainWindow(QMainWindow):
         self.main_tabs.currentChanged.connect(self._on_tab_changed)
         
         self._set_process_btn_state("idle")
+        self._check_and_enable_cleanup_btn()
 
     def _on_tab_changed(self, index):
         if index == 1 and self.mesh_editor_tab is None:
@@ -2692,12 +2803,91 @@ class MainWindow(QMainWindow):
             )
 
 
+    def _has_existing_mesh(self) -> bool:
+        """Returns True if a reconstructable/cleanable PLY mesh is present in the active mvs directory."""
+        mvs_dir = os.path.join(get_reconstruction_out_dir(), "mvs")
+        if not os.path.exists(mvs_dir):
+            return False
+        candidates = ["scene_dense_mesh_texture.ply", "scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply", "scene_dense_mesh_cleaned.ply"]
+        return any(os.path.exists(os.path.join(mvs_dir, c)) for c in candidates)
+
+    def _check_and_enable_cleanup_btn(self):
+        """Checks if a valid mesh exists and sets the cleanup button state accordingly."""
+        if hasattr(self, 'cleanup_btn'):
+            if self._has_existing_mesh():
+                self._set_cleanup_btn_state("ready")
+            else:
+                self._set_cleanup_btn_state("idle")
+
+    def _set_cleanup_btn_state(self, state: str):
+        """
+        Dynamically updates cleanup button colors, text, and enabled state.
+        """
+        if not hasattr(self, 'cleanup_btn'):
+            return
+        if state == "idle":
+            self.cleanup_btn.setText("✦  Run Mesh Cleanup")
+            self.cleanup_btn.setEnabled(False)
+            self.cleanup_btn.setStyleSheet("""
+                QPushButton#ProcessBtn {
+                    background-color: #202020;
+                    color: #555555;
+                    border: 1px solid #2D2D2D;
+                }
+            """)
+        elif state == "ready":
+            self.cleanup_btn.setText("✦  Run Mesh Cleanup")
+            self.cleanup_btn.setEnabled(True)
+            self.cleanup_btn.setStyleSheet("""
+                QPushButton#ProcessBtn {
+                    background-color: #00E676;
+                    color: #121212;
+                    border: none;
+                }
+                QPushButton#ProcessBtn:hover {
+                    background-color: #00FF87;
+                    border: none;
+                }
+                QPushButton#ProcessBtn:pressed {
+                    background-color: #00B35C;
+                    border: none;
+                }
+            """)
+        elif state == "progress":
+            self.cleanup_btn.setText("Cleanup in Progress...")
+            self.cleanup_btn.setEnabled(False)
+            self.cleanup_btn.setStyleSheet("""
+                QPushButton#ProcessBtn {
+                    background-color: #FF9100;
+                    color: #121212;
+                    border: none;
+                }
+            """)
+        elif state == "failed":
+            self.cleanup_btn.setText("Retry Mesh Cleanup")
+            self.cleanup_btn.setEnabled(True)
+            self.cleanup_btn.setStyleSheet("""
+                QPushButton#ProcessBtn {
+                    background-color: #D50000;
+                    color: #ffffff;
+                    border: none;
+                }
+                QPushButton#ProcessBtn:hover {
+                    background-color: #FF1744;
+                    border: none;
+                }
+                QPushButton#ProcessBtn:pressed {
+                    background-color: #B30000;
+                    border: none;
+                }
+            """)
+
     def _set_process_btn_state(self, state: str):
         """
         Dynamically updates process button colors, text, and enabled state.
         """
         if state == "idle":
-            self.process_btn.setText("▶  Start Processing")
+            self.process_btn.setText("▶  Start Reconstruction")
             self.process_btn.setEnabled(False)
             self.process_btn.setStyleSheet("""
                 QPushButton#ProcessBtn {
@@ -2707,7 +2897,7 @@ class MainWindow(QMainWindow):
                 }
             """)
         elif state == "ready":
-            self.process_btn.setText("▶  Start Processing")
+            self.process_btn.setText("▶  Start Reconstruction")
             self.process_btn.setEnabled(True)
             self.process_btn.setStyleSheet("""
                 QPushButton#ProcessBtn {
@@ -3454,7 +3644,7 @@ class MainWindow(QMainWindow):
         self.browse_btn.setEnabled(False)
         self.mobile_import_btn.setEnabled(False)
 
-        # 4. Hide photogrammetry options in Step 2
+        # 4. Hide photogrammetry options in Step 2 & Step 3
         self.quality_label.setVisible(False)
         self.quality_combo.setVisible(False)
         self.gpu_label.setVisible(False)
@@ -3463,6 +3653,8 @@ class MainWindow(QMainWindow):
         self.auto_cleanup_checkbox.setVisible(False)
         self.advanced_toggle_btn.setVisible(False)
         self.advanced_panel.setVisible(False)
+        if hasattr(self, 'step3_box'):
+            self.step3_box.setVisible(False)
 
         # 5. Show standalone options
         self.standalone_panel.setVisible(True)
@@ -3492,6 +3684,11 @@ class MainWindow(QMainWindow):
         self.auto_cleanup_checkbox.setVisible(True)
         self.advanced_toggle_btn.setVisible(True)
         self.advanced_panel.setVisible(False)
+        if hasattr(self, 'step3_box'):
+            self.step3_box.setVisible(True)
+            if hasattr(self, 'mc_enabled') and hasattr(self, 'mc_options_container'):
+                self.mc_options_container.setEnabled(self.mc_enabled.isChecked())
+        self._check_and_enable_cleanup_btn()
 
         # 3. Hide standalone panel
         self.standalone_panel.setVisible(False)
@@ -3642,7 +3839,14 @@ class MainWindow(QMainWindow):
                 "quality_preset": self.quality_combo.currentText().lower(),
                 "gpu_mode": self.gpu_combo.currentText().lower(),
                 "has_plain_surfaces": self.plain_surfaces_checkbox.isChecked(),
-                "auto_cleanup": self.auto_cleanup_checkbox.isChecked(),
+                "auto_cleanup": self.mc_enabled.isChecked() if hasattr(self, 'mc_enabled') else self.auto_cleanup_checkbox.isChecked(),
+                "cleanup_params": {
+                    "target_reduction_pct": self.mc_reduction_spin.value() if hasattr(self, 'mc_reduction_spin') else 50,
+                    "remove_duplicates": self.mc_remove_dups_check.isChecked() if hasattr(self, 'mc_remove_dups_check') else True,
+                    "repair_nonmanifold": self.mc_repair_nm_check.isChecked() if hasattr(self, 'mc_repair_nm_check') else True,
+                    "close_holes": self.mc_close_holes_check.isChecked() if hasattr(self, 'mc_close_holes_check') else True,
+                    "max_hole_size": self.mc_max_hole_spin.value() if hasattr(self, 'mc_max_hole_spin') else 30
+                },
                 "mapper_mode": self.mapper_combo.currentText().lower() if hasattr(self, 'mapper_combo') else "incremental",
                 "mesh_mode": "poisson" if hasattr(self, 'mesh_mode_combo') and self.mesh_mode_combo.currentIndex() == 1 else "default",
                 "poisson_depth": self.poisson_depth_slider.value() if hasattr(self, 'poisson_depth_slider') else 9
@@ -3668,17 +3872,23 @@ class MainWindow(QMainWindow):
             self.custom_guided_check.setEnabled(True)
             self.custom_guided_check.setToolTip("")
 
-    def _sync_auto_cleanup_to_custom(self, checked):
-        if hasattr(self, 'custom_cleanup_check') and self.custom_cleanup_check.isChecked() != checked:
-            self.custom_cleanup_check.blockSignals(True)
-            self.custom_cleanup_check.setChecked(checked)
-            self.custom_cleanup_check.blockSignals(False)
+    def _on_mc_enabled_toggled(self, checked):
+        if hasattr(self, 'mc_options_container'):
+            self.mc_options_container.setEnabled(checked)
 
-    def _sync_custom_to_auto_cleanup(self, checked):
+    def _sync_auto_cleanup_to_mc(self, checked):
+        if hasattr(self, 'mc_enabled') and self.mc_enabled.isChecked() != checked:
+            self.mc_enabled.blockSignals(True)
+            self.mc_enabled.setChecked(checked)
+            self.mc_enabled.blockSignals(False)
+            self._on_mc_enabled_toggled(checked)
+
+    def _sync_mc_to_auto_cleanup(self, checked):
         if hasattr(self, 'auto_cleanup_checkbox') and self.auto_cleanup_checkbox.isChecked() != checked:
             self.auto_cleanup_checkbox.blockSignals(True)
             self.auto_cleanup_checkbox.setChecked(checked)
             self.auto_cleanup_checkbox.blockSignals(False)
+        self._on_mc_enabled_toggled(checked)
 
 
     def _on_mesh_mode_changed(self, index):
@@ -3692,7 +3902,9 @@ class MainWindow(QMainWindow):
         is_vocab = (index == 3)
         if hasattr(self, 'lbl_block_size'):
             self.lbl_block_size.setVisible(is_exhaustive)
-        if hasattr(self, 'custom_block_size_spin'):
+        if hasattr(self, 'custom_block_size_stepper'):
+            self.custom_block_size_stepper.setVisible(is_exhaustive)
+        elif hasattr(self, 'custom_block_size_spin'):
             self.custom_block_size_spin.setVisible(is_exhaustive)
         if hasattr(self, 'lbl_vocab'):
             self.lbl_vocab.setVisible(is_vocab)
@@ -3806,6 +4018,8 @@ class MainWindow(QMainWindow):
 
         
         self._set_process_btn_state("progress")
+        if hasattr(self, 'cleanup_btn'):
+            self._set_cleanup_btn_state("idle")
         self.browse_files_btn.setEnabled(False)
         self.browse_btn.setEnabled(False)
         self.mobile_import_btn.setEnabled(False)
@@ -3816,6 +4030,10 @@ class MainWindow(QMainWindow):
         self.gpu_combo.setEnabled(False)
         self.plain_surfaces_checkbox.setEnabled(False)
         self.auto_cleanup_checkbox.setEnabled(False)
+        if hasattr(self, 'mc_enabled'):
+            self.mc_enabled.setEnabled(False)
+        if hasattr(self, 'mc_options_container'):
+            self.mc_options_container.setEnabled(False)
         self.mapper_combo.setEnabled(False)
         self.mesh_mode_combo.setEnabled(False)
         self.poisson_depth_slider.setEnabled(False)
@@ -3891,7 +4109,7 @@ class MainWindow(QMainWindow):
         gpu_mode = gpu_modes[self.gpu_combo.currentIndex()]
         mapper_mode = mapper_modes[self.mapper_combo.currentIndex()]
         has_plain = self.plain_surfaces_checkbox.isChecked()
-        auto_cleanup = self.auto_cleanup_checkbox.isChecked()
+        auto_cleanup = self.mc_enabled.isChecked() if hasattr(self, 'mc_enabled') else self.auto_cleanup_checkbox.isChecked()
         mesh_mode = "poisson" if self.mesh_mode_combo.currentIndex() == 1 else "default"
         poisson_depth = self.poisson_depth_slider.value()
 
@@ -3903,6 +4121,15 @@ class MainWindow(QMainWindow):
             4: "spatial"
         }
         selected_matcher = matcher_type_map.get(self.custom_matcher_combo.currentIndex(), "auto")
+
+        cleanup_params = {
+            "enable_cleanup": auto_cleanup,
+            "target_reduction_pct": self.mc_reduction_spin.value() if hasattr(self, 'mc_reduction_spin') else 50,
+            "remove_duplicates": self.mc_remove_dups_check.isChecked() if hasattr(self, 'mc_remove_dups_check') else True,
+            "repair_nonmanifold": self.mc_repair_nm_check.isChecked() if hasattr(self, 'mc_repair_nm_check') else True,
+            "close_holes": self.mc_close_holes_check.isChecked() if hasattr(self, 'mc_close_holes_check') else True,
+            "max_hole_size": self.mc_max_hole_spin.value() if hasattr(self, 'mc_max_hole_spin') else 30
+        }
 
         custom_params = None
         if self.custom_settings_toggle.isChecked():
@@ -3918,14 +4145,11 @@ class MainWindow(QMainWindow):
                 "densify_views": str(self.custom_densify_views_spin.value()),
                 "refine_scales": str(self.custom_refine_scales_spin.value()),
                 "texture_res": str(self.custom_texture_res_combo.currentIndex()),
-                "cleanup_params": {
-                    "enable_cleanup": self.custom_cleanup_check.isChecked(),
-                    "target_reduction_pct": self.custom_cleanup_decimation_spin.value(),
-                    "remove_duplicates": self.custom_cleanup_remove_duplicates_check.isChecked(),
-                    "repair_nonmanifold": self.custom_cleanup_repair_nonmanifold_check.isChecked(),
-                    "close_holes": self.custom_cleanup_close_holes_check.isChecked(),
-                    "max_hole_size": self.custom_cleanup_max_hole_spin.value()
-                }
+                "cleanup_params": cleanup_params
+            }
+        else:
+            custom_params = {
+                "cleanup_params": cleanup_params
             }
 
         from pipeline_manager import PipelineWorker
@@ -4013,6 +4237,10 @@ class MainWindow(QMainWindow):
         self.gpu_combo.setEnabled(True)
         self.plain_surfaces_checkbox.setEnabled(True)
         self.auto_cleanup_checkbox.setEnabled(True)
+        if hasattr(self, 'mc_enabled'):
+            self.mc_enabled.setEnabled(True)
+        if hasattr(self, 'mc_options_container'):
+            self.mc_options_container.setEnabled(self.mc_enabled.isChecked())
         self.custom_settings_toggle.setEnabled(True)
         self._on_custom_settings_toggled(self.custom_settings_toggle.isChecked())
         self.advanced_toggle_btn.setEnabled(True)
@@ -4052,6 +4280,114 @@ class MainWindow(QMainWindow):
         else:
             self._set_process_btn_state("failed")
             self.console_text.append(f"[FAILED] Reconstruction failed: {msg}")
+        self._update_file_menu_states()
+        self._check_and_enable_cleanup_btn()
+
+    def _start_cleanup_only(self):
+        """
+        Executes Mesh Cleanup + TextureMesh standalone on an existing reconstructed mesh.
+        """
+        if not self._has_existing_mesh():
+            QMessageBox.warning(
+                self,
+                "No Mesh Available",
+                "No reconstructed mesh was found to clean.\n\nPlease run reconstruction first (Step 2) before running mesh cleanup."
+            )
+            return
+
+        self._terminate_viewer()
+        
+        self._set_process_btn_state("idle")
+        self._set_cleanup_btn_state("progress")
+        self.browse_files_btn.setEnabled(False)
+        self.browse_btn.setEnabled(False)
+        self.mobile_import_btn.setEnabled(False)
+        self._set_export_actions_enabled(False)
+        self.quality_combo.setEnabled(False)
+        self.gpu_combo.setEnabled(False)
+        self.plain_surfaces_checkbox.setEnabled(False)
+        self.auto_cleanup_checkbox.setEnabled(False)
+        if hasattr(self, 'mc_enabled'):
+            self.mc_enabled.setEnabled(False)
+        if hasattr(self, 'mc_options_container'):
+            self.mc_options_container.setEnabled(False)
+        self.custom_settings_toggle.setEnabled(False)
+        self.custom_settings_container.setEnabled(False)
+        self.advanced_toggle_btn.setEnabled(False)
+
+        output_dir = get_reconstruction_out_dir()
+        
+        quality_presets = ["preview", "medium", "high", "ultra"]
+        quality_preset = quality_presets[self.quality_combo.currentIndex()]
+
+        cleanup_params = {
+            "enable_cleanup": True,
+            "target_reduction_pct": self.mc_reduction_spin.value() if hasattr(self, 'mc_reduction_spin') else 50,
+            "remove_duplicates": self.mc_remove_dups_check.isChecked() if hasattr(self, 'mc_remove_dups_check') else True,
+            "repair_nonmanifold": self.mc_repair_nm_check.isChecked() if hasattr(self, 'mc_repair_nm_check') else True,
+            "close_holes": self.mc_close_holes_check.isChecked() if hasattr(self, 'mc_close_holes_check') else True,
+            "max_hole_size": self.mc_max_hole_spin.value() if hasattr(self, 'mc_max_hole_spin') else 30
+        }
+
+        custom_params = {}
+        if self.custom_settings_toggle.isChecked():
+            custom_params["texture_res"] = str(self.custom_texture_res_combo.currentIndex())
+        custom_params["cleanup_params"] = cleanup_params
+
+        from pipeline_manager import CleanupAndTextureWorker
+        self.worker = CleanupAndTextureWorker(
+            output_dir=output_dir,
+            cleanup_params=cleanup_params,
+            custom_params=custom_params,
+            quality_preset=quality_preset,
+            parent=self
+        )
+        self.worker.progress_changed.connect(self._on_progress_changed)
+        self.worker.status_changed.connect(self.status_label.setText)
+        self.worker.log_message.connect(self._append_log)
+        self.worker.finished.connect(self._on_cleanup_finished)
+
+        self.console_text.append("[START] Initializing standalone mesh cleanup and texturing task thread...")
+        self.worker.start()
+        self._update_file_menu_states()
+
+    def _on_cleanup_finished(self, success: bool, msg: str):
+        """
+        Handles completion of standalone mesh cleanup and texturing.
+        """
+        self.browse_files_btn.setEnabled(True)
+        self.browse_btn.setEnabled(True)
+        self.mobile_import_btn.setEnabled(True)
+        self.view_scene_btn.setEnabled(True)
+        self.gpu_combo.setEnabled(True)
+        self.plain_surfaces_checkbox.setEnabled(True)
+        self.auto_cleanup_checkbox.setEnabled(True)
+        if hasattr(self, 'mc_enabled'):
+            self.mc_enabled.setEnabled(True)
+        if hasattr(self, 'mc_options_container'):
+            self.mc_options_container.setEnabled(self.mc_enabled.isChecked())
+        self.custom_settings_toggle.setEnabled(True)
+        self._on_custom_settings_toggled(self.custom_settings_toggle.isChecked())
+        self.advanced_toggle_btn.setEnabled(True)
+
+        self._set_process_btn_state("ready" if len(self.image_list) > 0 else "idle")
+        if success:
+            self._set_cleanup_btn_state("ready")
+            self.console_text.append(f"[FINISHED] {msg}")
+            self._update_upload_button_state()
+            
+            mvs_dir = os.path.join(get_reconstruction_out_dir(), "mvs")
+            self.viewer_widget.set_mvs_directory(mvs_dir)
+            self.viewer_widget.mode_select.blockSignals(True)
+            self.viewer_widget.mode_select.setCurrentIndex(2) # Mesh mode
+            self.viewer_widget.mode_select.blockSignals(False)
+            
+            mesh_path = self.viewer_widget.get_selected_file_path()
+            if mesh_path:
+                self._reload_viewer(mesh_path)
+        else:
+            self._set_cleanup_btn_state("failed")
+            self.console_text.append(f"[FAILED] Mesh cleanup failed: {msg}")
         self._update_file_menu_states()
 
     def _export_mesh(self, fmt):
@@ -4324,7 +4660,24 @@ class MainWindow(QMainWindow):
             if "has_plain_surfaces" in meta:
                 self.plain_surfaces_checkbox.setChecked(bool(meta["has_plain_surfaces"]))
             if "auto_cleanup" in meta:
-                self.auto_cleanup_checkbox.setChecked(bool(meta["auto_cleanup"]))
+                val = bool(meta["auto_cleanup"])
+                self.auto_cleanup_checkbox.setChecked(val)
+                if hasattr(self, 'mc_enabled'):
+                    self.mc_enabled.setChecked(val)
+                self._on_mc_enabled_toggled(val)
+            
+            clean_p = meta.get("cleanup_params")
+            if clean_p and isinstance(clean_p, dict):
+                if "target_reduction_pct" in clean_p and hasattr(self, 'mc_reduction_spin'):
+                    self.mc_reduction_spin.setValue(int(clean_p["target_reduction_pct"]))
+                if "max_hole_size" in clean_p and hasattr(self, 'mc_max_hole_spin'):
+                    self.mc_max_hole_spin.setValue(int(clean_p["max_hole_size"]))
+                if "remove_duplicates" in clean_p and hasattr(self, 'mc_remove_dups_check'):
+                    self.mc_remove_dups_check.setChecked(bool(clean_p["remove_duplicates"]))
+                if "repair_nonmanifold" in clean_p and hasattr(self, 'mc_repair_nm_check'):
+                    self.mc_repair_nm_check.setChecked(bool(clean_p["repair_nonmanifold"]))
+                if "close_holes" in clean_p and hasattr(self, 'mc_close_holes_check'):
+                    self.mc_close_holes_check.setChecked(bool(clean_p["close_holes"]))
             if "mapper_mode" in meta and hasattr(self, 'mapper_combo'):
                 mapper_str = str(meta["mapper_mode"]).lower()
                 mapper_idx = 1 if mapper_str == "global" else 0
@@ -4384,18 +4737,16 @@ class MainWindow(QMainWindow):
 
                 if "cleanup_params" in cparams and isinstance(cparams["cleanup_params"], dict):
                     clean_p = cparams["cleanup_params"]
-                    if "enable_cleanup" in clean_p and hasattr(self, 'custom_cleanup_check'):
-                        self.custom_cleanup_check.setChecked(bool(clean_p["enable_cleanup"]))
-                    if "target_reduction_pct" in clean_p and hasattr(self, 'custom_cleanup_decimation_spin'):
-                        self.custom_cleanup_decimation_spin.setValue(int(clean_p["target_reduction_pct"]))
-                    if "max_hole_size" in clean_p and hasattr(self, 'custom_cleanup_max_hole_spin'):
-                        self.custom_cleanup_max_hole_spin.setValue(int(clean_p["max_hole_size"]))
-                    if "remove_duplicates" in clean_p and hasattr(self, 'custom_cleanup_remove_duplicates_check'):
-                        self.custom_cleanup_remove_duplicates_check.setChecked(bool(clean_p["remove_duplicates"]))
-                    if "repair_nonmanifold" in clean_p and hasattr(self, 'custom_cleanup_repair_nonmanifold_check'):
-                        self.custom_cleanup_repair_nonmanifold_check.setChecked(bool(clean_p["repair_nonmanifold"]))
-                    if "close_holes" in clean_p and hasattr(self, 'custom_cleanup_close_holes_check'):
-                        self.custom_cleanup_close_holes_check.setChecked(bool(clean_p["close_holes"]))
+                    if "target_reduction_pct" in clean_p and hasattr(self, 'mc_reduction_spin'):
+                        self.mc_reduction_spin.setValue(int(clean_p["target_reduction_pct"]))
+                    if "max_hole_size" in clean_p and hasattr(self, 'mc_max_hole_spin'):
+                        self.mc_max_hole_spin.setValue(int(clean_p["max_hole_size"]))
+                    if "remove_duplicates" in clean_p and hasattr(self, 'mc_remove_dups_check'):
+                        self.mc_remove_dups_check.setChecked(bool(clean_p["remove_duplicates"]))
+                    if "repair_nonmanifold" in clean_p and hasattr(self, 'mc_repair_nm_check'):
+                        self.mc_repair_nm_check.setChecked(bool(clean_p["repair_nonmanifold"]))
+                    if "close_holes" in clean_p and hasattr(self, 'mc_close_holes_check'):
+                        self.mc_close_holes_check.setChecked(bool(clean_p["close_holes"]))
 
         # Enable view scene button and set mode
         mvs_dir = os.path.join(out_dir, "mvs")
@@ -4426,6 +4777,7 @@ class MainWindow(QMainWindow):
             self._reload_viewer(path)
 
         self._update_file_menu_states()
+        self._check_and_enable_cleanup_btn()
 
         # Prompt user if they want to resume remaining reconstruction steps
         step = meta.get("last_completed_step", "unknown") if meta else "unknown"
