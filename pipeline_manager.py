@@ -759,6 +759,7 @@ class PipelineWorker(QThread):
             if "texture_res" in self.custom_params:
                 texture_res = self.custom_params["texture_res"]
 
+        total_steps = 10 if self.auto_cleanup else 9
         skip_sfm = self.resume_from_step in ["sparse_reconstruction", "dense_reconstruction"]
         skip_dense = self.resume_from_step == "dense_reconstruction"
 
@@ -779,9 +780,9 @@ class PipelineWorker(QThread):
                 self._total_images = 0
         else:
             # =========================================================================
-            # STEP 1/9 — Image Preparation
+            # STEP 1 — Image Preparation
             # =========================================================================
-            self.status_changed.emit("Step 1/9: Preparing Images...")
+            self.status_changed.emit(f"Step 1/{total_steps}: Preparing Images...")
             working_image_dir = self._prepare_images(
                 self.image_dir, self.output_dir, max_image_dim
             )
@@ -874,7 +875,7 @@ class PipelineWorker(QThread):
                 # -----------------------------------------------------------------
                 # SIFT path: existing COLMAP feature_extractor + exhaustive_matcher
                 # -----------------------------------------------------------------
-                self.status_changed.emit("Step 2/9: Extracting SIFT Features...")
+                self.status_changed.emit(f"Step 2/{total_steps}: Extracting SIFT Features...")
 
                 cmd_extract_gpu = [
                     colmap_exe, "feature_extractor",
@@ -942,7 +943,7 @@ class PipelineWorker(QThread):
                 self._backup_checkpoint("features_extracted")
 
             # Step 3: SIFT matching
-            self.status_changed.emit("Step 3/9: Matching SIFT Features...")
+            self.status_changed.emit(f"Step 3/{total_steps}: Matching SIFT Features...")
             os.makedirs(os.path.dirname(database_path), exist_ok=True)
             if not os.path.exists(database_path):
                 self.log_message.emit(f"[WARNING] COLMAP database missing prior to matching: {database_path}. Initializing database schema...")
@@ -1120,7 +1121,7 @@ class PipelineWorker(QThread):
             ]
 
             if self.mapper_mode == "global":
-                self.status_changed.emit("Step 4/9: Estimating Camera Poses (GLOMAP Global SfM)...")
+                self.status_changed.emit(f"Step 4/{total_steps}: Estimating Camera Poses (GLOMAP Global SfM)...")
                 self.log_message.emit("[INFO] SfM Mapper: GLOMAP global_mapper selected.")
                 cmd_global = [
                     colmap_exe, "global_mapper",
@@ -1143,7 +1144,7 @@ class PipelineWorker(QThread):
                     if not self._run_process_realtime(cmd_incremental, timeout=14400.0, env=colmap_env, line_parser=self._parse_mapper_line):
                         return False
             else:
-                self.status_changed.emit("Step 4/9: Estimating Camera Poses (SfM)...")
+                self.status_changed.emit(f"Step 4/{total_steps}: Estimating Camera Poses (SfM)...")
                 if not self._run_process_realtime(cmd_incremental, timeout=14400.0, env=colmap_env, line_parser=self._parse_mapper_line):
                     return False
 
@@ -1194,9 +1195,9 @@ class PipelineWorker(QThread):
             self.progress_changed.emit(60)
 
             # =========================================================================
-            # STEP 5/9 — Export to OpenMVS Format
+            # STEP 5 — Export to OpenMVS Format
             # =========================================================================
-            self.status_changed.emit("Step 5/9: Exporting Scene to OpenMVS...")
+            self.status_changed.emit(f"Step 5/{total_steps}: Exporting Scene to OpenMVS...")
 
             # Copy sparse model files to the parent sparse directory so InterfaceCOLMAP can find them
             try:
@@ -1229,7 +1230,7 @@ class PipelineWorker(QThread):
             self.log_message.emit("[RESUME] Skipping Step 6 (Dense Point Cloud already complete).")
             self.progress_changed.emit(80)
         else:
-            self.status_changed.emit("Step 6/9: Generating Dense Point Cloud...")
+            self.status_changed.emit(f"Step 6/{total_steps}: Generating Dense Point Cloud...")
             mvs_densify_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["DensifyPointCloud"])
 
             sparse_point_count = self._count_scene_points(mvs_out)
@@ -1281,7 +1282,7 @@ class PipelineWorker(QThread):
             else:
                 self.log_message.emit("[WARNING] Poisson reconstruction failed. Falling back to default OpenMVS Delaunay meshing pipeline...")
 
-        self.status_changed.emit("Step 7/9: Reconstructing Surface Mesh...")
+        self.status_changed.emit(f"Step 7/{total_steps}: Reconstructing Surface Mesh...")
         mvs_mesh_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["ReconstructMesh"])
 
         dense_mvs = os.path.join(mvs_out, "scene_dense.mvs")
