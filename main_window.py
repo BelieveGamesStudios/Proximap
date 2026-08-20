@@ -707,6 +707,13 @@ class ViewerWrapperWidget(QFrame):
     images_dropped = Signal(list)
     reload_requested = Signal(str)  # Emits target file path to reload
     camera_changed = Signal(int)  # Emits selected camera index (0: Arcball, 1: Turntable)
+    selection_mode_changed = Signal(str)  # Emits mode: 'none', 'box', 'lasso', 'crop_box'
+    remove_outside_requested = Signal()
+    reset_crop_requested = Signal()
+    finalize_crop_requested = Signal()
+    delete_selection_requested = Signal()
+    clear_selection_requested = Signal()
+    invert_selection_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -714,6 +721,8 @@ class ViewerWrapperWidget(QFrame):
         self.setObjectName("ViewerWrapperWidget")
         self.setStyleSheet("background-color: #1A1A1A; border: 1px solid #2B2B2B; border-radius: 8px;")
         
+        self._current_selection_mode = 'none'
+
         # Main layout
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -727,7 +736,7 @@ class ViewerWrapperWidget(QFrame):
         control_layout.setContentsMargins(10, 5, 10, 5)
         
         # Dropdown File Menu
-        self.file_menu_btn = QPushButton("File ▾", self.control_bar)
+        self.file_menu_btn = QPushButton("File", self.control_bar)
         self.file_menu_btn.setStyleSheet("""
             QPushButton {
                 font-size: 11px;
@@ -738,6 +747,7 @@ class ViewerWrapperWidget(QFrame):
                 border: 1px solid #444444;
                 border-radius: 4px;
                 margin-left: 0px;
+                text-align: center;
             }
             QPushButton:hover {
                 background-color: #444444;
@@ -745,6 +755,7 @@ class ViewerWrapperWidget(QFrame):
             }
             QPushButton::menu-indicator {
                 image: none;
+                width: 0px;
             }
         """)
         self.file_menu = QMenu(self)
@@ -817,7 +828,51 @@ class ViewerWrapperWidget(QFrame):
         
         self.file_menu_btn.setMenu(self.file_menu)
         
-        # Checkbox to toggle controls display overlay
+        # Dropdown Selection Menu (Box, Lasso, Circle, Bounding Box Crop)
+        self.select_menu_btn = QPushButton("Select", self.control_bar)
+        self.select_menu_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 4px 10px;
+                font-weight: normal;
+                background-color: #333333;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                margin-left: 5px;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background-color: #444444;
+                border-color: #00E676;
+            }
+            QPushButton::menu-indicator {
+                image: none;
+                width: 0px;
+            }
+        """)
+        self.select_menu = QMenu(self)
+        self.select_menu.setStyleSheet(self.file_menu.styleSheet())
+        self.select_menu.aboutToShow.connect(self.update_crop_box_state)
+
+        self.action_select_none = self.select_menu.addAction("Default Navigation")
+        self.select_menu.addSeparator()
+        self.action_select_box = self.select_menu.addAction("Box Select")
+        self.action_select_lasso = self.select_menu.addAction("Lasso Select")
+        self.select_menu.addSeparator()
+        self.action_crop_box = self.select_menu.addAction("Bounding Box")
+        self.action_select_box.setEnabled(False)
+        self.action_select_lasso.setEnabled(False)
+        self.action_crop_box.setEnabled(False)
+
+        self.select_menu_btn.setMenu(self.select_menu)
+
+        self.action_select_none.triggered.connect(lambda: self.set_selection_mode('none'))
+        self.action_select_box.triggered.connect(lambda: self.set_selection_mode('box'))
+        self.action_select_lasso.triggered.connect(lambda: self.set_selection_mode('lasso'))
+        self.action_crop_box.triggered.connect(lambda: self.set_selection_mode('crop_box'))
+
+        # "Show Controls" toggle checkbox (right side of toolbar)
         self.show_controls_cb = QCheckBox("Show Controls", self.control_bar)
         self.show_controls_cb.setStyleSheet("""
             QCheckBox {
@@ -831,17 +886,17 @@ class ViewerWrapperWidget(QFrame):
                 height: 14px;
             }
         """)
-        
-        # Dropdown to choose MVS scene mode
+
+        # View mode selector (Sparse / Dense / Textured Mesh)
         self.mode_select = QComboBox(self.control_bar)
         self.mode_select.setMinimumWidth(200)
         self.mode_select.addItems([
             "Sparse Point Cloud & Cameras",
             "Dense Point Cloud",
-            "Textured Mesh"
+            "Textured Mesh",
         ])
-        
-        # Action buttons
+
+        # Background colour picker button
         self.bg_btn = QPushButton("BG Color", self.control_bar)
         self.bg_btn.setStyleSheet("""
             QPushButton {
@@ -851,17 +906,21 @@ class ViewerWrapperWidget(QFrame):
                 background-color: #333333;
                 color: #ffffff;
                 border: 1px solid #444444;
+                border-radius: 4px;
             }
             QPushButton:hover {
                 background-color: #444444;
                 border-color: #00E676;
             }
         """)
-        
+
+        # Reload / refresh button
         self.reload_btn = QPushButton("Reload", self.control_bar)
         self.reload_btn.setStyleSheet("font-size: 11px; padding: 4px 8px; font-weight: normal;")
-        
+
+        # --- Assemble toolbar ---
         control_layout.addWidget(self.file_menu_btn)
+        control_layout.addWidget(self.select_menu_btn)
         control_layout.addStretch()
         control_layout.addWidget(self.show_controls_cb)
         control_layout.addWidget(self.mode_select)
@@ -876,6 +935,161 @@ class ViewerWrapperWidget(QFrame):
         self.container_area_layout.setContentsMargins(0, 0, 0, 0)
         self.container_area_layout.setSpacing(0)
         
+        # Floating Crop & Selection Tool Modal (Shown at bottom-left corner of viewport)
+        self.crop_modal = QFrame(self.container_area)
+        self.crop_modal.setObjectName("CropModal")
+        self.crop_modal.setStyleSheet("""
+            QFrame#CropModal {
+                background-color: rgba(20, 20, 20, 220);
+                color: #e0e0e0;
+                border: 1px solid #444444;
+                border-radius: 6px;
+            }
+        """)
+        crop_modal_layout = QVBoxLayout(self.crop_modal)
+        crop_modal_layout.setContentsMargins(12, 10, 12, 10)
+        crop_modal_layout.setSpacing(8)
+
+        self.crop_modal_title = QLabel("Bounding Box Crop", self.crop_modal)
+        self.crop_modal_title.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold; background: transparent; border: none;")
+        crop_modal_layout.addWidget(self.crop_modal_title)
+
+        # Row 1: Bounding Box Buttons (Crop, Reset Crop, Finalize Crop)
+        self.crop_btn_row = QWidget(self.crop_modal)
+        self.crop_btn_row.setStyleSheet("background: transparent; border: none;")
+        crop_btn_layout = QHBoxLayout(self.crop_btn_row)
+        crop_btn_layout.setContentsMargins(0, 0, 0, 0)
+        crop_btn_layout.setSpacing(6)
+
+        self.btn_remove_outside = QPushButton("Crop", self.crop_btn_row)
+        self.btn_remove_outside.setToolTip("Deletes all mesh vertices/faces outside the crop box (RealityScan Crop)")
+        self.btn_remove_outside.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 5px 12px;
+                font-weight: bold;
+                background-color: #00E676;
+                color: #121212;
+                border: 1px solid #00E676;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #00C853;
+            }
+        """)
+
+        self.btn_reset_crop = QPushButton("Reset Crop", self.crop_btn_row)
+        self.btn_reset_crop.setToolTip("Restores un-cropped original mesh geometry")
+        self.btn_reset_crop.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 5px 10px;
+                background-color: #333333;
+                color: #CCCCCC;
+                border: 1px solid #444444;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #444444;
+                color: #FFFFFF;
+            }
+        """)
+
+        self.btn_finalize_crop = QPushButton("Finalize Crop", self.crop_btn_row)
+        self.btn_finalize_crop.setToolTip("Permanently deletes outside vertices and destructively saves the cropped mesh to disk")
+        self.btn_finalize_crop.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 5px 12px;
+                font-weight: bold;
+                background-color: #0084FF;
+                color: #ffffff;
+                border: 1px solid #0084FF;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #0066CC;
+            }
+        """)
+
+        crop_btn_layout.addWidget(self.btn_remove_outside)
+        crop_btn_layout.addWidget(self.btn_reset_crop)
+        crop_btn_layout.addWidget(self.btn_finalize_crop)
+        crop_modal_layout.addWidget(self.crop_btn_row)
+
+        self.btn_remove_outside.clicked.connect(self.remove_outside_requested.emit)
+        self.btn_reset_crop.clicked.connect(self.reset_crop_requested.emit)
+        self.btn_finalize_crop.clicked.connect(self.finalize_crop_requested.emit)
+
+        # Row 2: Selection Action Buttons (Delete Selection, Clear Selection, Invert Selection)
+        self.select_btn_row = QWidget(self.crop_modal)
+        self.select_btn_row.setStyleSheet("background: transparent; border: none;")
+        select_btn_layout = QHBoxLayout(self.select_btn_row)
+        select_btn_layout.setContentsMargins(0, 0, 0, 0)
+        select_btn_layout.setSpacing(6)
+
+        self.btn_delete_selection = QPushButton("Delete Selection", self.select_btn_row)
+        self.btn_delete_selection.setToolTip("Deletes all selected vertices and connected faces, and saves changes to disk")
+        self.btn_delete_selection.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 5px 12px;
+                font-weight: bold;
+                background-color: #D32F2F;
+                color: #ffffff;
+                border: 1px solid #D32F2F;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #B71C1C;
+            }
+        """)
+
+        self.btn_clear_selection = QPushButton("Clear Selection", self.select_btn_row)
+        self.btn_clear_selection.setToolTip("Clears active selection and restores original appearance")
+        self.btn_clear_selection.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 5px 10px;
+                background-color: #333333;
+                color: #CCCCCC;
+                border: 1px solid #444444;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #444444;
+                color: #FFFFFF;
+            }
+        """)
+
+        self.btn_invert_selection = QPushButton("Invert Selection", self.select_btn_row)
+        self.btn_invert_selection.setToolTip("Flips the active vertex selection")
+        self.btn_invert_selection.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 5px 10px;
+                background-color: #1E3A5F;
+                color: #90CAF9;
+                border: 1px solid #2563EB;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #2563EB;
+                color: #FFFFFF;
+            }
+        """)
+
+        select_btn_layout.addWidget(self.btn_delete_selection)
+        select_btn_layout.addWidget(self.btn_clear_selection)
+        select_btn_layout.addWidget(self.btn_invert_selection)
+        crop_modal_layout.addWidget(self.select_btn_row)
+
+        self.btn_delete_selection.clicked.connect(self.delete_selection_requested.emit)
+        self.btn_clear_selection.clicked.connect(self.clear_selection_requested.emit)
+        self.btn_invert_selection.clicked.connect(self.invert_selection_requested.emit)
+
+        self.crop_modal.setVisible(False)
+        
         # A simple fallback label when no viewer is running
         self.fallback_label = QLabel("Drag Images/Videos Here or Process to View 3D Scene", self.container_area)
         self.fallback_label.setAlignment(Qt.AlignCenter)
@@ -887,11 +1101,145 @@ class ViewerWrapperWidget(QFrame):
         # Setup actions
         self.reload_btn.clicked.connect(self._on_reload_clicked)
         self.mode_select.currentIndexChanged.connect(self._on_mode_changed)
+        self.action_crop_box.setEnabled(self.mode_select.currentIndex() == 2)
         
         self.current_mvs_dir = None
 
+    def _position_crop_modal(self):
+        if hasattr(self, 'crop_modal') and self.crop_modal.isVisible():
+            self.crop_modal.adjustSize()
+            container_w = self.container_area.width()
+            container_h = self.container_area.height()
+            
+            modal_size = self.crop_modal.sizeHint()
+            modal_w = max(self.crop_modal.width(), modal_size.width())
+            modal_h = max(self.crop_modal.height(), modal_size.height())
+
+            margin = 15
+            x = margin
+            y = container_h - modal_h - margin
+            self.crop_modal.setGeometry(x, y, modal_w, modal_h)
+            self.crop_modal.raise_()
+
+    def set_selection_mode(self, mode_name: str):
+        if mode_name in ['crop_box', 'box', 'lasso'] and self.mode_select.currentIndex() != 2:
+            return
+        self._current_selection_mode = mode_name
+
+        if mode_name == 'crop_box':
+            self.crop_modal_title.setText("Bounding Box Crop")
+            self.crop_btn_row.setVisible(True)
+            self.select_btn_row.setVisible(False)
+            self.crop_modal.setVisible(True)
+            self._position_crop_modal()
+
+            self.select_menu_btn.setText("Select: Bounding Box")
+            self.select_menu_btn.setStyleSheet("""
+                QPushButton {
+                    font-size: 11px;
+                    padding: 4px 10px;
+                    font-weight: bold;
+                    background-color: #1B382B;
+                    color: #00E676;
+                    border: 1px solid #00E676;
+                    border-radius: 4px;
+                    margin-left: 5px;
+                    text-align: center;
+                }
+                QPushButton:hover {
+                    background-color: #264A39;
+                }
+                QPushButton::menu-indicator {
+                    image: none;
+                    width: 0px;
+                }
+            """)
+        elif mode_name == 'box':
+            self.crop_modal_title.setText("Box Selection")
+            self.crop_btn_row.setVisible(False)
+            self.select_btn_row.setVisible(True)
+            self.crop_modal.setVisible(True)
+            self._position_crop_modal()
+
+            self.select_menu_btn.setText("Select: Box")
+            self.select_menu_btn.setStyleSheet("""
+                QPushButton {
+                    font-size: 11px;
+                    padding: 4px 10px;
+                    font-weight: bold;
+                    background-color: #1B382B;
+                    color: #00E676;
+                    border: 1px solid #00E676;
+                    border-radius: 4px;
+                    margin-left: 5px;
+                    text-align: center;
+                }
+                QPushButton:hover {
+                    background-color: #264A39;
+                }
+                QPushButton::menu-indicator {
+                    image: none;
+                    width: 0px;
+                }
+            """)
+        elif mode_name == 'lasso':
+            self.crop_modal_title.setText("Lasso Selection")
+            self.crop_btn_row.setVisible(False)
+            self.select_btn_row.setVisible(True)
+            self.crop_modal.setVisible(True)
+            self._position_crop_modal()
+
+            self.select_menu_btn.setText("Select: Lasso")
+            self.select_menu_btn.setStyleSheet("""
+                QPushButton {
+                    font-size: 11px;
+                    padding: 4px 10px;
+                    font-weight: bold;
+                    background-color: #1B382B;
+                    color: #00E676;
+                    border: 1px solid #00E676;
+                    border-radius: 4px;
+                    margin-left: 5px;
+                    text-align: center;
+                }
+                QPushButton:hover {
+                    background-color: #264A39;
+                }
+                QPushButton::menu-indicator {
+                    image: none;
+                    width: 0px;
+                }
+            """)
+        else:
+            self.crop_modal.setVisible(False)
+            self.select_menu_btn.setText("Select")
+            self.select_menu_btn.setStyleSheet("""
+                QPushButton {
+                    font-size: 11px;
+                    padding: 4px 10px;
+                    font-weight: normal;
+                    background-color: #333333;
+                    color: #ffffff;
+                    border: 1px solid #444444;
+                    border-radius: 4px;
+                    margin-left: 5px;
+                    text-align: center;
+                }
+                QPushButton:hover {
+                    background-color: #444444;
+                    border-color: #00E676;
+                }
+                QPushButton::menu-indicator {
+                    image: none;
+                    width: 0px;
+                }
+            """)
+
+        self.selection_mode_changed.emit(mode_name)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self._position_crop_modal()
         w = self.width()
             
         if w < 600:
@@ -998,7 +1346,16 @@ class ViewerWrapperWidget(QFrame):
         if path:
             self.reload_requested.emit(path)
 
+    def update_crop_box_state(self):
+        is_textured_mesh = (self.mode_select.currentIndex() == 2)
+        self.action_select_box.setEnabled(is_textured_mesh)
+        self.action_select_lasso.setEnabled(is_textured_mesh)
+        self.action_crop_box.setEnabled(is_textured_mesh)
+        if not is_textured_mesh and getattr(self, '_current_selection_mode', None) in ['crop_box', 'box', 'lasso']:
+            self.set_selection_mode('none')
+
     def _on_mode_changed(self, index):
+        self.update_crop_box_state()
         path = self.get_selected_file_path()
         if path:
             self.reload_requested.emit(path)
@@ -1722,7 +2079,28 @@ class MainWindow(QMainWindow):
         self.markers_visual = None
         self.mesh_visual = None
         self.cameras_visual = None
+        self.crop_box = None
         self._last_points = None
+        
+        # Raw un-cropped geometry arrays (for Reset Crop)
+        self._raw_points = None
+        self._raw_colors = None
+        self._raw_faces = None
+        self._raw_texcoords = None
+        self._raw_texture_path = None
+        
+        # Active geometry arrays (reflecting live crops and selections)
+        self._current_points = None
+        self._current_colors = None
+        self._current_faces = None
+        self._current_texcoords = None
+        self._current_texture_path = None
+        
+        # 2D Screen-space selection states
+        self._selected_vertex_indices = None
+        self.selection_markers_visual = None
+        self.selection_overlay = None
+        
         self.last_accessed_dir = os.path.expanduser("~")
         self.viewport_bg_color = '#0C0C0C'
         
@@ -1821,6 +2199,8 @@ class MainWindow(QMainWindow):
         scroll_content = QWidget()
         scroll_content.setObjectName("ScrollContent")
         scroll_content.setStyleSheet("QWidget#ScrollContent { background-color: #1A1A1A; }")
+        # Constrain scroll_content to exact sidebar width so no child widget can expand it
+        scroll_content.setMaximumWidth(400)
         scroll_content_layout = QVBoxLayout(scroll_content)
         scroll_content_layout.setContentsMargins(12, 10, 12, 15)
         scroll_content_layout.setSpacing(16)
@@ -1952,6 +2332,8 @@ class MainWindow(QMainWindow):
         step2_box = QFrame(scroll_content)
         step2_box.setObjectName("StepBox")
         step2_layout = QVBoxLayout(step2_box)
+        step2_layout.setContentsMargins(8, 8, 8, 8)
+        step2_layout.setSpacing(6)
         
         s2_title_row = QWidget(step2_box)
         s2_title_row_layout = QHBoxLayout(s2_title_row)
@@ -1965,7 +2347,7 @@ class MainWindow(QMainWindow):
         self.recon_mode_combo = QComboBox(s2_title_row)
         self.recon_mode_combo.addItems(["Simple", "Advanced"])
         self.recon_mode_combo.setCurrentIndex(0)
-        self.recon_mode_combo.setFixedWidth(85)
+        self.recon_mode_combo.setFixedWidth(100)
         self.recon_mode_combo.setToolTip("Switch between Simple (guided) and Advanced (manual) reconstruction configuration.")
 
         s2_title_row_layout.addWidget(s2_title, 1)
@@ -2094,6 +2476,10 @@ class MainWindow(QMainWindow):
         custom_grid = QGridLayout(self.custom_settings_container)
         custom_grid.setContentsMargins(0, 4, 0, 0)
         custom_grid.setSpacing(6)
+        # Col 0: labels — fixed-width; Col 1: inputs — fills remaining space
+        custom_grid.setColumnStretch(0, 0)
+        custom_grid.setColumnStretch(1, 1)
+        custom_grid.setColumnMinimumWidth(0, 120)
 
         lbl_style = "font-size: 10px; color: #888888; border: none; background: transparent;"
 
@@ -2458,8 +2844,14 @@ class MainWindow(QMainWindow):
         self.viewer_widget.action_import_point_cloud.triggered.connect(self._import_standalone_cloud_clicked)
         self.viewer_widget.action_mobile_export.triggered.connect(self._on_send_to_mobile_clicked)
         self.viewer_widget.action_upload_proximap.triggered.connect(self._upload_to_proximap)
+        self.viewer_widget.selection_mode_changed.connect(self._on_selection_mode_changed)
+        self.viewer_widget.remove_outside_requested.connect(self._apply_crop)
+        self.viewer_widget.reset_crop_requested.connect(self._reset_crop)
+        self.viewer_widget.finalize_crop_requested.connect(self._finalize_crop)
+        self.viewer_widget.delete_selection_requested.connect(self._delete_selection)
+        self.viewer_widget.clear_selection_requested.connect(self._clear_selection)
+        self.viewer_widget.invert_selection_requested.connect(self._invert_selection)
 
-        
         # Initialize VisPy Canvas
         self.canvas = scene.SceneCanvas(keys='interactive', show=False, bgcolor=self.viewport_bg_color)
         if hasattr(self.canvas, '_keys_check') and 'escape' in self.canvas._keys_check:
@@ -2470,10 +2862,20 @@ class MainWindow(QMainWindow):
         self.view.camera.elevation = 30
         self.view.camera.azimuth = 45
         
+        self.canvas.events.mouse_press.connect(self._on_canvas_mouse_press)
+        self.canvas.events.mouse_move.connect(self._on_canvas_mouse_move)
+        self.canvas.events.mouse_release.connect(self._on_canvas_mouse_release)
+        
         # Add native VisPy canvas widget to the layout
         self.viewer_widget.container_area_layout.addWidget(self.canvas.native)
         self.viewer_widget.bg_btn.clicked.connect(self._choose_bg_color)
         
+        # Initialize 2D screen selection overlay for Box/Lasso tools
+        from selection_overlay import SelectionOverlayWidget
+        self.selection_overlay = SelectionOverlayWidget(self.viewer_widget.container_area, underlying_widget=self.canvas.native)
+        self.selection_overlay.shape_changed.connect(self._on_selection_shape_changed)
+        self.selection_overlay.setVisible(False)
+
         # Initialize floating camera controls overlay
         self.overlay_label = QLabel(self.viewer_widget.container_area)
         self.overlay_label.setStyleSheet("""
@@ -4028,6 +4430,10 @@ class MainWindow(QMainWindow):
 
     def _on_recon_mode_changed(self, index: int):
         is_advanced = (index == 1)
+        if hasattr(self, 'quality_label'):
+            self.quality_label.setVisible(not is_advanced)
+        if hasattr(self, 'quality_combo'):
+            self.quality_combo.setVisible(not is_advanced)
         if hasattr(self, 'advanced_panel'):
             self.advanced_panel.setVisible(is_advanced)
         if hasattr(self, 'custom_settings_toggle'):
@@ -5081,39 +5487,28 @@ class MainWindow(QMainWindow):
 
     def _clear_visuals(self):
         if hasattr(self, 'markers_visual') and self.markers_visual is not None:
-            try:
-                self.markers_visual.unparent()
-            except AttributeError:
-                self.markers_visual.parent = None
+            self.markers_visual.parent = None
             self.markers_visual = None
         if hasattr(self, 'mesh_visual') and self.mesh_visual is not None:
-            try:
-                self.mesh_visual.unparent()
-            except AttributeError:
-                self.mesh_visual.parent = None
+            self.mesh_visual.parent = None
             self.mesh_visual = None
         if hasattr(self, 'cameras_visual') and self.cameras_visual is not None:
-            try:
-                self.cameras_visual.unparent()
-            except AttributeError:
-                self.cameras_visual.parent = None
+            self.cameras_visual.parent = None
             self.cameras_visual = None
         if hasattr(self, 'grid_visual') and self.grid_visual is not None:
-            try:
-                self.grid_visual.unparent()
-            except AttributeError:
-                self.grid_visual.parent = None
+            self.grid_visual.parent = None
             self.grid_visual = None
+        if hasattr(self, 'selection_markers_visual') and self.selection_markers_visual is not None:
+            self.selection_markers_visual.parent = None
+            self.selection_markers_visual = None
+        self._selected_vertex_indices = None
         self._last_points = None
 
     def _update_ground_grid(self, points):
         import numpy as np
         from vispy import scene
         if hasattr(self, 'grid_visual') and self.grid_visual is not None:
-            try:
-                self.grid_visual.unparent()
-            except AttributeError:
-                self.grid_visual.parent = None
+            self.grid_visual.parent = None
             self.grid_visual = None
 
         if points is None or len(points) == 0:
@@ -5597,7 +5992,7 @@ class MainWindow(QMainWindow):
             )
             self.cameras_visual.parent = self.view.scene
 
-    def _render_in_vispy_from_data(self, points, colors, faces, texcoords, texture_path, mode):
+    def _render_in_vispy_from_data(self, points, colors, faces, texcoords, texture_path, mode, reset_camera=True):
         """Upload pre-parsed geometry arrays to the VisPy scene (UI thread only).
         Called by _on_viewer_data_ready after ViewerLoadWorker finishes background parsing.
         """
@@ -5610,6 +6005,22 @@ class MainWindow(QMainWindow):
             self.viewer_widget.fallback_label.setText("No valid 3D points or faces could be parsed.")
             self.viewer_widget.fallback_label.show()
             return
+
+        # Track active geometry arrays
+        self._current_points = points
+        self._current_colors = colors
+        self._current_faces = faces
+        self._current_texcoords = texcoords
+        self._current_texture_path = texture_path
+        self._last_points = points
+
+        # Store raw checkpoint for Reset Crop if not already recorded
+        if self._raw_points is None:
+            self._raw_points = np.copy(points) if points is not None else None
+            self._raw_colors = np.copy(colors) if colors is not None else None
+            self._raw_faces = np.copy(faces) if faces is not None else None
+            self._raw_texcoords = np.copy(texcoords) if texcoords is not None else None
+            self._raw_texture_path = texture_path
 
         if mode == 2 and faces is not None and len(faces) > 0:
             mesh_colors = None
@@ -5637,24 +6048,523 @@ class MainWindow(QMainWindow):
             self.markers_visual = scene.visuals.Markers(parent=self.view.scene)
             self.markers_visual.set_data(pos=points, face_color=marker_colors, size=2, edge_width=0)
 
-        self._last_points = points
         self.canvas.native.show()
         self.viewer_widget.fallback_label.hide()
 
-        bbox_min = np.min(points, axis=0)
-        bbox_max = np.max(points, axis=0)
-        center = (bbox_min + bbox_max) / 2.0
-        scale  = np.max(bbox_max - bbox_min)
-        self.view.camera.center   = center
-        self.view.camera.distance = max(0.1, scale * 1.5)
-        self.view.camera.elevation = 30
-        self.view.camera.azimuth   = 45
-        self.view.camera.up        = '+y'
-        
+        if reset_camera:
+            bbox_min = np.min(points, axis=0)
+            bbox_max = np.max(points, axis=0)
+            center = (bbox_min + bbox_max) / 2.0
+            scale  = np.max(bbox_max - bbox_min)
+            self.view.camera.center   = center
+            self.view.camera.distance = max(0.1, scale * 1.5)
+            self.view.camera.elevation = 30
+            self.view.camera.azimuth   = 45
+            self.view.camera.up        = '+y'
+
         # Update auto-scaling ground plane grid
         self._update_ground_grid(points)
-        
+
         self.canvas.update()
+
+    def _on_selection_mode_changed(self, mode_name: str):
+        """Triggered when user selects a mode from the Select dropdown in the 3D Reconstruction window."""
+        from crop_box import CropBoxOverlay
+
+        if mode_name == 'crop_box':
+            if hasattr(self, 'selection_overlay') and self.selection_overlay is not None:
+                self.selection_overlay.set_mode('none')
+            self._clear_selection()
+
+            if self.crop_box is None:
+                self.crop_box = CropBoxOverlay(parent_scene=self.view.scene)
+            else:
+                self.crop_box.set_parent(self.view.scene)
+
+            ref_pts = self._current_points if self._current_points is not None else self._last_points
+            self.crop_box.fit_to_points(ref_pts)
+            self.crop_box.set_visible(True)
+            self.canvas.update()
+            self.console_text.append("[CROP] Activated 3D Bounding Box Crop Overlay (RealityScan style).")
+        elif mode_name in ['box', 'lasso']:
+            if self.crop_box is not None:
+                self.crop_box.is_dragging = False
+                self.crop_box.set_visible(False)
+                self.view.camera.interactive = True
+                self.canvas.update()
+
+            if hasattr(self, 'selection_overlay') and self.selection_overlay is not None:
+                self.selection_overlay.set_mode(mode_name)
+                self.selection_overlay.setGeometry(0, 0, self.viewer_widget.container_area.width(), self.viewer_widget.container_area.height())
+                self.selection_overlay.raise_()
+                self.viewer_widget.crop_modal.raise_()
+                if hasattr(self, 'overlay_label'):
+                    self.overlay_label.raise_()
+
+            tool_name = "Box Select" if mode_name == 'box' else "Lasso Select"
+            self.console_text.append(f"[SELECT] Activated {tool_name} tool. Drag across viewport to select vertices.")
+        else:
+            if self.crop_box is not None:
+                self.crop_box.is_dragging = False
+                self.crop_box.set_visible(False)
+                self.view.camera.interactive = True
+                self.canvas.update()
+
+            if hasattr(self, 'selection_overlay') and self.selection_overlay is not None:
+                self.selection_overlay.set_mode('none')
+            self._clear_selection()
+
+    def _on_selection_shape_changed(self, shape_data):
+        if getattr(self.viewer_widget, '_current_selection_mode', None) not in ['box', 'lasso']:
+            return
+        if self._current_points is None or len(self._current_points) == 0:
+            return
+
+        import numpy as np
+        import matplotlib.path as mpath
+
+        shape_type, data = shape_data
+        points_3d = self._current_points
+
+        visual = self.mesh_visual if (hasattr(self, 'mesh_visual') and self.mesh_visual is not None) else getattr(self, 'markers_visual', None)
+        if visual is None:
+            return
+
+        try:
+            # Map 3D visual coordinates to 2D canvas pixels via visual transform chain
+            tr = visual.transforms.get_transform('visual', 'canvas')
+            mapped = tr.map(points_3d)
+            w = mapped[:, 3:4]
+            valid_w = (w[:, 0] > 1e-4)
+
+            screen_pts = np.zeros((len(points_3d), 2), dtype=np.float32)
+            screen_pts[valid_w] = mapped[valid_w, :2] / w[valid_w]
+
+            if shape_type == 'box':
+                x0, y0, x1, y1 = data
+                min_x, max_x = min(x0, x1), max(x0, x1)
+                min_y, max_y = min(y0, y1), max(y0, y1)
+                inside = valid_w & (screen_pts[:, 0] >= min_x) & (screen_pts[:, 0] <= max_x) & \
+                                   (screen_pts[:, 1] >= min_y) & (screen_pts[:, 1] <= max_y)
+                selected_indices = np.where(inside)[0]
+            elif shape_type == 'lasso':
+                poly_pts = np.array(data, dtype=np.float32)
+                if len(poly_pts) < 3:
+                    selected_indices = np.empty(0, dtype=np.int32)
+                else:
+                    path = mpath.Path(poly_pts)
+                    inside = valid_w & path.contains_points(screen_pts)
+                    selected_indices = np.where(inside)[0]
+            else:
+                selected_indices = np.empty(0, dtype=np.int32)
+
+            self._selected_vertex_indices = selected_indices
+            self._update_selection_highlight()
+
+            n_sel = len(selected_indices)
+            self.console_text.append(f"[SELECT] Selected {n_sel:,} vertices on mesh.")
+        except Exception as e:
+            self.console_text.append(f"[WARNING] Selection projection failed: {e}")
+
+    def _update_selection_highlight(self):
+        import numpy as np
+        if self._selected_vertex_indices is None or len(self._selected_vertex_indices) == 0 or self._current_points is None:
+            if hasattr(self, 'selection_markers_visual') and self.selection_markers_visual is not None:
+                self.selection_markers_visual.set_data(pos=np.empty((0, 3), dtype=np.float32))
+                self.canvas.update()
+            return
+
+        sel_pts = self._current_points[self._selected_vertex_indices]
+        if not hasattr(self, 'selection_markers_visual') or self.selection_markers_visual is None:
+            from vispy import scene
+            self.selection_markers_visual = scene.visuals.Markers(parent=self.view.scene)
+            self.selection_markers_visual.set_gl_state('translucent', depth_test=False)
+
+        # Vivid glowing orange-red highlight markers
+        n_sel = len(sel_pts)
+        colors = np.zeros((n_sel, 4), dtype=np.float32)
+        colors[:, 0] = 1.0   # R
+        colors[:, 1] = 0.25  # G
+        colors[:, 2] = 0.15  # B
+        colors[:, 3] = 0.95  # A
+
+        self.selection_markers_visual.set_data(
+            pos=sel_pts,
+            face_color=colors,
+            edge_color=[1.0, 0.6, 0.2, 1.0],
+            edge_width=1,
+            size=6
+        )
+        self.selection_markers_visual.parent = self.view.scene
+        self.canvas.update()
+
+    def _clear_selection(self):
+        import numpy as np
+        self._selected_vertex_indices = np.empty(0, dtype=np.int32)
+        self._update_selection_highlight()
+        if hasattr(self, 'selection_overlay') and self.selection_overlay is not None:
+            self.selection_overlay.clear()
+
+    def _invert_selection(self):
+        if self._current_points is None or len(self._current_points) == 0:
+            return
+        import numpy as np
+        total_n = len(self._current_points)
+        curr_set = set(self._selected_vertex_indices.tolist()) if self._selected_vertex_indices is not None else set()
+        all_set = set(range(total_n))
+        inverted_set = all_set - curr_set
+        self._selected_vertex_indices = np.array(sorted(list(inverted_set)), dtype=np.int32)
+        self._update_selection_highlight()
+
+    def _delete_selection(self):
+        if self._selected_vertex_indices is None or len(self._selected_vertex_indices) == 0:
+            self.console_text.append("[WARNING] No vertices currently selected to delete.")
+            return
+
+        if self._current_points is None or len(self._current_points) == 0:
+            return
+
+        import numpy as np
+
+        points = self._current_points
+        faces = self._current_faces
+        colors = self._current_colors
+        texcoords = self._current_texcoords
+        texture_path = self._current_texture_path
+
+        n_pts = len(points)
+        delete_mask = np.zeros(n_pts, dtype=bool)
+        delete_mask[self._selected_vertex_indices] = True
+        keep_vertex_mask = ~delete_mask
+
+        n_del = len(self._selected_vertex_indices)
+        self.console_text.append(f"[DELETE] Deleting {n_del:,} selected vertices from mesh...")
+
+        if faces is not None and len(faces) > 0:
+            f_v0 = keep_vertex_mask[faces[:, 0]]
+            f_v1 = keep_vertex_mask[faces[:, 1]]
+            f_v2 = keep_vertex_mask[faces[:, 2]]
+            keep_face_mask = f_v0 & f_v1 & f_v2
+
+            sub_faces = faces[keep_face_mask]
+            if len(sub_faces) == 0:
+                self.console_text.append("[WARNING] Deletion resulted in empty mesh geometry. Operation cancelled.")
+                return
+
+            unique_v_idx, new_faces = np.unique(sub_faces, return_inverse=True)
+            new_faces = new_faces.reshape(sub_faces.shape).astype(np.int32)
+
+            new_points = points[unique_v_idx]
+            new_colors = colors[unique_v_idx] if colors is not None and len(colors) == len(points) else colors
+            new_texcoords = texcoords[unique_v_idx] if texcoords is not None and len(texcoords) == len(points) else texcoords
+        else:
+            new_points = points[keep_vertex_mask]
+            new_colors = colors[keep_vertex_mask] if colors is not None and len(colors) == len(points) else colors
+            new_faces = None
+            new_texcoords = None
+
+        if len(new_points) == 0:
+            self.console_text.append("[WARNING] Deletion resulted in empty geometry. Operation cancelled.")
+            return
+
+        # Update in-memory state
+        self._current_points = new_points
+        self._current_colors = new_colors
+        self._current_faces = new_faces
+        self._current_texcoords = new_texcoords
+
+        # Update raw checkpoints
+        self._raw_points = np.copy(new_points) if new_points is not None else None
+        self._raw_colors = np.copy(new_colors) if new_colors is not None else None
+        self._raw_faces = np.copy(new_faces) if new_faces is not None else None
+        self._raw_texcoords = np.copy(new_texcoords) if new_texcoords is not None else None
+        self._raw_texture_path = texture_path
+
+        # Clear selection highlights
+        self._clear_selection()
+
+        # Re-render in VisPy without resetting camera
+        mode = self.viewer_widget.mode_select.currentIndex()
+        self._render_in_vispy_from_data(new_points, new_colors, new_faces, new_texcoords, texture_path, mode, reset_camera=False)
+
+        # Destructively save updated mesh to disk
+        self._save_active_mesh_to_disk()
+
+    def _save_active_mesh_to_disk(self):
+        """Helper to save current in-memory points, faces, and UVs destructively to disk (.obj / .ply)."""
+        import os
+        import numpy as np
+        if self._current_points is None or len(self._current_points) == 0:
+            return
+
+        mesh_path = self.viewer_widget.get_selected_file_path()
+        if not mesh_path or not os.path.exists(mesh_path):
+            mvs_dir = self.viewer_widget.current_mvs_dir if self.viewer_widget.current_mvs_dir else os.path.join(get_reconstruction_out_dir(), "mvs")
+            mesh_path = os.path.join(mvs_dir, "scene_dense_mesh_texture.obj")
+
+        try:
+            from point_cloud_io import apply_photogrammetry_coordinate_flip
+            save_pts, _, _, _ = apply_photogrammetry_coordinate_flip(points=self._current_points)
+            save_uvs = np.copy(self._current_texcoords) if self._current_texcoords is not None else None
+            if save_uvs is not None and len(save_uvs) > 0:
+                save_uvs[:, 1] = 1.0 - save_uvs[:, 1]
+
+            # Save OBJ
+            if mesh_path.lower().endswith('.obj') or not mesh_path.lower().endswith('.ply'):
+                obj_target = mesh_path if mesh_path.lower().endswith('.obj') else os.path.splitext(mesh_path)[0] + ".obj"
+                base_name = os.path.splitext(os.path.basename(obj_target))[0]
+                mtl_filename = f"{base_name}.mtl"
+                mtl_path = os.path.join(os.path.dirname(obj_target), mtl_filename)
+
+                has_uv = save_uvs is not None and len(save_uvs) == len(save_pts)
+                tex_path = self._current_texture_path
+
+                if tex_path and os.path.exists(tex_path):
+                    tex_filename = os.path.basename(tex_path)
+                    with open(mtl_path, 'w') as fm:
+                        fm.write("# Material file generated by Proximap\n")
+                        fm.write("newmtl material_0\n")
+                        fm.write("Ka 1.000 1.000 1.000\n")
+                        fm.write("Kd 1.000 1.000 1.000\n")
+                        fm.write("Ks 0.000 0.000 0.000\n")
+                        fm.write("d 1.0\n")
+                        fm.write("illum 1\n")
+                        fm.write(f"map_Kd {tex_filename}\n")
+
+                with open(obj_target, 'w') as f:
+                    f.write("# Wavefront OBJ file generated by Proximap (Destructive Edit)\n")
+                    if tex_path and os.path.exists(tex_path):
+                        f.write(f"mtllib {mtl_filename}\n")
+                        f.write("usemtl material_0\n")
+
+                    for v in save_pts:
+                        f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+
+                    if has_uv:
+                        for vt in save_uvs:
+                            f.write(f"vt {vt[0]:.6f} {vt[1]:.6f}\n")
+
+                    if self._current_faces is not None and len(self._current_faces) > 0:
+                        for face in self._current_faces:
+                            i0, i1, i2 = face[0] + 1, face[1] + 1, face[2] + 1
+                            if has_uv:
+                                f.write(f"f {i0}/{i0} {i1}/{i1} {i2}/{i2}\n")
+                            else:
+                                f.write(f"f {i0} {i1} {i2}\n")
+
+            # Save PLY if target is PLY
+            if mesh_path.lower().endswith('.ply'):
+                with open(mesh_path, 'w') as f:
+                    f.write("ply\nformat ascii 1.0\n")
+                    f.write(f"element vertex {len(save_pts)}\n")
+                    f.write("property float x\nproperty float y\nproperty float z\n")
+                    if self._current_colors is not None and len(self._current_colors) == len(save_pts):
+                        f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+                    f.write(f"element face {len(self._current_faces) if self._current_faces is not None else 0}\n")
+                    f.write("property list uchar int vertex_indices\nend_header\n")
+                    for idx, v in enumerate(save_pts):
+                        if self._current_colors is not None and len(self._current_colors) == len(save_pts):
+                            c = self._current_colors[idx]
+                            f.write(f"{v[0]:.6f} {v[1]:.6f} {v[2]:.6f} {int(c[0])} {int(c[1])} {int(c[2])}\n")
+                        else:
+                            f.write(f"{v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+                    if self._current_faces is not None:
+                        for face in self._current_faces:
+                            f.write(f"3 {face[0]} {face[1]} {face[2]}\n")
+
+            rem_v = len(save_pts)
+            rem_f = len(self._current_faces) if self._current_faces is not None else 0
+            self.console_text.append(f"[SAVE] Geometry saved destructively to disk ({os.path.basename(mesh_path)} - Vertices: {rem_v:,}, Faces: {rem_f:,}).")
+        except Exception as err:
+            self.console_text.append(f"[ERROR] Failed to save geometry to disk: {err}")
+
+    def _on_canvas_mouse_press(self, event):
+        """Detect handle clicks on the 3D Crop Box and lock camera rotation during drag."""
+        if event.button != 1 or self.crop_box is None or not self.crop_box.visible:
+            return
+        if self.crop_box.handle_markers is None:
+            return
+
+        try:
+            import numpy as np
+            handles_3d = self.crop_box.get_handle_positions()
+            tr = self.crop_box.handle_markers.transforms.get_transform('visual', 'canvas')
+            mapped = tr.map(handles_3d)
+            handles_2d = mapped[:, :2] / mapped[:, 3:4]
+
+            mouse_xy = np.array(event.pos, dtype=np.float32)
+            dists = np.linalg.norm(handles_2d - mouse_xy, axis=1)
+
+            min_idx = int(np.argmin(dists))
+            if dists[min_idx] <= 25.0:  # 25 pixel handle pick tolerance
+                self.crop_box.active_handle_idx = min_idx
+                self.crop_box.is_dragging = True
+                self.crop_box.drag_start_pos = mouse_xy
+                # Lock camera rotation during handle drag!
+                self.view.camera.interactive = False
+        except Exception:
+            pass
+
+    def _on_canvas_mouse_move(self, event):
+        """Update 3D crop box bounds as user drags handle along screen projection."""
+        if self.crop_box is None or not self.crop_box.is_dragging or self.crop_box.active_handle_idx is None:
+            return
+
+        try:
+            import numpy as np
+            mouse_xy = np.array(event.pos, dtype=np.float32)
+            last_xy = self.crop_box.drag_start_pos
+            if last_xy is None:
+                return
+
+            dx_scr = mouse_xy[0] - last_xy[0]
+            dy_scr = mouse_xy[1] - last_xy[1]
+
+            if abs(dx_scr) < 1e-4 and abs(dy_scr) < 1e-4:
+                return
+
+            idx = self.crop_box.active_handle_idx
+            axis_map = {0: 0, 1: 0, 2: 1, 3: 1, 4: 2, 5: 2}
+            axis = axis_map[idx]
+
+            handles_3d = self.crop_box.get_handle_positions()
+            hp_3d = handles_3d[idx]
+
+            unit_v = np.zeros(3, dtype=np.float32)
+            unit_v[axis] = 1.0
+            hp_step_3d = hp_3d + unit_v
+
+            tr = self.crop_box.handle_markers.transforms.get_transform('visual', 'canvas')
+            m0 = tr.map(hp_3d.reshape(1, 3))
+            m1 = tr.map(hp_step_3d.reshape(1, 3))
+
+            p0 = (m0[:, :2] / m0[:, 3:4])[0]
+            p1 = (m1[:, :2] / m1[:, 3:4])[0]
+
+            scr_dir = p1 - p0
+            len_sq = np.dot(scr_dir, scr_dir)
+            if len_sq > 1e-6:
+                delta_3d = (dx_scr * scr_dir[0] + dy_scr * scr_dir[1]) / len_sq
+
+                b_min, b_max = self.crop_box.get_bounds()
+                if idx == 0:    # +X
+                    b_max[0] = max(b_min[0] + 0.01, b_max[0] + delta_3d)
+                elif idx == 1:  # -X
+                    b_min[0] = min(b_max[0] - 0.01, b_min[0] + delta_3d)
+                elif idx == 2:  # +Y
+                    b_max[1] = max(b_min[1] + 0.01, b_max[1] + delta_3d)
+                elif idx == 3:  # -Y
+                    b_min[1] = min(b_max[1] - 0.01, b_min[1] + delta_3d)
+                elif idx == 4:  # +Z
+                    b_max[2] = max(b_min[2] + 0.01, b_max[2] + delta_3d)
+                elif idx == 5:  # -Z
+                    b_min[2] = min(b_max[2] - 0.01, b_min[2] + delta_3d)
+
+                self.crop_box.set_bounds(b_min, b_max)
+                self.canvas.update()
+                self.crop_box.drag_start_pos = mouse_xy
+        except Exception:
+            pass
+
+    def _on_canvas_mouse_release(self, event):
+        """Release handle drag and unlock camera rotation."""
+        if self.crop_box is not None and self.crop_box.is_dragging:
+            self.crop_box.is_dragging = False
+            self.crop_box.active_handle_idx = None
+            self.crop_box.drag_start_pos = None
+            # Unlock camera rotation on mouse release
+            self.view.camera.interactive = True
+
+    def _apply_crop(self):
+        """RealityScan-style crop operation: trims mesh vertices/faces outside the 3D crop box."""
+        if self.crop_box is None or not self.crop_box.visible:
+            self.console_text.append("[WARNING] Bounding box crop overlay is not currently active.")
+            return
+
+        points = self._current_points if self._current_points is not None else self._last_points
+        faces = self._current_faces
+        colors = self._current_colors
+        texcoords = self._current_texcoords
+        texture_path = self._current_texture_path
+
+        if points is None or len(points) == 0:
+            self.console_text.append("[WARNING] No 3D geometry available in scene to crop.")
+            return
+
+        mode = self.viewer_widget.mode_select.currentIndex()
+        self.console_text.append("[CROP] Executing 'Remove Outside' on 3D geometry...")
+
+        new_pts, new_cls, new_fcs, new_tcs = self.crop_box.crop_points_and_mesh(
+            points, colors, faces, texcoords, keep_inside=True
+        )
+
+        if len(new_pts) == 0:
+            self.console_text.append("[WARNING] Crop operation resulted in empty geometry. Operation cancelled.")
+            return
+
+        self._current_points = new_pts
+        self._current_colors = new_cls
+        self._current_faces = new_fcs
+        self._current_texcoords = new_tcs
+
+        # Re-render updated geometry in VisPy scene without resetting camera
+        self._render_in_vispy_from_data(new_pts, new_cls, new_fcs, new_tcs, texture_path, mode, reset_camera=False)
+
+        # Re-fit crop box to remaining geometry
+        if self.crop_box is not None:
+            self.crop_box.fit_to_points(new_pts)
+
+        rem_v = len(new_pts)
+        rem_f = len(new_fcs) if new_fcs is not None else 0
+        self.console_text.append(f"[CROP] Crop applied. Geometry updated (Vertices: {rem_v:,}, Faces: {rem_f:,}). Click 'Finalize Crop' to save to disk.")
+
+    def _reset_crop(self):
+        """Restores original un-cropped mesh geometry from checkpoint."""
+        if self._raw_points is None:
+            self.console_text.append("[WARNING] No original un-cropped checkpoint found to restore.")
+            return
+
+        import numpy as np
+        self._current_points = np.copy(self._raw_points) if self._raw_points is not None else None
+        self._current_colors = np.copy(self._raw_colors) if self._raw_colors is not None else None
+        self._current_faces = np.copy(self._raw_faces) if self._raw_faces is not None else None
+        self._current_texcoords = np.copy(self._raw_texcoords) if self._raw_texcoords is not None else None
+        self._current_texture_path = self._raw_texture_path
+
+        mode = self.viewer_widget.mode_select.currentIndex()
+        self._render_in_vispy_from_data(
+            self._current_points, self._current_colors, self._current_faces,
+            self._current_texcoords, self._current_texture_path, mode, reset_camera=False
+        )
+
+        if self.crop_box is not None and self._current_points is not None:
+            self.crop_box.fit_to_points(self._current_points)
+
+        self.console_text.append("[CROP] Reset crop completed. Restored original mesh geometry.")
+
+    def _finalize_crop(self):
+        """Destructively and permanently crops the mesh and overwrites the mesh on disk."""
+        import numpy as np
+        if self._current_points is None or len(self._current_points) == 0:
+            self.console_text.append("[WARNING] No 3D geometry available to finalize crop.")
+            return
+
+        # If bounding box is visible, execute remove outside to ensure latest box bounds are applied
+        if self.crop_box is not None and self.crop_box.visible:
+            self._apply_crop()
+
+        # Update raw checkpoint to point to cropped geometry permanently
+        self._raw_points = np.copy(self._current_points) if self._current_points is not None else None
+        self._raw_colors = np.copy(self._current_colors) if self._current_colors is not None else None
+        self._raw_faces = np.copy(self._current_faces) if self._current_faces is not None else None
+        self._raw_texcoords = np.copy(self._current_texcoords) if self._current_texcoords is not None else None
+        self._raw_texture_path = self._current_texture_path
+
+        # Save to disk
+        self._save_active_mesh_to_disk()
+
+        # Exit bounding box crop mode and revert to default navigation
+        self.viewer_widget.set_selection_mode('none')
 
     def _render_in_vispy(self, file_path, mode):
         import numpy as np
@@ -5832,8 +6742,21 @@ class MainWindow(QMainWindow):
             self.viewer_widget.fallback_label.show()
             return
             
-        # Store points reference for camera switches
+        # Store active geometry references
+        self._current_points = points
+        self._current_colors = colors
+        self._current_faces = faces
+        self._current_texcoords = texcoords
+        self._current_texture_path = texture_path
         self._last_points = points
+
+        # Store raw checkpoint for Reset Crop if not already recorded
+        if self._raw_points is None:
+            self._raw_points = np.copy(points) if points is not None else None
+            self._raw_colors = np.copy(colors) if colors is not None else None
+            self._raw_faces = np.copy(faces) if faces is not None else None
+            self._raw_texcoords = np.copy(texcoords) if texcoords is not None else None
+            self._raw_texture_path = texture_path
         
         self.canvas.native.show()
         self.viewer_widget.fallback_label.hide()
@@ -5872,6 +6795,7 @@ class MainWindow(QMainWindow):
             self.console_text.append(f"[WARNING] Point cloud load issues: {warnings_str}")
 
     def _reload_viewer(self, file_path):
+        self.viewer_widget.update_crop_box_state()
         if not os.path.exists(file_path):
             self.viewer_widget.fallback_label.setText(
                 f"File not found: {os.path.basename(file_path)}\nRun reconstruction to generate this file first."
@@ -5879,6 +6803,12 @@ class MainWindow(QMainWindow):
             self.viewer_widget.fallback_label.show()
             self.console_text.append(f"[WARNING] 3D file not found: {file_path}")
             return
+
+        self._raw_points = None
+        self._raw_colors = None
+        self._raw_faces = None
+        self._raw_texcoords = None
+        self._raw_texture_path = None
 
         mode = self.viewer_widget.mode_select.currentIndex()
         mode_names = ["Sparse Point Cloud", "Dense Point Cloud", "Textured Mesh"]
@@ -5963,10 +6893,15 @@ class MainWindow(QMainWindow):
         self._position_overlay()
 
     def _position_overlay(self):
+        container_w = self.viewer_widget.container_area.width()
+        container_h = self.viewer_widget.container_area.height()
+        if hasattr(self, 'selection_overlay') and self.selection_overlay is not None:
+            self.selection_overlay.setGeometry(0, 0, container_w, container_h)
+            if self.selection_overlay.isVisible():
+                self.selection_overlay.raise_()
+        if hasattr(self, 'viewer_widget') and hasattr(self.viewer_widget, '_position_crop_modal'):
+            self.viewer_widget._position_crop_modal()
         if hasattr(self, 'overlay_label') and self.overlay_label.isVisible():
-            container_w = self.viewer_widget.container_area.width()
-            container_h = self.viewer_widget.container_area.height()
-            
             label_w = self.overlay_label.width()
             label_h = self.overlay_label.height()
             if label_w <= 16 or label_h <= 16:
