@@ -1088,6 +1088,12 @@ class ViewerWrapperWidget(QFrame):
         self.btn_clear_selection.clicked.connect(self.clear_selection_requested.emit)
         self.btn_invert_selection.clicked.connect(self.invert_selection_requested.emit)
 
+        # Selection Hint Label (Instructs user to hold Ctrl + Left Drag to select)
+        self.select_hint_label = QLabel("Hold Ctrl + Left Click & Drag to select", self.crop_modal)
+        self.select_hint_label.setStyleSheet("color: #9E9E9E; font-size: 10px; background: transparent; border: none; padding-top: 2px;")
+        crop_modal_layout.addWidget(self.select_hint_label)
+        self.select_hint_label.setVisible(False)
+
         self.crop_modal.setVisible(False)
         
         # A simple fallback label when no viewer is running
@@ -1130,6 +1136,7 @@ class ViewerWrapperWidget(QFrame):
             self.crop_modal_title.setText("Bounding Box Crop")
             self.crop_btn_row.setVisible(True)
             self.select_btn_row.setVisible(False)
+            self.select_hint_label.setVisible(False)
             self.crop_modal.setVisible(True)
             self._position_crop_modal()
 
@@ -1158,6 +1165,7 @@ class ViewerWrapperWidget(QFrame):
             self.crop_modal_title.setText("Box Selection")
             self.crop_btn_row.setVisible(False)
             self.select_btn_row.setVisible(True)
+            self.select_hint_label.setVisible(True)
             self.crop_modal.setVisible(True)
             self._position_crop_modal()
 
@@ -1186,6 +1194,7 @@ class ViewerWrapperWidget(QFrame):
             self.crop_modal_title.setText("Lasso Selection")
             self.crop_btn_row.setVisible(False)
             self.select_btn_row.setVisible(True)
+            self.select_hint_label.setVisible(True)
             self.crop_modal.setVisible(True)
             self._position_crop_modal()
 
