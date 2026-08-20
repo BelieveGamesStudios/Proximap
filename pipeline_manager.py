@@ -779,6 +779,11 @@ class PipelineWorker(QThread):
         # Override presets with custom parameters if custom overrides checkbox was checked
         if self.custom_params:
             self.log_message.emit("[INFO] Custom parameter overrides enabled. Overriding quality preset configuration.")
+            if "image_max_resolution" in self.custom_params:
+                res_val = self.custom_params["image_max_resolution"]
+                colmap_max_image_size = res_val if res_val > 0 else -1
+                max_image_dim = res_val if res_val > 0 else None
+                self.log_message.emit(f"[INFO] Image Max Resolution set to: {'Unlimited' if res_val <= 0 else f'{res_val}px'}")
             if "guided_matching" in self.custom_params:
                 guided_matching = self.custom_params["guided_matching"]
             if "run_bundle_adjuster" in self.custom_params:
