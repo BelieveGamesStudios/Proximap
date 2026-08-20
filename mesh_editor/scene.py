@@ -790,6 +790,10 @@ def load_mesh_file(file_path: str) -> list[tuple[str, Mesh]]:
             )
             normals = geom.vertex_normals.astype(np.float32)
 
+        # Apply photogrammetry coordinate flip on load to normalize to Y-up
+        from point_cloud_io import apply_photogrammetry_coordinate_flip
+        vertices, normals, _, _ = apply_photogrammetry_coordinate_flip(points=vertices, normals=normals)
+
         # Extract texture coords and material texture image if present
         texcoords = None
         texture_data = None
@@ -836,10 +840,18 @@ def load_mesh_file(file_path: str) -> list[tuple[str, Mesh]]:
     return results
 
 
-def export_scene_to_file(scene, file_path: str):
-    """Parent all scene objects to a single world mesh and export it to OBJ or GLB."""
+def export_scene_to_file(scene, file_path: str, pipeline_native_coords: bool = True):
+    """Parent all scene objects to a single world mesh and export it to OBJ, GLB, or USDZ.
+
+    If pipeline_native_coords is True (default for pipeline export), applies the inverse matrix
+    F^T = F (180 deg X-axis rotation) before file serialization so the exported mesh matches
+    native COLMAP/OpenMVS Y-down coordinates and aligns with scene.mvs camera poses.
+    
+    If saving for external tools like Blender, pass pipeline_native_coords=False.
+    """
     import trimesh
     import numpy as np
+    from point_cloud_io import apply_photogrammetry_coordinate_flip
     
     if not scene.objects:
         raise ValueError("No objects in the scene to export.")
@@ -859,27 +871,34 @@ def export_scene_to_file(scene, file_path: str):
             world_vertices.append(wv)
         world_vertices = np.array(world_vertices, dtype=np.float32)
         
-        # Create trimesh for this object
-        t_mesh = trimesh.Trimesh(vertices=world_vertices, faces=faces, process=False)
-        
-        # Transform normals if present
+        world_normals = np.zeros((0, 3), dtype=np.float32)
         if obj.mesh.normals is not None and len(obj.mesh.normals) > 0:
             normals = obj.mesh.normals.reshape(-1, 3)
             try:
                 inv_trans_model = np.linalg.inv(model_mat).T
-                world_normals = []
+                wn_list = []
                 for n in normals:
                     n4 = np.array([n[0], n[1], n[2], 0.0], dtype=np.float32)
                     wn = pyrr.matrix44.apply_to_vector(inv_trans_model, n4)[:3]
                     length = np.linalg.norm(wn)
                     if length > 0.0:
                         wn /= length
-                    world_normals.append(wn)
-                t_mesh.vertex_normals = np.array(world_normals, dtype=np.float32)
+                    wn_list.append(wn)
+                world_normals = np.array(wn_list, dtype=np.float32)
             except Exception:
-                # Fallback to computing normal vector if inverse fails (e.g. scale is 0)
                 pass
                 
+        if pipeline_native_coords:
+            # Revert to native COLMAP/OpenMVS coordinates (F^T = F)
+            world_vertices, world_normals, _, _ = apply_photogrammetry_coordinate_flip(
+                points=world_vertices, normals=world_normals
+            )
+
+        # Create trimesh for this object
+        t_mesh = trimesh.Trimesh(vertices=world_vertices, faces=faces, process=False)
+        if world_normals is not None and len(world_normals) > 0:
+            t_mesh.vertex_normals = world_normals
+
         # Handle UVs and texture mapping
         if obj.mesh.texcoords is not None and len(obj.mesh.texcoords) > 0 and obj.mesh.texture_data is not None:
             t_mesh.visual = trimesh.visual.TextureVisuals(
@@ -888,12 +907,6 @@ def export_scene_to_file(scene, file_path: str):
             )
             
         export_scene.add_geometry(t_mesh, node_name=obj.name)
-        
-    # Apply -90 degree X rotation correction matrix to the entire exported scene
-    # to convert between Z-up internal and Y-up standard coordinates for Blender/Bridge
-    import trimesh.transformations as tf
-    correction = tf.rotation_matrix(-np.pi / 2, [1, 0, 0])
-    export_scene.apply_transform(correction)
         
     # Export to chosen format (Scene supports glb, gltf, obj)
     if file_path.lower().endswith(".usdz"):

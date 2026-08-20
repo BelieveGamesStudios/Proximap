@@ -21,6 +21,57 @@ class LoadResult:
     success: bool = False
 
 
+def get_photogrammetry_flip_matrix() -> np.ndarray:
+    """Returns the 3x3 diagonal matrix F = diag(1, -1, -1) for 180 deg rotation about X axis."""
+    return np.diag([1.0, -1.0, -1.0])
+
+
+def apply_photogrammetry_coordinate_flip(
+    points: Optional[np.ndarray] = None,
+    normals: Optional[np.ndarray] = None,
+    camera_R: Optional[np.ndarray] = None,
+    camera_T: Optional[np.ndarray] = None
+):
+    """
+    Applies the 180 deg X-axis rotation (Y -> -Y, Z -> -Z) to convert OpenCV/COLMAP/OpenMVS
+    coordinate space (Y-down) to standard graphics viewport space (Y-up).
+
+    Transforms:
+      - points: P' = P @ F  (P[:, 1] *= -1, P[:, 2] *= -1)
+      - normals: N' = N @ F (N[:, 1] *= -1, N[:, 2] *= -1)
+      - camera_R: R' = F @ R @ F^T
+      - camera_T: T' = F @ T
+
+    Since F = F^T = F^-1, this function is self-inverting (applying it twice returns to original).
+    """
+    F = get_photogrammetry_flip_matrix()
+
+    ret_points = None
+    if points is not None and len(points) > 0:
+        pts = np.asarray(points).copy()
+        pts[:, 1] *= -1.0
+        pts[:, 2] *= -1.0
+        ret_points = pts
+
+    ret_normals = None
+    if normals is not None and len(normals) > 0:
+        nrm = np.asarray(normals).copy()
+        nrm[:, 1] *= -1.0
+        nrm[:, 2] *= -1.0
+        ret_normals = nrm
+
+    ret_R = None
+    if camera_R is not None:
+        ret_R = F @ camera_R @ F
+
+    ret_T = None
+    if camera_T is not None:
+        ret_T = F @ camera_T
+
+    return ret_points, ret_normals, ret_R, ret_T
+
+
+
 class SimplePointCloud:
     """Lightweight pure-NumPy point cloud representation used when Open3D is not installed."""
     def __init__(self, points: np.ndarray, colors: Optional[np.ndarray] = None, normals: Optional[np.ndarray] = None):

@@ -572,15 +572,6 @@ class PreferencesDialog(QDialog):
 
     def _on_camera_mode_changed(self, text: str):
         save_preferences({"camera_mode": text})
-        main_win = self._get_main_window()
-        if main_win:
-            idx = 0 if text == "Arcball Camera" else 1
-            if hasattr(main_win, "viewer_widget") and hasattr(main_win.viewer_widget, "cam_select"):
-                main_win.viewer_widget.cam_select.blockSignals(True)
-                main_win.viewer_widget.cam_select.setCurrentIndex(idx)
-                main_win.viewer_widget.cam_select.blockSignals(False)
-            if hasattr(main_win, "_on_camera_changed"):
-                main_win._on_camera_changed(idx)
 
     def _on_invert_rotation_changed(self, checked: bool):
         save_preferences({"invert_mouse_rotation": checked})

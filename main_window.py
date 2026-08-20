@@ -183,29 +183,12 @@ import webbrowser
 IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.heic', '.heif', '.webp')
 VIDEO_EXTS = ('.mp4', '.mov', '.avi', '.mkv', '.m4v')
 
-CAMERA_CONTROLS = {
-    0: "<b>Arcball Camera Controls:</b><br>"
-       "• Left Drag: Orbit camera<br>"
-       "• Right Drag / Scroll: Zoom / Dolly<br>"
-       "• Middle Drag / Shift+Left Drag: Pan",
-    1: "<b>Turntable Camera Controls:</b><br>"
-       "• Left Drag: Orbit (fixed Z-up)<br>"
-       "• Right Drag / Scroll: Zoom / Dolly<br>"
-       "• Middle Drag / Shift+Left Drag: Pan",
-    2: "<b>Fly Camera Controls:</b><br>"
-       "• Left Drag: Look around (pitch/yaw)<br>"
-       "• WASD / Arrow Keys: Fly around<br>"
-       "• Space / C: Fly up / down<br>"
-       "• Q / E: Roll camera left / right<br>"
-       "• Mouse Scroll: Adjust movement speed",
-    3: "<b>Pan-Zoom Camera Controls:</b><br>"
-       "• Left Drag: Pan 2D boundaries<br>"
-       "• Right Drag / Scroll: Zoom in/out",
-    4: "<b>Magnify Camera Controls:</b><br>"
-       "• Left Drag: Pan 2D boundaries<br>"
-       "• Scroll: Localized magnifying zoom<br>"
-       "• Shift + Mouse Move: Adjust focus area"
-}
+DEFAULT_CAMERA_CONTROLS = (
+    "<b>3D Viewport Controls:</b><br>"
+    "• Left Click + Drag: Orbit Scene<br>"
+    "• Right Click + Drag / Shift + Left Drag: Pan Scene<br>"
+    "• Mouse Scroll: Zoom In / Out"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +526,9 @@ def _read_ply_static(path):
                         if vals and int(vals[0]) == 3 and len(vals) >= 4:
                             faces_list.append([int(vals[1]), int(vals[2]), int(vals[3])])
                     if faces_list: faces = np.array(faces_list, dtype=np.int32)
+        if points is not None and len(points) > 0:
+            from point_cloud_io import apply_photogrammetry_coordinate_flip
+            points, _, _, _ = apply_photogrammetry_coordinate_flip(points=points)
         return points, colors, faces
     except Exception as e:
         print(f"[ERROR] Failed to parse PLY in _read_ply_static ({path}): {e}")
@@ -830,17 +816,6 @@ class ViewerWrapperWidget(QFrame):
         
         self.file_menu_btn.setMenu(self.file_menu)
         
-        # Dropdown to choose camera tracking style
-        self.cam_select = QComboBox(self.control_bar)
-        self.cam_select.setMinimumWidth(150)
-        self.cam_select.addItems([
-            "Arcball Camera",
-            "Turntable Camera",
-            "Fly Camera",
-            "Pan-Zoom Camera",
-            "Magnify Camera"
-        ])
-        
         # Checkbox to toggle controls display overlay
         self.show_controls_cb = QCheckBox("Show Controls", self.control_bar)
         self.show_controls_cb.setStyleSheet("""
@@ -887,7 +862,6 @@ class ViewerWrapperWidget(QFrame):
         
         control_layout.addWidget(self.file_menu_btn)
         control_layout.addStretch()
-        control_layout.addWidget(self.cam_select)
         control_layout.addWidget(self.show_controls_cb)
         control_layout.addWidget(self.mode_select)
         control_layout.addWidget(self.bg_btn)
@@ -912,7 +886,6 @@ class ViewerWrapperWidget(QFrame):
         # Setup actions
         self.reload_btn.clicked.connect(self._on_reload_clicked)
         self.mode_select.currentIndexChanged.connect(self._on_mode_changed)
-        self.cam_select.currentIndexChanged.connect(self.camera_changed.emit)
         
         self.current_mvs_dir = None
 
@@ -922,12 +895,10 @@ class ViewerWrapperWidget(QFrame):
             
         if w < 600:
             self.show_controls_cb.setText("Controls")
-            self.cam_select.setMinimumWidth(100)
             self.mode_select.setMinimumWidth(140)
             self.bg_btn.setText("Color")
         else:
             self.show_controls_cb.setText("Show Controls")
-            self.cam_select.setMinimumWidth(150)
             self.mode_select.setMinimumWidth(200)
             self.bg_btn.setText("BG Color")
 
@@ -2459,7 +2430,6 @@ class MainWindow(QMainWindow):
         self.viewer_widget = ViewerWrapperWidget(self)
         self.viewer_widget.images_dropped.connect(self._on_files_dropped)
         self.viewer_widget.reload_requested.connect(self._reload_viewer)
-        self.viewer_widget.camera_changed.connect(self._on_camera_changed)
         self.viewer_widget.action_new.triggered.connect(self._new_project)
         self.viewer_widget.action_save.triggered.connect(self._save_project)
         self.viewer_widget.action_load.triggered.connect(self._load_project)
@@ -2483,7 +2453,10 @@ class MainWindow(QMainWindow):
         if hasattr(self.canvas, '_keys_check') and 'escape' in self.canvas._keys_check:
             del self.canvas._keys_check['escape']
         self.view = self.canvas.central_widget.add_view()
-        self.view.camera = 'arcball' # Default camera mode is Arcball
+        self.view.camera = 'turntable'
+        self.view.camera.up = '+y'
+        self.view.camera.elevation = 30
+        self.view.camera.azimuth = 45
         
         # Add native VisPy canvas widget to the layout
         self.viewer_widget.container_area_layout.addWidget(self.canvas.native)
@@ -5063,56 +5036,6 @@ class MainWindow(QMainWindow):
         if path:
             self._reload_viewer(path)
 
-    def _on_camera_changed(self, index):
-        if self.view is None:
-            return
-            
-        # Switch camera mode (0: Arcball, 1: Turntable, 2: Fly, 3: PanZoom, 4: Magnify)
-        if index == 0:
-            self.view.camera = 'arcball'
-        elif index == 1:
-            self.view.camera = 'turntable'
-        elif index == 2:
-            self.view.camera = 'fly'
-            try:
-                from vispy.util.keys import SPACE
-                self.view.camera._keymap[SPACE] = (1, 3)
-                self.view.camera.auto_roll = False
-            except Exception:
-                pass
-        elif index == 3:
-            self.view.camera = 'panzoom'
-        elif index == 4:
-            import vispy.scene.cameras as cams
-            self.view.camera = cams.MagnifyCamera()
-            
-        # Re-center and re-scale if we have loaded points
-        if self._last_points is not None and len(self._last_points) > 0:
-            import numpy as np
-            bbox_min = np.min(self._last_points, axis=0)
-            bbox_max = np.max(self._last_points, axis=0)
-            center = (bbox_min + bbox_max) / 2.0
-            scale = np.max(bbox_max - bbox_min)
-            
-            if hasattr(self.view.camera, 'rect'):
-                self.view.camera.rect = (bbox_min[0], bbox_min[1], scale, scale)
-            else:
-                if hasattr(self.view.camera, 'center'):
-                    self.view.camera.center = center
-                if hasattr(self.view.camera, 'distance'):
-                    self.view.camera.distance = max(0.1, scale * 1.5)
-                elif hasattr(self.view.camera, 'scale_factor'):
-                    self.view.camera.scale_factor = scale
-                    
-                if index == 1:
-                    self.view.camera.elevation = 30
-                    self.view.camera.azimuth = 45
-                    
-        # Update overlay content if visible
-        if hasattr(self, 'overlay_label') and self.overlay_label.isVisible():
-            self._update_overlay_content()
-            self._position_overlay()
-
     def _clear_visuals(self):
         if hasattr(self, 'markers_visual') and self.markers_visual is not None:
             try:
@@ -5132,11 +5055,75 @@ class MainWindow(QMainWindow):
             except AttributeError:
                 self.cameras_visual.parent = None
             self.cameras_visual = None
+        if hasattr(self, 'grid_visual') and self.grid_visual is not None:
+            try:
+                self.grid_visual.unparent()
+            except AttributeError:
+                self.grid_visual.parent = None
+            self.grid_visual = None
         self._last_points = None
+
+    def _update_ground_grid(self, points):
+        import numpy as np
+        from vispy import scene
+        if hasattr(self, 'grid_visual') and self.grid_visual is not None:
+            try:
+                self.grid_visual.unparent()
+            except AttributeError:
+                self.grid_visual.parent = None
+            self.grid_visual = None
+
+        if points is None or len(points) == 0:
+            return
+
+        bbox_min = np.min(points, axis=0)
+        bbox_max = np.max(points, axis=0)
+        
+        y_floor = bbox_min[1]
+        
+        x_min, x_max = bbox_min[0], bbox_max[0]
+        z_min, z_max = bbox_min[2], bbox_max[2]
+        
+        x_span = x_max - x_min
+        z_span = z_max - z_min
+        x_center = (x_min + x_max) / 2.0
+        z_center = (z_min + z_max) / 2.0
+        max_span = max(x_span, z_span, 1.0)
+        
+        # 1:1 square grid centered on bounding box center with 25% margin
+        half_side = max_span * 0.625
+        
+        grid_x_min, grid_x_max = x_center - half_side, x_center + half_side
+        grid_z_min, grid_z_max = z_center - half_side, z_center + half_side
+        
+        num_divs = 20
+        x_ticks = np.linspace(grid_x_min, grid_x_max, num_divs + 1)
+        z_ticks = np.linspace(grid_z_min, grid_z_max, num_divs + 1)
+        
+        line_vertices = []
+        for x in x_ticks:
+            line_vertices.append([x, y_floor, grid_z_min])
+            line_vertices.append([x, y_floor, grid_z_max])
+            
+        for z in z_ticks:
+            line_vertices.append([grid_x_min, y_floor, z])
+            line_vertices.append([grid_x_max, y_floor, z])
+            
+        pos = np.array(line_vertices, dtype=np.float32)
+        color = (0.0, 0.45, 0.25, 0.35)
+        
+        self.grid_visual = scene.visuals.Line(
+            pos=pos,
+            color=color,
+            connect='segments',
+            method='gl',
+            parent=self.view.scene
+        )
 
     def _read_points3d_binary(self, path_to_model_file):
         import struct
         import numpy as np
+        from point_cloud_io import apply_photogrammetry_coordinate_flip
         points = []
         colors = []
         if not os.path.exists(path_to_model_file):
@@ -5157,11 +5144,14 @@ class MainWindow(QMainWindow):
         
         if len(points) == 0:
             return np.zeros((0, 3), dtype=np.float32), np.zeros((0, 3), dtype=np.uint8)
-        return np.array(points, dtype=np.float32), np.array(colors, dtype=np.uint8)
+        pts_arr = np.array(points, dtype=np.float32)
+        pts_arr, _, _, _ = apply_photogrammetry_coordinate_flip(points=pts_arr)
+        return pts_arr, np.array(colors, dtype=np.uint8)
 
     def _read_images_binary(self, path_to_model_file):
         import struct
         import numpy as np
+        from point_cloud_io import apply_photogrammetry_coordinate_flip
         images_data = []
         if not os.path.exists(path_to_model_file):
             return images_data
@@ -5192,10 +5182,13 @@ class MainWindow(QMainWindow):
                         [2*qx*qy + 2*qz*qw, 1 - 2*qx**2 - 2*qz**2, 2*qy*qz - 2*qx*qw],
                         [2*qx*qz - 2*qy*qw, 2*qy*qz + 2*qx*qw, 1 - 2*qx**2 - 2*qy**2]
                     ])
-                    camera_center = -R.T @ tvec
+
+                    # Apply Similarity Transform: R' = F R F^T, T' = F T
+                    _, _, R_prime, tvec_prime = apply_photogrammetry_coordinate_flip(camera_R=R, camera_T=tvec)
+                    camera_center = -R_prime.T @ tvec_prime
                     images_data.append({
                         "center": camera_center,
-                        "R": R
+                        "R": R_prime
                     })
         except Exception as e:
             self.console_text.append(f"[WARNING] Failed to parse images.bin: {e}")
@@ -5410,6 +5403,9 @@ class MainWindow(QMainWindow):
                     points = np.array(points, dtype=np.float32)
                     colors = np.array(colors, dtype=np.uint8)
                     faces = np.array(faces, dtype=np.int32) if faces else None
+                    if len(points) > 0:
+                        from point_cloud_io import apply_photogrammetry_coordinate_flip
+                        points, _, _, _ = apply_photogrammetry_coordinate_flip(points=points)
                     return points, colors, faces
         except Exception as e:
             self.console_text.append(f"[WARNING] Failed to parse PLY file: {e}")
@@ -5500,6 +5496,9 @@ class MainWindow(QMainWindow):
                         texture_path = os.path.join(dirname, filename)
                         break
                          
+        if len(vertices) > 0:
+            from point_cloud_io import apply_photogrammetry_coordinate_flip
+            vertices, _, _, _ = apply_photogrammetry_coordinate_flip(points=vertices)
         return vertices, texcoords, faces, texture_path
 
     def _draw_cameras(self, cameras_data):
@@ -5549,8 +5548,8 @@ class MainWindow(QMainWindow):
             pos = np.array(line_vertices, dtype=np.float32)
             self.cameras_visual = scene.visuals.Line(
                 pos=pos,
-                color='#00E676',
-                width=1.5,
+                color='#FFFFFF',
+                width=1.2,
                 connect='segments'
             )
             self.cameras_visual.parent = self.view.scene
@@ -5605,9 +5604,13 @@ class MainWindow(QMainWindow):
         scale  = np.max(bbox_max - bbox_min)
         self.view.camera.center   = center
         self.view.camera.distance = max(0.1, scale * 1.5)
-        if self.viewer_widget.cam_select.currentIndex() == 1:
-            self.view.camera.elevation = 30
-            self.view.camera.azimuth   = 45
+        self.view.camera.elevation = 30
+        self.view.camera.azimuth   = 45
+        self.view.camera.up        = '+y'
+        
+        # Update auto-scaling ground plane grid
+        self._update_ground_grid(points)
+        
         self.canvas.update()
 
     def _render_in_vispy(self, file_path, mode):
@@ -5802,10 +5805,12 @@ class MainWindow(QMainWindow):
             
             self.view.camera.center = center
             self.view.camera.distance = max(0.1, scale * 1.5)
-            # Apply turntable elevation/azimuth if selected
-            if self.viewer_widget.cam_select.currentIndex() == 1:
-                self.view.camera.elevation = 30
-                self.view.camera.azimuth = 45
+            self.view.camera.elevation = 30
+            self.view.camera.azimuth = 45
+            self.view.camera.up = '+y'
+            
+            # Update auto-scaling ground plane grid
+            self._update_ground_grid(ref_pts)
             
         self.canvas.update()
 
@@ -5940,9 +5945,7 @@ class MainWindow(QMainWindow):
             self._position_overlay()
 
     def _update_overlay_content(self):
-        index = self.viewer_widget.cam_select.currentIndex()
-        controls_text = CAMERA_CONTROLS.get(index, "")
-        self.overlay_label.setText(controls_text)
+        self.overlay_label.setText(DEFAULT_CAMERA_CONTROLS)
         self.overlay_label.adjustSize()
 
     def _upload_to_proximap(self):
