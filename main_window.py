@@ -698,6 +698,445 @@ class DragDropArea(QFrame):
             event.ignore()
 
 
+class MeshToolModal(QFrame):
+    """
+    Floating viewport modal for 3D mesh processing tools:
+    1. Mesh Cleanup (Face Reduction %, Max Hole Size, Remove Duplicates, Repair Non-Manifold, Close Holes)
+    2. Merge Vertices (% of bbox diag vs Absolute distance, with live two-way equivalent updates)
+    3. Taubin Smooth Mesh (Volume-preserving Laplacian smoothing with Factor lambda and auto-computed mu)
+    """
+    apply_requested = Signal(str, dict)       # (tool_id, params)
+    revert_requested = Signal()
+    retexture_requested = Signal()
+    closed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("MeshToolModal")
+        self.setStyleSheet("""
+            QFrame#MeshToolModal {
+                background-color: rgba(22, 22, 22, 245);
+                color: #E0E0E0;
+                border: 1px solid #444444;
+                border-radius: 8px;
+            }
+            QLabel {
+                background: transparent;
+                border: none;
+            }
+        """)
+
+        self.current_tool_id = "cleanup"
+        self.bbox_diagonal = 1.0
+        self.unit_mode = "pct"  # "pct" or "abs"
+        self.has_applied_preview = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(8)
+
+        # Header Row
+        header_widget = QWidget(self)
+        header_widget.setStyleSheet("background: transparent; border: none;")
+        header_layout = QHBoxLayout(header_widget)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.title_label = QLabel("Mesh Cleanup", header_widget)
+        self.title_label.setStyleSheet("color: #00E676; font-size: 12px; font-weight: bold;")
+
+        self.close_btn = QPushButton("✕", header_widget)
+        self.close_btn.setFixedSize(20, 20)
+        self.close_btn.setCursor(Qt.PointingHandCursor)
+        self.close_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #888888;
+                border: none;
+                font-size: 12px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                color: #00E676;
+            }
+        """)
+        self.close_btn.clicked.connect(self.close_modal)
+
+        header_layout.addWidget(self.title_label)
+        header_layout.addStretch()
+        header_layout.addWidget(self.close_btn)
+        layout.addWidget(header_widget)
+
+        self.subtitle_label = QLabel("Repair non-manifold topology, close holes, and decimate faces.", self)
+        self.subtitle_label.setStyleSheet("color: #888888; font-size: 10px;")
+        self.subtitle_label.setWordWrap(True)
+        layout.addWidget(self.subtitle_label)
+
+        lbl_style = "font-size: 11px; color: #AAAAAA;"
+
+        # --- PANEL 1: Mesh Cleanup ---
+        self.cleanup_panel = QWidget(self)
+        self.cleanup_panel.setStyleSheet("background: transparent; border: none;")
+        cleanup_layout = QVBoxLayout(self.cleanup_panel)
+        cleanup_layout.setContentsMargins(0, 4, 0, 4)
+        cleanup_layout.setSpacing(6)
+
+        c_grid = QGridLayout()
+        c_grid.setContentsMargins(0, 0, 0, 0)
+        c_grid.setSpacing(6)
+
+        lbl_reduc = QLabel("Face Reduction (%):", self.cleanup_panel)
+        lbl_reduc.setStyleSheet(lbl_style)
+        self.mc_reduction_spin = QSpinBox(self.cleanup_panel)
+        self.mc_reduction_spin.setRange(10, 90)
+        self.mc_reduction_spin.setSingleStep(5)
+        self.mc_reduction_spin.setSuffix("%")
+        self.mc_reduction_spin.setValue(50)
+        self.mc_reduction_spin.setToolTip("Target face reduction percentage for mesh decimation (default: 50%).")
+        self.mc_reduction_stepper = SpinBoxStepper(self.mc_reduction_spin, self.cleanup_panel)
+        c_grid.addWidget(lbl_reduc, 0, 0)
+        c_grid.addWidget(self.mc_reduction_stepper, 0, 1)
+
+        lbl_hole = QLabel("Max Hole Size (faces):", self.cleanup_panel)
+        lbl_hole.setStyleSheet(lbl_style)
+        self.mc_max_hole_spin = QSpinBox(self.cleanup_panel)
+        self.mc_max_hole_spin.setRange(5, 500)
+        self.mc_max_hole_spin.setSingleStep(5)
+        self.mc_max_hole_spin.setValue(30)
+        self.mc_max_hole_spin.setToolTip("Maximum hole size in faces to automatically close during mesh repair.")
+        self.mc_max_hole_stepper = SpinBoxStepper(self.mc_max_hole_spin, self.cleanup_panel)
+        c_grid.addWidget(lbl_hole, 1, 0)
+        c_grid.addWidget(self.mc_max_hole_stepper, 1, 1)
+        cleanup_layout.addLayout(c_grid)
+
+        self.mc_remove_dups_check = QCheckBox("Remove Duplicate Faces / Vertices", self.cleanup_panel)
+        self.mc_remove_dups_check.setStyleSheet("font-size: 11px; color: #CCCCCC;")
+        self.mc_remove_dups_check.setChecked(True)
+        cleanup_layout.addWidget(self.mc_remove_dups_check)
+
+        self.mc_repair_nm_check = QCheckBox("Repair Non-Manifold Edges", self.cleanup_panel)
+        self.mc_repair_nm_check.setStyleSheet("font-size: 11px; color: #CCCCCC;")
+        self.mc_repair_nm_check.setChecked(True)
+        cleanup_layout.addWidget(self.mc_repair_nm_check)
+
+        self.mc_close_holes_check = QCheckBox("Close Mesh Holes", self.cleanup_panel)
+        self.mc_close_holes_check.setStyleSheet("font-size: 11px; color: #CCCCCC;")
+        self.mc_close_holes_check.setChecked(True)
+        cleanup_layout.addWidget(self.mc_close_holes_check)
+
+        layout.addWidget(self.cleanup_panel)
+
+        # --- PANEL 2: Merge Close Vertices ---
+        self.merge_panel = QWidget(self)
+        self.merge_panel.setStyleSheet("background: transparent; border: none;")
+        merge_layout = QVBoxLayout(self.merge_panel)
+        merge_layout.setContentsMargins(0, 4, 0, 4)
+        merge_layout.setSpacing(6)
+
+        # Unit Toggle Buttons
+        unit_toggle_row = QHBoxLayout()
+        unit_toggle_row.setContentsMargins(0, 0, 0, 0)
+        unit_toggle_row.setSpacing(4)
+
+        self.btn_unit_pct = QPushButton("%", self.merge_panel)
+        self.btn_unit_pct.setCheckable(True)
+        self.btn_unit_pct.setChecked(True)
+        self.btn_unit_pct.setStyleSheet("""
+            QPushButton {
+                font-size: 10px; padding: 3px 8px; border-radius: 3px;
+                background-color: #00E676; color: #121212; border: 1px solid #00E676; font-weight: bold;
+            }
+            QPushButton:!checked {
+                background-color: #2D2D2D; color: #aaaaaa; border: 1px solid #444444; font-weight: normal;
+            }
+        """)
+
+        self.btn_unit_abs = QPushButton("Absolute", self.merge_panel)
+        self.btn_unit_abs.setCheckable(True)
+        self.btn_unit_abs.setChecked(False)
+        self.btn_unit_abs.setStyleSheet("""
+            QPushButton {
+                font-size: 10px; padding: 3px 8px; border-radius: 3px;
+                background-color: #00E676; color: #121212; border: 1px solid #00E676; font-weight: bold;
+            }
+            QPushButton:!checked {
+                background-color: #2D2D2D; color: #aaaaaa; border: 1px solid #444444; font-weight: normal;
+            }
+        """)
+
+        self.btn_unit_pct.clicked.connect(lambda: self._set_merge_unit("pct"))
+        self.btn_unit_abs.clicked.connect(lambda: self._set_merge_unit("abs"))
+
+        unit_toggle_row.addWidget(self.btn_unit_pct)
+        unit_toggle_row.addWidget(self.btn_unit_abs)
+        unit_toggle_row.addStretch()
+        merge_layout.addLayout(unit_toggle_row)
+
+        # Merge threshold input
+        m_grid = QGridLayout()
+        m_grid.setContentsMargins(0, 0, 0, 0)
+        m_grid.setSpacing(6)
+
+        self.lbl_merge_thresh = QLabel("Distance Threshold:", self.merge_panel)
+        self.lbl_merge_thresh.setStyleSheet(lbl_style)
+
+        self.merge_thresh_spin = QDoubleSpinBox(self.merge_panel)
+        self.merge_thresh_spin.setRange(0.001, 50.0)
+        self.merge_thresh_spin.setSingleStep(0.1)
+        self.merge_thresh_spin.setDecimals(3)
+        self.merge_thresh_spin.setSuffix("%")
+        self.merge_thresh_spin.setValue(1.0)
+        self.merge_thresh_spin.valueChanged.connect(self._on_merge_value_changed)
+        self.merge_stepper = SpinBoxStepper(self.merge_thresh_spin, self.merge_panel)
+
+        m_grid.addWidget(self.lbl_merge_thresh, 0, 0)
+        m_grid.addWidget(self.merge_stepper, 0, 1)
+        merge_layout.addLayout(m_grid)
+
+        self.merge_equiv_label = QLabel("Equivalent distance: ≈ 0.00000 units (abs)", self.merge_panel)
+        self.merge_equiv_label.setStyleSheet("color: #00E676; font-size: 10px; font-weight: bold;")
+        merge_layout.addWidget(self.merge_equiv_label)
+
+        self.merge_bbox_label = QLabel("BBox Diagonal: 0.000 units", self.merge_panel)
+        self.merge_bbox_label.setStyleSheet("color: #777777; font-size: 10px;")
+        merge_layout.addWidget(self.merge_bbox_label)
+
+        layout.addWidget(self.merge_panel)
+
+        # --- PANEL 3: Taubin Smooth Mesh ---
+        self.smooth_panel = QWidget(self)
+        self.smooth_panel.setStyleSheet("background: transparent; border: none;")
+        smooth_layout = QVBoxLayout(self.smooth_panel)
+        smooth_layout.setContentsMargins(0, 4, 0, 4)
+        smooth_layout.setSpacing(6)
+
+        s_grid = QGridLayout()
+        s_grid.setContentsMargins(0, 0, 0, 0)
+        s_grid.setSpacing(6)
+
+        lbl_lambda = QLabel("Smoothing Factor (λ):", self.smooth_panel)
+        lbl_lambda.setStyleSheet(lbl_style)
+        self.smooth_lambda_spin = QDoubleSpinBox(self.smooth_panel)
+        self.smooth_lambda_spin.setRange(0.01, 1.00)
+        self.smooth_lambda_spin.setSingleStep(0.05)
+        self.smooth_lambda_spin.setDecimals(2)
+        self.smooth_lambda_spin.setValue(0.50)
+        self.smooth_lambda_spin.setToolTip("Smoothing factor (lambda). Parameter mu is automatically computed as -(lambda + 0.01) to eliminate volume shrinkage.")
+        self.smooth_lambda_stepper = SpinBoxStepper(self.smooth_lambda_spin, self.smooth_panel)
+        s_grid.addWidget(lbl_lambda, 0, 0)
+        s_grid.addWidget(self.smooth_lambda_stepper, 0, 1)
+
+        lbl_iter = QLabel("Iterations (steps):", self.smooth_panel)
+        lbl_iter.setStyleSheet(lbl_style)
+        self.smooth_iter_spin = QSpinBox(self.smooth_panel)
+        self.smooth_iter_spin.setRange(1, 100)
+        self.smooth_iter_spin.setSingleStep(1)
+        self.smooth_iter_spin.setValue(10)
+        self.smooth_iter_spin.setToolTip("Number of smoothing iterations to apply.")
+        self.smooth_iter_stepper = SpinBoxStepper(self.smooth_iter_spin, self.smooth_panel)
+        s_grid.addWidget(lbl_iter, 1, 0)
+        s_grid.addWidget(self.smooth_iter_stepper, 1, 1)
+        smooth_layout.addLayout(s_grid)
+
+        self.smooth_info_label = QLabel("Factor controls per-step strength; Iterations controls how many smoothing passes to apply.", self.smooth_panel)
+        self.smooth_info_label.setWordWrap(True)
+        self.smooth_info_label.setStyleSheet("color: #00E676; font-size: 10px;")
+        smooth_layout.addWidget(self.smooth_info_label)
+
+        layout.addWidget(self.smooth_panel)
+
+        # --- Action Buttons Row ---
+        action_row = QWidget(self)
+        action_row.setStyleSheet("background: transparent; border: none;")
+        action_layout = QHBoxLayout(action_row)
+        action_layout.setContentsMargins(0, 4, 0, 0)
+        action_layout.setSpacing(6)
+
+        self.btn_apply = QPushButton("Apply (Preview)", action_row)
+        self.btn_apply.setToolTip("Applies geometry operation and updates the 3D viewport preview.")
+        self.btn_apply.setStyleSheet("""
+            QPushButton {
+                font-size: 11px; padding: 5px 12px; font-weight: bold;
+                background-color: #00E676; color: #121212;
+                border: 1px solid #00E676; border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #00C853; }
+            QPushButton:disabled { background-color: #2D2D2D; color: #666666; border-color: #444444; }
+        """)
+
+        self.btn_revert = QPushButton("Revert", action_row)
+        self.btn_revert.setToolTip("Restores un-modified pre-operation mesh geometry from disk backup.")
+        self.btn_revert.setEnabled(False)
+        self.btn_revert.setStyleSheet("""
+            QPushButton {
+                font-size: 11px; padding: 5px 10px;
+                background-color: #333333; color: #CCCCCC;
+                border: 1px solid #444444; border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #444444; color: #FFFFFF; }
+            QPushButton:disabled { background-color: #222222; color: #555555; border-color: #333333; }
+        """)
+
+        self.btn_retexture = QPushButton("Retexture", action_row)
+        self.btn_retexture.setToolTip("Reruns OpenMVS texture projection on the modified mesh geometry.")
+        self.btn_retexture.setVisible(False)
+        self.btn_retexture.setStyleSheet("""
+            QPushButton {
+                font-size: 11px; padding: 5px 12px; font-weight: bold;
+                background-color: #00C853; color: #121212;
+                border: 1px solid #00C853; border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #00E676; }
+            QPushButton:disabled { background-color: #2D2D2D; color: #666666; border-color: #444444; }
+        """)
+
+        self.btn_close = QPushButton("Close", action_row)
+        self.btn_close.setToolTip("Close the mesh tool modal.")
+        self.btn_close.setStyleSheet("""
+            QPushButton {
+                font-size: 11px; padding: 5px 10px;
+                background-color: #333333; color: #CCCCCC;
+                border: 1px solid #444444; border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #444444; color: #00E676; border-color: #00E676; }
+        """)
+
+        action_layout.addWidget(self.btn_apply)
+        action_layout.addWidget(self.btn_revert)
+        action_layout.addWidget(self.btn_retexture)
+        action_layout.addWidget(self.btn_close)
+        layout.addWidget(action_row)
+
+        self.btn_apply.clicked.connect(self._on_apply_clicked)
+        self.btn_revert.clicked.connect(self.revert_requested.emit)
+        self.btn_retexture.clicked.connect(self.retexture_requested.emit)
+        self.btn_close.clicked.connect(self.close_modal)
+
+        self.setVisible(False)
+
+    def set_tool(self, tool_id: str, bbox_diagonal: float = 1.0):
+        self.current_tool_id = tool_id
+        self.bbox_diagonal = max(0.0001, bbox_diagonal)
+        self.has_applied_preview = False
+        self.btn_revert.setEnabled(False)
+        self.btn_retexture.setVisible(False)
+        self.btn_apply.setEnabled(True)
+
+        if tool_id == "cleanup":
+            self.title_label.setText("Mesh Cleanup")
+            self.title_label.setStyleSheet("color: #00E676; font-size: 12px; font-weight: bold;")
+            self.subtitle_label.setText("Repair non-manifold topology, close holes, and decimate faces.")
+            self.cleanup_panel.setVisible(True)
+            self.merge_panel.setVisible(False)
+            self.smooth_panel.setVisible(False)
+        elif tool_id == "merge":
+            self.title_label.setText("Merge Close Vertices")
+            self.title_label.setStyleSheet("color: #00E676; font-size: 12px; font-weight: bold;")
+            self.subtitle_label.setText("Collapse vertices within distance threshold into single vertices.")
+            self.cleanup_panel.setVisible(False)
+            self.merge_panel.setVisible(True)
+            self.smooth_panel.setVisible(False)
+            self._set_merge_unit(self.unit_mode)
+            self._on_merge_value_changed()
+        elif tool_id == "smooth":
+            self.title_label.setText("Smooth Mesh")
+            self.title_label.setStyleSheet("color: #00E676; font-size: 12px; font-weight: bold;")
+            self.subtitle_label.setText("Volume-preserving Laplacian surface smoothing to eliminate noise.")
+            self.cleanup_panel.setVisible(False)
+            self.merge_panel.setVisible(False)
+            self.smooth_panel.setVisible(True)
+
+        self.adjustSize()
+
+    def _set_merge_unit(self, unit: str):
+        self.unit_mode = unit
+        self.merge_thresh_spin.blockSignals(True)
+        if unit == "pct":
+            self.btn_unit_pct.setChecked(True)
+            self.btn_unit_abs.setChecked(False)
+            curr_abs = self.merge_thresh_spin.value()
+            pct_val = (curr_abs / self.bbox_diagonal * 100.0) if self.bbox_diagonal > 0 else 1.0
+            pct_val = max(0.001, min(50.0, pct_val))
+            self.merge_thresh_spin.setRange(0.001, 50.0)
+            self.merge_thresh_spin.setSingleStep(0.1)
+            self.merge_thresh_spin.setDecimals(3)
+            self.merge_thresh_spin.setSuffix("%")
+            self.merge_thresh_spin.setValue(pct_val)
+        else:
+            self.btn_unit_pct.setChecked(False)
+            self.btn_unit_abs.setChecked(True)
+            self.merge_thresh_spin.setRange(0.000001, 10000.0)
+            self.merge_thresh_spin.setSingleStep(0.001)
+            self.merge_thresh_spin.setDecimals(5)
+            self.merge_thresh_spin.setSuffix(" units")
+            self.merge_thresh_spin.setValue(0.01)
+        self.merge_thresh_spin.blockSignals(False)
+        self._on_merge_value_changed()
+
+    def _on_merge_value_changed(self):
+        val = self.merge_thresh_spin.value()
+        self.merge_bbox_label.setText(f"BBox Diagonal: {self.bbox_diagonal:.4f} units")
+        if self.unit_mode == "pct":
+            abs_val = (val / 100.0) * self.bbox_diagonal
+            self.merge_equiv_label.setText(f"Equivalent distance: ≈ {abs_val:.5f} units (abs)")
+        else:
+            pct_val = (val / self.bbox_diagonal * 100.0) if self.bbox_diagonal > 0 else 0.0
+            self.merge_equiv_label.setText(f"Equivalent percentage: ≈ {pct_val:.3f}%")
+
+    def _on_apply_clicked(self):
+        params = {}
+        if self.current_tool_id == "cleanup":
+            params = {
+                "target_reduction_pct": self.mc_reduction_spin.value(),
+                "max_hole_size": self.mc_max_hole_spin.value(),
+                "remove_duplicates": self.mc_remove_dups_check.isChecked(),
+                "repair_nonmanifold": self.mc_repair_nm_check.isChecked(),
+                "close_holes": self.mc_close_holes_check.isChecked(),
+            }
+        elif self.current_tool_id == "merge":
+            if self.unit_mode == "pct":
+                threshold_pct = self.merge_thresh_spin.value()
+            else:
+                abs_val = self.merge_thresh_spin.value()
+                threshold_pct = (abs_val / self.bbox_diagonal * 100.0) if self.bbox_diagonal > 0 else 1.0
+            params = {
+                "threshold_pct": threshold_pct,
+                "bbox_diagonal": self.bbox_diagonal,
+            }
+        elif self.current_tool_id == "smooth":
+            lambda_val = self.smooth_lambda_spin.value()
+            mu_val = -(lambda_val + 0.01)
+            params = {
+                "lambda_factor": lambda_val,
+                "mu_factor": mu_val,
+                "iterations": self.smooth_iter_spin.value(),
+            }
+
+        self.btn_apply.setEnabled(False)
+        self.apply_requested.emit(self.current_tool_id, params)
+
+    def on_preview_applied(self, num_vertices: int, num_faces: int):
+        self.has_applied_preview = True
+        self.btn_revert.setEnabled(True)
+        self.btn_retexture.setVisible(True)
+        self.btn_retexture.setEnabled(True)
+        self.btn_apply.setEnabled(True)
+        self.adjustSize()
+
+    def on_reverted(self):
+        self.has_applied_preview = False
+        self.btn_revert.setEnabled(False)
+        self.btn_retexture.setVisible(False)
+        self.btn_apply.setEnabled(True)
+        self.adjustSize()
+
+    def set_status(self, msg: str):
+        pass
+
+    def close_modal(self):
+        self.setVisible(False)
+        self.closed.emit()
+
+
 class ViewerWrapperWidget(QFrame):
     """
     Widget wrapper that hosts the native VisPy 3D scene canvas
@@ -714,6 +1153,12 @@ class ViewerWrapperWidget(QFrame):
     delete_selection_requested = Signal()
     clear_selection_requested = Signal()
     invert_selection_requested = Signal()
+    open_tool_requested = Signal(str)
+    apply_mesh_tool_requested = Signal(str, dict)
+    revert_mesh_tool_requested = Signal()
+    retexture_mesh_tool_requested = Signal()
+    mesh_tool_closed = Signal()
+    shading_mode_changed = Signal(str)  # Emits 'wireframe' or 'solid'
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -827,6 +1272,45 @@ class ViewerWrapperWidget(QFrame):
         self.action_upload_proximap.setEnabled(False)
         
         self.file_menu_btn.setMenu(self.file_menu)
+
+        # Dropdown Tools Menu (Mesh Cleanup, Merge Vertices, Taubin Smooth Mesh)
+        self.tools_menu_btn = QPushButton("Tools", self.control_bar)
+        self.tools_menu_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 4px 10px;
+                font-weight: normal;
+                background-color: #333333;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                margin-left: 5px;
+                text-align: center;
+            }
+            QPushButton:hover {
+                background-color: #444444;
+                border-color: #00E676;
+            }
+            QPushButton::menu-indicator {
+                image: none;
+                width: 0px;
+            }
+        """)
+        self.tools_menu = QMenu(self)
+        self.tools_menu.setStyleSheet(self.file_menu.styleSheet())
+        self.tools_menu.aboutToShow.connect(self.update_crop_box_state)
+
+        self.action_tool_cleanup = self.tools_menu.addAction("Mesh Cleanup")
+        self.action_tool_merge = self.tools_menu.addAction("Merge Vertices")
+        self.action_tool_smooth = self.tools_menu.addAction("Smooth Mesh")
+        self.action_tool_cleanup.setEnabled(False)
+        self.action_tool_merge.setEnabled(False)
+        self.action_tool_smooth.setEnabled(False)
+
+        self.tools_menu_btn.setMenu(self.tools_menu)
+        self.action_tool_cleanup.triggered.connect(lambda: self.open_tool_requested.emit('cleanup'))
+        self.action_tool_merge.triggered.connect(lambda: self.open_tool_requested.emit('merge'))
+        self.action_tool_smooth.triggered.connect(lambda: self.open_tool_requested.emit('smooth'))
         
         # Dropdown Selection Menu (Box, Lasso, Circle, Bounding Box Crop)
         self.select_menu_btn = QPushButton("Select", self.control_bar)
@@ -914,18 +1398,82 @@ class ViewerWrapperWidget(QFrame):
             }
         """)
 
-        # Reload / refresh button
-        self.reload_btn = QPushButton("Reload", self.control_bar)
-        self.reload_btn.setStyleSheet("font-size: 11px; padding: 4px 8px; font-weight: normal;")
+
+        # View Shading segmented toggle (Wireframe vs Solid)
+        self.shading_frame = QFrame(self.control_bar)
+        self.shading_frame.setObjectName("ShadingFrame")
+        self.shading_frame.setStyleSheet("""
+            QFrame#ShadingFrame {
+                background-color: #242424;
+                border: 1px solid #3A3A3A;
+                border-radius: 6px;
+            }
+        """)
+        shading_layout = QHBoxLayout(self.shading_frame)
+        shading_layout.setContentsMargins(2, 2, 2, 2)
+        shading_layout.setSpacing(2)
+
+        self.shading_group = QButtonGroup(self.control_bar)
+        self.shading_group.setExclusive(True)
+
+        public_dir = os.path.join(get_base_dir(), "public")
+        wf_icon_path = os.path.join(public_dir, "proximap wireframe.png")
+        solid_icon_path = os.path.join(public_dir, "proximap solid.png")
+
+        shading_btn_style = """
+            QPushButton {
+                background-color: transparent;
+                border: 1px solid transparent;
+                border-radius: 4px;
+                padding: 2px;
+            }
+            QPushButton:hover {
+                background-color: #333333;
+                border-color: #444444;
+            }
+            QPushButton:checked {
+                background-color: #1B382B;
+                border: 1px solid #00E676;
+            }
+        """
+
+        self.btn_wireframe_mode = QPushButton(self.shading_frame)
+        self.btn_wireframe_mode.setCheckable(True)
+        self.btn_wireframe_mode.setFixedSize(28, 24)
+        self.btn_wireframe_mode.setToolTip("Wireframe Mode")
+        self.btn_wireframe_mode.setIconSize(QSize(20, 20))
+        if os.path.exists(wf_icon_path):
+            self.btn_wireframe_mode.setIcon(QIcon(wf_icon_path))
+        self.btn_wireframe_mode.setStyleSheet(shading_btn_style)
+
+        self.btn_solid_mode = QPushButton(self.shading_frame)
+        self.btn_solid_mode.setCheckable(True)
+        self.btn_solid_mode.setChecked(True)
+        self.btn_solid_mode.setFixedSize(28, 24)
+        self.btn_solid_mode.setToolTip("Solid Surface Mode")
+        self.btn_solid_mode.setIconSize(QSize(20, 20))
+        if os.path.exists(solid_icon_path):
+            self.btn_solid_mode.setIcon(QIcon(solid_icon_path))
+        self.btn_solid_mode.setStyleSheet(shading_btn_style)
+
+        self.shading_group.addButton(self.btn_wireframe_mode, 0)
+        self.shading_group.addButton(self.btn_solid_mode, 1)
+
+        shading_layout.addWidget(self.btn_wireframe_mode)
+        shading_layout.addWidget(self.btn_solid_mode)
+
+        self.btn_wireframe_mode.clicked.connect(lambda: self.shading_mode_changed.emit("wireframe"))
+        self.btn_solid_mode.clicked.connect(lambda: self.shading_mode_changed.emit("solid"))
 
         # --- Assemble toolbar ---
         control_layout.addWidget(self.file_menu_btn)
         control_layout.addWidget(self.select_menu_btn)
+        control_layout.addWidget(self.tools_menu_btn)
         control_layout.addStretch()
         control_layout.addWidget(self.show_controls_cb)
         control_layout.addWidget(self.mode_select)
         control_layout.addWidget(self.bg_btn)
-        control_layout.addWidget(self.reload_btn)
+        control_layout.addWidget(self.shading_frame)
         
         layout.addWidget(self.control_bar)
         
@@ -1095,6 +1643,14 @@ class ViewerWrapperWidget(QFrame):
         self.select_hint_label.setVisible(False)
 
         self.crop_modal.setVisible(False)
+
+        # Floating Mesh Tools Modal (Mesh Cleanup, Merge Vertices, Taubin Smooth)
+        self.tools_modal = MeshToolModal(self.container_area)
+        self.tools_modal.apply_requested.connect(self.apply_mesh_tool_requested.emit)
+        self.tools_modal.revert_requested.connect(self.revert_mesh_tool_requested.emit)
+        self.tools_modal.retexture_requested.connect(self.retexture_mesh_tool_requested.emit)
+        self.tools_modal.closed.connect(self.mesh_tool_closed.emit)
+        self.tools_modal.setVisible(False)
         
         # A simple fallback label when no viewer is running
         self.fallback_label = QLabel("Drag Images/Videos Here or Process to View 3D Scene", self.container_area)
@@ -1105,11 +1661,29 @@ class ViewerWrapperWidget(QFrame):
         layout.addWidget(self.container_area)
         
         # Setup actions
-        self.reload_btn.clicked.connect(self._on_reload_clicked)
         self.mode_select.currentIndexChanged.connect(self._on_mode_changed)
         self.action_crop_box.setEnabled(self.mode_select.currentIndex() == 2)
         
         self.current_mvs_dir = None
+
+    def _position_tools_modal(self):
+        if hasattr(self, 'tools_modal') and self.tools_modal.isVisible():
+            self.tools_modal.adjustSize()
+            margin = 15
+            modal_size = self.tools_modal.sizeHint()
+            modal_w = max(self.tools_modal.width(), modal_size.width(), 310)
+            modal_h = max(self.tools_modal.height(), modal_size.height())
+            x = margin
+            y = margin
+            self.tools_modal.setGeometry(x, y, modal_w, modal_h)
+            self.tools_modal.raise_()
+
+    def open_mesh_tool(self, tool_id: str, bbox_diagonal: float = 1.0):
+        if hasattr(self, 'tools_modal'):
+            self.tools_modal.set_tool(tool_id, bbox_diagonal)
+            self.tools_modal.setVisible(True)
+            self._position_tools_modal()
+            self.tools_modal.raise_()
 
     def _position_crop_modal(self):
         if hasattr(self, 'crop_modal') and self.crop_modal.isVisible():
@@ -1249,6 +1823,7 @@ class ViewerWrapperWidget(QFrame):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_crop_modal()
+        self._position_tools_modal()
         w = self.width()
             
         if w < 600:
@@ -1350,16 +1925,25 @@ class ViewerWrapperWidget(QFrame):
     def _on_back_clicked(self):
         self.back_requested.emit()
 
-    def _on_reload_clicked(self):
-        path = self.get_selected_file_path()
-        if path:
-            self.reload_requested.emit(path)
+
+    def set_shading_mode(self, mode_name: str):
+        if hasattr(self, 'btn_wireframe_mode') and hasattr(self, 'btn_solid_mode'):
+            if mode_name == "wireframe":
+                self.btn_wireframe_mode.setChecked(True)
+            else:
+                self.btn_solid_mode.setChecked(True)
 
     def update_crop_box_state(self):
         is_textured_mesh = (self.mode_select.currentIndex() == 2)
         self.action_select_box.setEnabled(is_textured_mesh)
         self.action_select_lasso.setEnabled(is_textured_mesh)
         self.action_crop_box.setEnabled(is_textured_mesh)
+        if hasattr(self, 'action_tool_cleanup'):
+            self.action_tool_cleanup.setEnabled(is_textured_mesh)
+            self.action_tool_merge.setEnabled(is_textured_mesh)
+            self.action_tool_smooth.setEnabled(is_textured_mesh)
+        if hasattr(self, 'shading_frame'):
+            self.shading_frame.setEnabled(is_textured_mesh)
         if not is_textured_mesh and getattr(self, '_current_selection_mode', None) in ['crop_box', 'box', 'lasso']:
             self.set_selection_mode('none')
 
@@ -2062,7 +2646,7 @@ class SessionRecoveryDialog(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Proximap 1.4.0")
+        self.setWindowTitle("Proximap 1.5.0")
         self.setMinimumSize(1100, 750)
         
         base_dir = get_base_dir()
@@ -2860,6 +3444,15 @@ class MainWindow(QMainWindow):
         self.viewer_widget.delete_selection_requested.connect(self._delete_selection)
         self.viewer_widget.clear_selection_requested.connect(self._clear_selection)
         self.viewer_widget.invert_selection_requested.connect(self._invert_selection)
+        self.viewer_widget.open_tool_requested.connect(self._open_mesh_tool)
+        self.viewer_widget.apply_mesh_tool_requested.connect(self._on_apply_mesh_tool)
+        self.viewer_widget.revert_mesh_tool_requested.connect(self._on_revert_mesh_tool)
+        self.viewer_widget.retexture_mesh_tool_requested.connect(self._on_retexture_mesh_tool)
+        self.viewer_widget.mesh_tool_closed.connect(self._on_mesh_tool_closed)
+        self.viewer_widget.shading_mode_changed.connect(self._on_shading_mode_changed)
+
+        self._current_shading_mode = "solid"
+        self._wireframe_filter = None
 
         # Initialize VisPy Canvas
         self.canvas = scene.SceneCanvas(keys='interactive', show=False, bgcolor=self.viewport_bg_color)
@@ -5494,6 +6087,65 @@ class MainWindow(QMainWindow):
         if path:
             self._reload_viewer(path)
 
+    def _on_shading_mode_changed(self, mode_name: str):
+        """Switches between Solid and Wireframe shading modes in the 3D viewport."""
+        self._current_shading_mode = mode_name
+        self._apply_shading_mode_to_mesh()
+        self.console_text.append(f"[VIEWPORT] Viewport shading set to {mode_name.capitalize()} mode.")
+
+    def _apply_shading_mode_to_mesh(self):
+        """Applies the active shading mode (Wireframe vs Solid) to the active VisPy MeshVisual.
+        Wireframe is rendered as a Line-edge overlay — compatible with TextureFilter, no shader issues.
+        """
+        import numpy as np
+        from vispy import scene
+
+        # Remove any existing wireframe overlay first
+        if hasattr(self, '_wireframe_visual') and self._wireframe_visual is not None:
+            self._wireframe_visual.parent = None
+            self._wireframe_visual = None
+
+        if not (hasattr(self, 'mesh_visual') and self.mesh_visual is not None):
+            return
+
+        if getattr(self, '_current_shading_mode', 'solid') == "wireframe":
+            # Build wireframe line segments from mesh faces
+            vertices = getattr(self, '_last_wf_vertices', None)
+            faces = getattr(self, '_last_wf_faces', None)
+
+            if vertices is None or faces is None:
+                self.canvas.update()
+                return
+
+            # Build unique edge pairs from triangles
+            edges = np.concatenate([
+                faces[:, [0, 1]],
+                faces[:, [1, 2]],
+                faces[:, [0, 2]],
+            ], axis=0)
+            edges = np.sort(edges, axis=1)
+            edges = np.unique(edges, axis=0)
+
+            # Interleave: [v0, v1, v0, v1, ...] as line segments
+            line_pts = np.empty((len(edges) * 2, 3), dtype=np.float32)
+            line_pts[0::2] = vertices[edges[:, 0]]
+            line_pts[1::2] = vertices[edges[:, 1]]
+
+            self._wireframe_visual = scene.visuals.Line(
+                pos=line_pts,
+                color=(0.0, 0.902, 0.463, 0.85),  # #00E676 + slight alpha
+                connect='segments',
+                width=1.0,
+                parent=self.view.scene
+            )
+            self.mesh_visual.visible = False
+        else:
+            # Solid: restore mesh, ensure no overlay
+            if hasattr(self, 'mesh_visual') and self.mesh_visual is not None:
+                self.mesh_visual.visible = True
+
+        self.canvas.update()
+
     def _clear_visuals(self):
         if hasattr(self, 'markers_visual') and self.markers_visual is not None:
             self.markers_visual.parent = None
@@ -5510,6 +6162,12 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'selection_markers_visual') and self.selection_markers_visual is not None:
             self.selection_markers_visual.parent = None
             self.selection_markers_visual = None
+        if hasattr(self, '_wireframe_visual') and self._wireframe_visual is not None:
+            self._wireframe_visual.parent = None
+            self._wireframe_visual = None
+        self._last_wf_vertices = None
+        self._last_wf_faces = None
+        self._wireframe_filter = None  # kept for compat
         self._selected_vertex_indices = None
         self._last_points = None
 
@@ -6047,6 +6705,10 @@ class MainWindow(QMainWindow):
                     self.mesh_visual.attach(TextureFilter(texture_image, texcoords))
                 except Exception as tex_err:
                     self.console_text.append(f"[WARNING] Could not apply texture filter: {tex_err}")
+            # Store geometry so wireframe overlay can build edges
+            self._last_wf_vertices = points.astype(np.float32)
+            self._last_wf_faces = faces.astype(np.uint32)
+            self._apply_shading_mode_to_mesh()
         else:
             marker_colors = 'white'
             if colors is not None and len(colors) > 0:
@@ -6575,6 +7237,220 @@ class MainWindow(QMainWindow):
         # Exit bounding box crop mode and revert to default navigation
         self.viewer_widget.set_selection_mode('none')
 
+    def _export_temp_mesh_ply(self, points, faces, colors, file_path):
+        """Write current geometry to native-oriented PLY on disk for worker processing."""
+        import numpy as np, os
+        from point_cloud_io import apply_photogrammetry_coordinate_flip
+        save_pts, _, _, _ = apply_photogrammetry_coordinate_flip(points=points)
+        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+        with open(file_path, 'w') as f:
+            f.write("ply\nformat ascii 1.0\n")
+            f.write(f"element vertex {len(save_pts)}\n")
+            f.write("property float x\nproperty float y\nproperty float z\n")
+            has_color = colors is not None and len(colors) == len(save_pts)
+            if has_color:
+                f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+            num_faces = len(faces) if faces is not None else 0
+            f.write(f"element face {num_faces}\n")
+            f.write("property list uchar int vertex_indices\nend_header\n")
+            for idx, v in enumerate(save_pts):
+                if has_color:
+                    c = colors[idx]
+                    f.write(f"{v[0]:.6f} {v[1]:.6f} {v[2]:.6f} {int(c[0])} {int(c[1])} {int(c[2])}\n")
+                else:
+                    f.write(f"{v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+            if faces is not None:
+                for face in faces:
+                    f.write(f"3 {face[0]} {face[1]} {face[2]}\n")
+
+    def _open_mesh_tool(self, tool_id: str):
+        """Opens the floating tool modal for Mesh Cleanup, Merge Vertices, or Taubin Smooth Mesh."""
+        import numpy as np, os
+        if self._current_points is None or len(self._current_points) == 0:
+            QMessageBox.warning(self, "No Mesh Available", "Please load or reconstruct a 3D mesh first.")
+            return
+
+        mvs_dir = self.viewer_widget.current_mvs_dir or os.path.join(get_reconstruction_out_dir(), "mvs")
+        os.makedirs(mvs_dir, exist_ok=True)
+
+        # Write pre-operation mesh checkpoint to temp file on disk (Amendment 3)
+        backup_path = os.path.join(mvs_dir, "scene_dense_mesh_preop_backup.ply")
+        self._export_temp_mesh_ply(self._current_points, self._current_faces, self._current_colors, backup_path)
+        self._active_preop_backup_path = backup_path
+
+        # Compute bounding box diagonal
+        bbox_min = np.min(self._current_points, axis=0)
+        bbox_max = np.max(self._current_points, axis=0)
+        bbox_diag = float(np.linalg.norm(bbox_max - bbox_min))
+        if bbox_diag <= 0.0:
+            bbox_diag = 1.0
+
+        self.viewer_widget.open_mesh_tool(tool_id, bbox_diag)
+        tool_names = {"cleanup": "Mesh Cleanup", "merge": "Merge Vertices", "smooth": "Smooth Mesh"}
+        self.console_text.append(f"[TOOLS] Opened {tool_names.get(tool_id, tool_id)} tool modal.")
+
+    def _on_apply_mesh_tool(self, tool_id: str, params: dict):
+        """Executes the mesh tool operation in a background thread and previews result in VisPy."""
+        import os
+        mvs_dir = self.viewer_widget.current_mvs_dir or os.path.join(get_reconstruction_out_dir(), "mvs")
+        os.makedirs(mvs_dir, exist_ok=True)
+
+        tool_in_ply = os.path.join(mvs_dir, "scene_dense_mesh_tool_in.ply")
+        tool_out_ply = os.path.join(mvs_dir, "scene_dense_mesh_tool_out.ply")
+
+        # Export current working mesh to disk
+        self._export_temp_mesh_ply(self._current_points, self._current_faces, self._current_colors, tool_in_ply)
+
+        op_map = {
+            "cleanup": "cleanup",
+            "merge": "merge_by_distance",
+            "smooth": "smooth_taubin"
+        }
+        operation = op_map.get(tool_id, "cleanup")
+
+        # Update UI: Disable Start Reconstruction button & animate shared progress bar
+        self.process_btn.setEnabled(False)
+        self.progress_bar.setRange(0, 0)
+        self.status_label.setText(f"Running {operation.replace('_', ' ').title()}...")
+
+        from pipeline_manager import MeshOperationWorker
+        self.mesh_op_worker = MeshOperationWorker(operation, tool_in_ply, tool_out_ply, params, parent=self)
+        self.mesh_op_worker.log_message.connect(self._append_log)
+        self.mesh_op_worker.status_changed.connect(self.status_label.setText)
+        self.mesh_op_worker.finished.connect(self._on_mesh_op_finished)
+        self.mesh_op_worker.start()
+
+    def _on_mesh_op_finished(self, success: bool, output_ply: str, msg: str):
+        """Handles completion of a mesh tool operation and updates in-viewport preview."""
+        import os
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(100 if success else 0)
+        self._set_process_btn_state("ready" if len(self.image_list) > 0 else "idle")
+
+        if success and output_ply and os.path.isfile(output_ply):
+            pts, cls, fcs = _read_ply_static(output_ply)
+            if pts is not None and len(pts) > 0:
+                self._current_points = pts
+                self._current_faces = fcs
+                self._current_colors = cls
+                # In preview, render geometry in VisPy without resetting camera
+                self._render_in_vispy_from_data(pts, cls, fcs, None, None, mode=2, reset_camera=False)
+                num_v = len(pts)
+                num_f = len(fcs) if fcs is not None else 0
+                self.viewer_widget.tools_modal.on_preview_applied(num_v, num_f)
+                status_text = f"Tool preview applied ({num_v:,} vertices, {num_f:,} faces)"
+                self.status_label.setText(status_text)
+                self.console_text.append(f"[PREVIEW] {status_text}. Click 'Retexture' to project textures or 'Revert' to undo.")
+            else:
+                self.status_label.setText("Mesh operation failed: empty output geometry.")
+                self.console_text.append("[ERROR] Mesh operation did not return readable geometry.")
+        else:
+            self.status_label.setText("Mesh operation failed.")
+            self.console_text.append(f"[ERROR] Mesh operation failed: {msg}")
+
+    def _on_revert_mesh_tool(self):
+        """Restores un-modified pre-operation mesh geometry from the disk backup."""
+        import os
+        if hasattr(self, '_active_preop_backup_path') and self._active_preop_backup_path and os.path.isfile(self._active_preop_backup_path):
+            pts, cls, fcs = _read_ply_static(self._active_preop_backup_path)
+            if pts is not None and len(pts) > 0:
+                self._current_points = pts
+                self._current_faces = fcs
+                self._current_colors = cls
+                self._render_in_vispy_from_data(
+                    pts, cls, fcs,
+                    self._raw_texcoords, self._raw_texture_path,
+                    mode=2, reset_camera=False
+                )
+                self.viewer_widget.tools_modal.on_reverted()
+                self.status_label.setText("Reverted to pre-operation mesh geometry.")
+                self.console_text.append("[TOOLS] Reverted to pre-operation mesh geometry.")
+            else:
+                self.console_text.append("[WARNING] Failed to parse pre-operation backup mesh.")
+        else:
+            self.console_text.append("[WARNING] No pre-operation backup found on disk.")
+
+    def _on_retexture_mesh_tool(self):
+        """Reruns OpenMVS TextureMesh on current modified mesh using reconstruction scene.mvs."""
+        import os
+        mvs_dir = self.viewer_widget.current_mvs_dir or os.path.join(get_reconstruction_out_dir(), "mvs")
+        
+        # Verify scene.mvs candidates
+        texture_input_scene = None
+        for cand in ["scene_dense_mesh_refine.mvs", "scene_dense.mvs", "scene.mvs"]:
+            if os.path.exists(os.path.join(mvs_dir, cand)):
+                texture_input_scene = cand
+                break
+
+        if not texture_input_scene:
+            QMessageBox.warning(
+                self,
+                "Retexture Unavailable",
+                "Retexturing requires the reconstruction's project file ('scene.mvs') and source images, which were not found in this session.\n\n"
+                "Note: Retexturing is only available for in-session reconstructions where project assets are intact."
+            )
+            self.console_text.append("[WARNING] Retexture failed: scene.mvs not found in session directory.")
+            return
+
+        # Save current preview mesh to scene_dense_mesh_modified.ply
+        modified_ply = os.path.join(mvs_dir, "scene_dense_mesh_modified.ply")
+        self._export_temp_mesh_ply(self._current_points, self._current_faces, self._current_colors, modified_ply)
+
+        # Update UI: Disable Start Reconstruction button & animate shared progress bar
+        self.process_btn.setEnabled(False)
+        self.progress_bar.setRange(0, 0)
+        self.status_label.setText("Retexturing mesh...")
+        self.console_text.append("[START] Running OpenMVS TextureMesh on modified mesh...")
+
+        from pipeline_manager import RetextureOnlyWorker
+        texture_res = str(self.custom_texture_res_combo.currentIndex()) if self.custom_settings_toggle.isChecked() else "1"
+        quality_preset = ["preview", "medium", "high", "ultra"][self.quality_combo.currentIndex()] if hasattr(self, 'quality_combo') else "medium"
+
+        self.retexture_worker = RetextureOnlyWorker(
+            output_dir=mvs_dir,
+            target_mesh_ply="scene_dense_mesh_modified.ply",
+            custom_params={"texture_res": texture_res},
+            quality_preset=quality_preset,
+            parent=self
+        )
+        self.retexture_worker.log_message.connect(self._append_log)
+        self.retexture_worker.status_changed.connect(self.status_label.setText)
+        self.retexture_worker.finished.connect(self._on_mesh_tool_retexture_finished)
+        self.retexture_worker.start()
+
+    def _on_mesh_tool_retexture_finished(self, success: bool, msg: str):
+        """Handles completion of retexturing worker and reloads the textured mesh into the viewport."""
+        import os
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(100 if success else 0)
+        self._set_process_btn_state("ready" if len(self.image_list) > 0 else "idle")
+
+        if success:
+            self.status_label.setText("Retexturing Complete")
+            self.console_text.append("[SUCCESS] Retexturing completed. Reloading textured mesh in viewport...")
+            mvs_dir = self.viewer_widget.current_mvs_dir or os.path.join(get_reconstruction_out_dir(), "mvs")
+            obj_path = os.path.join(mvs_dir, "scene_dense_mesh_texture.obj")
+            if os.path.exists(obj_path):
+                self._reload_viewer(obj_path)
+            else:
+                mesh_path = self.viewer_widget.get_selected_file_path()
+                if mesh_path:
+                    self._reload_viewer(mesh_path)
+        else:
+            self.status_label.setText("Retexturing Failed")
+            self.console_text.append(f"[ERROR] Retexturing failed: {msg}")
+
+    def _on_mesh_tool_closed(self):
+        """Cleans up temporary pre-operation backup file from disk."""
+        import os
+        if hasattr(self, '_active_preop_backup_path') and self._active_preop_backup_path:
+            try:
+                if os.path.isfile(self._active_preop_backup_path):
+                    os.remove(self._active_preop_backup_path)
+            except Exception:
+                pass
+            self._active_preop_backup_path = None
+
     def _render_in_vispy(self, file_path, mode):
         import numpy as np
         from PIL import Image
@@ -6723,6 +7599,10 @@ class MainWindow(QMainWindow):
                     self.mesh_visual.attach(tex_filter)
                 except Exception as tex_err:
                     self.console_text.append(f"[WARNING] Could not apply texture filter: {tex_err}")
+            # Store geometry so wireframe overlay can build edges
+            self._last_wf_vertices = points.astype(np.float32)
+            self._last_wf_faces = faces.astype(np.uint32)
+            self._apply_shading_mode_to_mesh()
                     
         elif points is not None and len(points) > 0:
             marker_colors = None
@@ -7264,7 +8144,7 @@ class MobileQRDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(10)
 
-        title = QLabel("📱 Scan with your Mobile Phone", self)
+        title = QLabel("Scan with your Mobile Phone", self)
         title.setStyleSheet("font-size: 16px; font-weight: bold; color: #00E676;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)

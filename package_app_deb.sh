@@ -6,7 +6,7 @@ set -e
 
 APP_NAME="proximap"
 DISPLAY_NAME="Proximap"
-VERSION="1.4.0"
+VERSION="1.5.0"
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 MAINTAINER="ProximaXR Spatial Technologies <fumz@proximaxr.space>"
 DESCRIPTION="Intuitive desktop 3D photogrammetry app."
@@ -17,9 +17,80 @@ echo " Target Architecture: ${ARCH}"
 echo "=========================================================="
 
 # 1. Cleanup old build directories and artifacts
-echo "[1/6] Cleaning up old build/dist files and logs..."
+echo "[1/7] Cleaning up old build/dist files and logs..."
 rm -rf build dist proximap_deb *.deb Proximap_Linux_Release.zip *.log
 echo "  Cleaned up old files."
+
+# 1b. Extract PyMeshLab wheel into backend_bin/pymeshlab_extracted/
+#     PyMeshLab only ships cp310 (Python 3.10) ABI wheels. We extract the wheel
+#     contents here so they can be bundled as --add-data regardless of the host
+#     Python version running PyInstaller. The pymeshlab_worker.py subprocess then
+#     uses a bundled Python 3.10 interpreter to load the extracted .so files.
+echo "[2/7] Extracting PyMeshLab wheel into backend_bin/pymeshlab_extracted/..."
+MLWHL=""
+for whl in backend_bin/PymeshLab/pymeshlab-*manylinux*.whl backend_bin/PymeshLab/pymeshlab-*linux*.whl; do
+    [ -f "$whl" ] && { MLWHL="$whl"; break; }
+done
+if [ -z "$MLWHL" ]; then
+    echo "  [WARNING] No manylinux PyMeshLab wheel found in backend_bin/PymeshLab/. Skipping extraction."
+else
+    echo "  Extracting: $MLWHL"
+    rm -rf backend_bin/pymeshlab_extracted
+    python3 - << 'PYEOF'
+import zipfile, os, sys, stat
+whl = sys.argv[1] if len(sys.argv) > 1 else ""
+import glob
+wheels = glob.glob("backend_bin/PymeshLab/pymeshlab-*manylinux*.whl") + glob.glob("backend_bin/PymeshLab/pymeshlab-*linux*.whl")
+if not wheels: sys.exit(0)
+whl = wheels[0]
+out_dir = "backend_bin/pymeshlab_extracted"
+os.makedirs(out_dir, exist_ok=True)
+prefix = next((n.split('/purelib/')[0] + '/purelib/' for n in zipfile.ZipFile(whl).namelist() if '/purelib/' in n), None)
+if not prefix: sys.exit(1)
+with zipfile.ZipFile(whl) as z:
+    for name in z.namelist():
+        if name.startswith(prefix):
+            rel = name[len(prefix):]
+            target = os.path.join(out_dir, rel)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            if not name.endswith('/'):
+                with z.open(name) as src, open(target, 'wb') as dst:
+                    dst.write(src.read())
+                if target.endswith('.so') or '/bin/' in target:
+                    os.chmod(target, os.stat(target).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+print("[2/7] Extraction complete:", out_dir)
+PYEOF
+    echo "  PyMeshLab wheel extracted successfully."
+fi
+
+# 2b. Download and bundle a standalone Python 3.10 interpreter (python-build-standalone)
+#     This gives end-user machines a guaranteed cp310 runtime for pymeshlab_worker.py,
+#     regardless of whatever Python is installed on their system.
+PY310_DIR="backend_bin/python3.10"
+PY310_BIN="$PY310_DIR/bin/python3.10"
+if [ ! -f "$PY310_BIN" ]; then
+    echo "[2b/7] Downloading standalone Python 3.10 interpreter..."
+    PY310_TARBALL="cpython-3.10.17+20250725-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+    PY310_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20250725/${PY310_TARBALL}"
+    mkdir -p "$PY310_DIR"
+    if command -v curl > /dev/null 2>&1; then
+        curl -L --retry 3 --retry-delay 5 -o "/tmp/${PY310_TARBALL}" "$PY310_URL" && \
+            tar -xzf "/tmp/${PY310_TARBALL}" --strip-components=1 -C "$PY310_DIR" && \
+            rm -f "/tmp/${PY310_TARBALL}" && \
+            echo "  Python 3.10 standalone downloaded and extracted." || \
+            echo "  [WARNING] Failed to download Python 3.10 standalone. PyMeshLab will use system python3.10 if available."
+    elif command -v wget > /dev/null 2>&1; then
+        wget -q --tries=3 -O "/tmp/${PY310_TARBALL}" "$PY310_URL" && \
+            tar -xzf "/tmp/${PY310_TARBALL}" --strip-components=1 -C "$PY310_DIR" && \
+            rm -f "/tmp/${PY310_TARBALL}" && \
+            echo "  Python 3.10 standalone downloaded and extracted." || \
+            echo "  [WARNING] Failed to download Python 3.10 standalone."
+    else
+        echo "  [WARNING] Neither curl nor wget available. Python 3.10 standalone not bundled."
+    fi
+else
+    echo "[2b/7] Standalone Python 3.10 already present at $PY310_BIN — skipping download."
+fi
 
 # 2. Icon check and setup
 ICON_PATH="public/app_icon.png"
@@ -29,13 +100,16 @@ if [ -f "$ICON_PATH" ]; then
 fi
 
 # 3. Run PyInstaller to package the Python GUI
-echo "[2/6] Freezing Python application with PyInstaller..."
+# NOTE: --collect-all pymeshlab is intentionally OMITTED here — PyMeshLab ships
+#       only cp310 ABI wheels and cannot be collected by a non-cp310 PyInstaller run.
+#       Instead, the extracted wheel is bundled via --add-data below, and
+#       pymeshlab_worker.py is invoked as a subprocess using the bundled Python 3.10.
+echo "[3/7] Freezing Python application with PyInstaller..."
 python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all PySide6 --collect-all vispy --collect-all numpy \
     --collect-all pillow --collect-all cv2 --collect-all trimesh \
     --collect-all pyrr --collect-all OpenGL --collect-all qrcode \
     --collect-all scipy --collect-all skimage --collect-all open3d \
-    --collect-all pymeshlab \
     --collect-all mesh_editor --collect-all addons \
     --exclude-module lightglue --exclude-module torch --exclude-module torchvision --exclude-module nvidia --exclude-module triton \
     --exclude-module PySide6.QtWebEngineCore \
@@ -57,6 +131,7 @@ python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --exclude-module matplotlib \
     --add-data "mesh_editor/shaders:mesh_editor/shaders" \
     --add-data "addons:addons" \
+    --add-data "pymeshlab_worker.py:." \
     main_window.py
 
 if [ ! -d "dist/Proximap" ]; then
@@ -65,7 +140,31 @@ if [ ! -d "dist/Proximap" ]; then
 fi
 echo "  PyInstaller compilation successful."
 
-echo "  Pruning unnecessary PyTorch & CUDA build bloat (Triton, C++ headers, test suites)..."
+# 3b. Copy the extracted PyMeshLab wheel and Python 3.10 interpreter into the bundle.
+#     These go into _internal/ so pymeshlab_worker.py can find them at runtime.
+echo "[3b/7] Injecting PyMeshLab cp310 extension and Python 3.10 runtime into bundle..."
+INTERNAL="dist/Proximap/_internal"
+
+if [ -d "backend_bin/pymeshlab_extracted" ]; then
+    mkdir -p "$INTERNAL/backend_bin"
+    cp -r backend_bin/pymeshlab_extracted "$INTERNAL/backend_bin/"
+    chmod -R 755 "$INTERNAL/backend_bin/pymeshlab_extracted"
+    echo "  PyMeshLab extracted files copied to bundle."
+else
+    echo "  [WARNING] backend_bin/pymeshlab_extracted not found — PyMeshLab unavailable in bundle."
+fi
+
+if [ -d "$PY310_DIR" ] && [ -f "$PY310_BIN" ]; then
+    mkdir -p "$INTERNAL/backend_bin"
+    # Copy the entire standalone Python 3.10 tree
+    cp -r "$PY310_DIR" "$INTERNAL/backend_bin/"
+    chmod -R 755 "$INTERNAL/backend_bin/python3.10"
+    echo "  Standalone Python 3.10 runtime copied to bundle."
+else
+    echo "  [WARNING] Standalone Python 3.10 not found — worker will fall back to system python3.10."
+fi
+
+echo "[4/7] Pruning unnecessary build bloat..."
 rm -rf dist/Proximap/_internal/triton 2>/dev/null || true
 rm -rf dist/Proximap/_internal/torch/testing 2>/dev/null || true
 rm -rf dist/Proximap/_internal/torch/include 2>/dev/null || true
@@ -78,8 +177,8 @@ rm -rf dist/Proximap/_internal/PySide6/Qt/lib/libQt6WebEngineCore.so* 2>/dev/nul
 rm -rf dist/Proximap/_internal/PySide6/Qt/resources/qtwebengine* 2>/dev/null || true
 
 
-# 4. Construct Debian package folder structure
-echo "[3/6] Setting up Debian package directory hierarchy..."
+# 5. Construct Debian package folder structure
+echo "[5/7] Setting up Debian package directory hierarchy..."
 DEB_DIR="dist/deb_build"
 OPT_DIR="${DEB_DIR}/opt/proximap"
 BIN_DIR="${DEB_DIR}/usr/bin"
@@ -97,7 +196,7 @@ mkdir -p "$CONTROL_DIR"
 cp -r dist/Proximap/* "$OPT_DIR/"
 
 # Copy backend binaries and toolchain files
-echo "[4/6] Copying backend dependencies and assets..."
+echo "[5b/7] Copying backend dependencies and assets..."
 COLMAP_DIR="$OPT_DIR/backend_bin/colmap"
 OPENMVS_DIR="$OPT_DIR/backend_bin/openMVS"
 PYMESHLAB_DIR="$OPT_DIR/backend_bin/PymeshLab"
@@ -167,8 +266,8 @@ if [ -f "$ICON_PATH" ]; then
     cp "$ICON_PATH" "${ICON_DIR}/${APP_NAME}.png"
 fi
 
-# 5. Generate DEBIAN/control file
-echo "[5/6] Generating DEBIAN/control file and Desktop entry..."
+# 6. Generate DEBIAN/control file
+echo "[6/7] Generating DEBIAN/control file and Desktop entry..."
 cat <<EOF > "${CONTROL_DIR}/control"
 Package: ${APP_NAME}
 Version: ${VERSION}
@@ -199,9 +298,9 @@ EOF
 chmod 644 "${APP_DIR}/${APP_NAME}.desktop"
 chmod 644 "${CONTROL_DIR}/control"
 
-# 6. Build .deb package and portable ZIP
+# 7. Build .deb package and portable ZIP
 DEB_FILE="${DISPLAY_NAME}_${VERSION}_${ARCH}.deb"
-echo "[6/6] Building native .deb package: ${DEB_FILE}..."
+echo "[7/7] Building native .deb package: ${DEB_FILE}..."
 dpkg-deb -z1 --root-owner-group --build "$DEB_DIR" "$DEB_FILE"
 rm -rf "$DEB_DIR"
 

@@ -1,6 +1,6 @@
 name: proximap
 base: core24
-version: '1.4.0'
+version: '1.5.0'
 summary: 3D Scene Reconstruction & Photogrammetry Desktop Dashboard
 description: |
   Proximap is an intuitive, high-performance desktop application for photogrammetry 

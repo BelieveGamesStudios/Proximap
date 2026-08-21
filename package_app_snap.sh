@@ -5,7 +5,7 @@
 set -e
 
 APP_NAME="proximap"
-VERSION="1.4.0"
+VERSION="1.5.0"
 SNAP_FILE="${APP_NAME}_${VERSION}_amd64.snap"
 
 echo "=========================================================="

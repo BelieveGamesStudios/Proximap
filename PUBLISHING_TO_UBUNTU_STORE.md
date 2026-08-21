@@ -40,7 +40,7 @@ Create `snap/snapcraft.yaml` with the following content:
 ```yaml
 name: proximap
 base: core22
-version: '1.4.0'
+version: '1.5.0'
 summary: 3D Scene Reconstruction & Photogrammetry Desktop App
 description: |
   Proximap is a high-performance desktop application for photogrammetry 
@@ -79,7 +79,7 @@ Run the automated Snapcraft build script:
 chmod +x package_app_snap.sh
 ./package_app_snap.sh
 ```
-This produces `proximap_1.4.0_amd64.snap`.
+This produces `proximap_1.5.0_amd64.snap`.
 
 ---
 
@@ -87,7 +87,7 @@ This produces `proximap_1.4.0_amd64.snap`.
 
 Install your `.snap` package locally to test execution:
 ```bash
-sudo snap install --dangerous proximap_1.4.0_amd64.snap
+sudo snap install --dangerous proximap_1.5.0_amd64.snap
 ```
 
 Launch the app to verify GUI rendering and functionality:
@@ -103,12 +103,12 @@ Upload the package to the Snap Store:
 
 1. **Publish to `beta` channel first (recommended for testing)**:
    ```bash
-   snapcraft upload --release=beta proximap-photogrammetry-app_1.4.0_amd64.snap
+   snapcraft upload --release=beta proximap-photogrammetry-app_1.5.0_amd64.snap
    ```
 
 2. **Promote / Release to `stable` channel (Public Store)**:
    ```bash
-   snapcraft upload --release=stable proximap-photogrammetry-app_1.4.0_amd64.snap
+   snapcraft upload --release=stable proximap-photogrammetry-app_1.5.0_amd64.snap
    ```
 
 ---

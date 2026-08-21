@@ -421,6 +421,27 @@ class PipelineWorker(QThread):
         env.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
         return env
 
+    def _get_safe_env(self) -> dict:
+        """
+        Build a sanitized subprocess environment with safe thread count and GPU settings.
+        Used by OpenMVS tools and auxiliary pipeline workers.
+        """
+        env = os.environ.copy()
+        mem_budget = get_memory_budget()
+        num_threads = mem_budget.safe_thread_count
+        env["OMP_NUM_THREADS"] = str(num_threads)
+        if self.gpu_mode == "force_cpu":
+            env["CUDA_VISIBLE_DEVICES"] = ""
+        elif self.gpu_mode != "force_gpu":
+            # auto
+            try:
+                parent_has_dgpu = self.parent().dgpu_detected if self.parent() else False
+            except Exception:
+                parent_has_dgpu = False
+            if not parent_has_dgpu:
+                env["CUDA_VISIBLE_DEVICES"] = ""
+        return env
+
     def _run_process_realtime(self, cmd: list, timeout: float, cwd=None, env=None, line_parser=None) -> bool:
         """
         Runs a subprocess and streams its stdout/stderr to the console log in real time.
@@ -2627,6 +2648,227 @@ class CleanupAndTextureWorker(PipelineWorker):
             import traceback
             self.log_message.emit(traceback.format_exc())
             self.finished.emit(False, str(e))
+
+
+class MeshOperationWorker(QThread):
+    """
+    Dedicated worker thread for executing isolated mesh operations:
+    Cleanup, Merge Close Vertices, and Taubin Smoothing.
+    """
+    status_changed   = Signal(str)
+    progress_changed = Signal(int)
+    log_message      = Signal(str)
+    finished         = Signal(bool, str, str)  # (success, output_ply_path, summary_msg)
+
+    def __init__(self, operation: str, input_ply: str, output_ply: str, params: dict = None, parent=None):
+        super().__init__(parent)
+        self.operation  = operation
+        self.input_ply  = input_ply
+        self.output_ply = output_ply
+        self.params     = params or {}
+
+    def run(self):
+        try:
+            from mesh_cleanup import get_backend
+            backend = get_backend()
+            self.status_changed.emit(f"Running {self.operation} via {backend.name}...")
+            self.progress_changed.emit(15)
+
+            if not os.path.isfile(self.input_ply):
+                err = f"Input mesh file not found: {self.input_ply}"
+                self.log_message.emit(f"[ERROR] {err}")
+                self.finished.emit(False, "", err)
+                return
+
+            self.progress_changed.emit(30)
+            ok = False
+            op_label = ""
+
+            if self.operation == "cleanup":
+                op_label = "Mesh Cleanup"
+                ok = backend.cleanup(
+                    self.input_ply,
+                    self.output_ply,
+                    log_callback=self.log_message.emit,
+                    cleanup_params=self.params
+                )
+            elif self.operation == "merge_by_distance":
+                op_label = "Merge Vertices"
+                threshold_pct = float(self.params.get("threshold_pct", 1.0))
+                bbox_diagonal = float(self.params.get("bbox_diagonal", 0.0))
+                ok = backend.merge_by_distance(
+                    self.input_ply,
+                    self.output_ply,
+                    threshold_pct=threshold_pct,
+                    bbox_diagonal=bbox_diagonal,
+                    log_callback=self.log_message.emit
+                )
+            elif self.operation == "smooth_taubin":
+                op_label = "Smooth Mesh"
+                lambda_factor = float(self.params.get("lambda_factor", 0.5))
+                mu_factor = self.params.get("mu_factor", None)
+                if mu_factor is not None:
+                    mu_factor = float(mu_factor)
+                iterations = int(self.params.get("iterations", 10))
+                ok = backend.smooth_taubin(
+                    self.input_ply,
+                    self.output_ply,
+                    lambda_factor=lambda_factor,
+                    mu_factor=mu_factor,
+                    iterations=iterations,
+                    log_callback=self.log_message.emit
+                )
+            else:
+                err = f"Unknown mesh operation: {self.operation}"
+                self.log_message.emit(f"[ERROR] {err}")
+                self.finished.emit(False, "", err)
+                return
+
+            self.progress_changed.emit(90)
+            if ok and os.path.isfile(self.output_ply) and os.path.getsize(self.output_ply) > 0:
+                self.progress_changed.emit(100)
+                self.status_changed.emit(f"{op_label} Complete")
+                self.finished.emit(True, self.output_ply, f"{op_label} completed successfully.")
+            else:
+                self.status_changed.emit(f"{op_label} Failed")
+                self.finished.emit(False, "", f"{op_label} did not produce a valid output mesh.")
+        except Exception as e:
+            self.log_message.emit(f"[ERROR] Mesh operation exception: {e}")
+            import traceback
+            self.log_message.emit(traceback.format_exc())
+            self.finished.emit(False, "", str(e))
+
+
+class RetextureOnlyWorker(PipelineWorker):
+    """
+    Dedicated worker thread for re-projecting OpenMVS textures onto a modified mesh.
+    Reuses the exact scene.mvs resolution logic from the reconstruction pipeline.
+    """
+    def __init__(self, output_dir: str, target_mesh_ply: str, custom_params: dict = None, quality_preset: str = "medium", parent=None):
+        super().__init__(
+            image_dir=None,
+            output_dir=output_dir,
+            quality_preset=quality_preset,
+            gpu_mode="auto",
+            has_plain_surfaces=False,
+            auto_cleanup=False,
+            mapper_mode="incremental",
+            ref_cloud_path=None,
+            mesh_mode="default",
+            poisson_depth=9,
+            custom_params=custom_params or {},
+            resume_from_step=None,
+            parent=parent
+        )
+        self.target_mesh_ply = target_mesh_ply
+
+    def run(self):
+        try:
+            self.status_changed.emit("Initializing Texture Projection...")
+            self.progress_changed.emit(10)
+
+            has_binaries = self._verify_binaries()
+            mvs_out = self.output_dir if os.path.basename(self.output_dir) == "mvs" else os.path.join(self.output_dir, "mvs")
+            base_dir = get_base_dir()
+            env = self._get_safe_env()
+
+            if not os.path.exists(mvs_out):
+                self.log_message.emit(f"[ERROR] MVS directory does not exist: {mvs_out}")
+                self.finished.emit(False, "MVS directory not found.")
+                return
+
+            # Determine texture input scene using standard pipeline resolution
+            texture_input_scene = "scene.mvs"
+            for scene_cand in ["scene_dense_mesh_refine.mvs", "scene_dense.mvs", "scene.mvs"]:
+                if os.path.exists(os.path.join(mvs_out, scene_cand)):
+                    texture_input_scene = scene_cand
+                    break
+
+            scene_mvs_path = os.path.join(mvs_out, texture_input_scene)
+            if not os.path.isfile(scene_mvs_path):
+                self.log_message.emit(f"[ERROR] Required reconstruction scene ({texture_input_scene}) not found in: {mvs_out}")
+                self.finished.emit(False, f"Required project file '{texture_input_scene}' not found on disk.")
+                return
+
+            texture_mesh_input = self.target_mesh_ply
+            if os.path.isabs(texture_mesh_input):
+                # Copy or use relative to mvs_out
+                rel = os.path.relpath(texture_mesh_input, mvs_out)
+                if not rel.startswith(".."):
+                    texture_mesh_input = rel
+
+            texture_res = "1"
+            if self.custom_params and "texture_res" in self.custom_params:
+                texture_res = str(self.custom_params["texture_res"])
+            elif self.quality_preset == "preview":
+                texture_res = "2"
+            elif self.quality_preset == "ultra":
+                texture_res = "0"
+
+            if has_binaries and "openMVS" in self.toolchain_map and "TextureMesh" in self.toolchain_map["openMVS"]:
+                mvs_texture_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["TextureMesh"])
+                cmd_ply = [
+                    mvs_texture_exe,
+                    texture_input_scene,
+                    "-m",                    texture_mesh_input,
+                    "-o",                    "scene_dense_mesh_texture.mvs",
+                    "--resolution-level",    texture_res,
+                    "--cost-smoothness-ratio", "0.1",
+                    "--empty-color",         "0",
+                    "--local-seam-leveling",  "0",
+                    "--global-seam-leveling", "0",
+                ]
+                self.status_changed.emit("Projecting Textures (PLY pass)...")
+                self.progress_changed.emit(30)
+                self.log_message.emit(f"[RUN] Texturing PLY: {' '.join(cmd_ply)}")
+                texture_ply_ok = self._run_process_realtime(cmd_ply, timeout=1800.0, cwd=mvs_out, env=env)
+
+                self.progress_changed.emit(70)
+                if texture_ply_ok:
+                    cmd_obj = [
+                        mvs_texture_exe,
+                        texture_input_scene,
+                        "-m",                    texture_mesh_input,
+                        "-o",                    "scene_dense_mesh_texture.obj",
+                        "--export-type",         "obj",
+                        "--resolution-level",    texture_res,
+                        "--cost-smoothness-ratio", "0.1",
+                        "--empty-color",         "0",
+                        "--local-seam-leveling",  "0",
+                        "--global-seam-leveling", "0",
+                    ]
+                    self.status_changed.emit("Exporting Textured OBJ...")
+                    self.log_message.emit(f"[RUN] Texturing OBJ: {' '.join(cmd_obj)}")
+                    self._run_process_realtime(cmd_obj, timeout=1800.0, cwd=mvs_out, env=env)
+
+                    # Auto-export GLB via trimesh
+                    try:
+                        import trimesh
+                        obj_file = os.path.join(mvs_out, "scene_dense_mesh_texture.obj")
+                        glb_file = os.path.join(mvs_out, "scene_dense_mesh_texture.glb")
+                        if os.path.exists(obj_file):
+                            self.log_message.emit("[INFO] Pre-generating textured GLB mesh...")
+                            mesh_obj = trimesh.load(obj_file)
+                            mesh_obj.export(glb_file, file_type="glb")
+                            self.log_message.emit(f"[SUCCESS] GLB mesh successfully generated: {os.path.basename(glb_file)}")
+                    except Exception as e:
+                        self.log_message.emit(f"[WARNING] Automatic GLB conversion from OBJ skipped: {e}")
+
+                    self.progress_changed.emit(100)
+                    self.status_changed.emit("Texture Projection Complete")
+                    self.finished.emit(True, "Mesh retexturing completed successfully.")
+                else:
+                    self.log_message.emit("[WARNING] TextureMesh PLY pass failed.")
+                    self.finished.emit(False, "TextureMesh execution failed.")
+            else:
+                self.log_message.emit("[WARNING] OpenMVS TextureMesh binary not found.")
+                self.finished.emit(False, "OpenMVS TextureMesh binary not found.")
+        except Exception as e:
+            self.log_message.emit(f"[ERROR] Retexture worker failed: {e}")
+            import traceback
+            self.log_message.emit(traceback.format_exc())
+            self.finished.emit(False, str(e))
+
 
 
 
