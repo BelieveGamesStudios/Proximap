@@ -151,7 +151,7 @@ class Gizmo:
 
     def __init__(self):
         self.operation = "translate"   # "translate" | "rotate" | "scale"
-        self.space     = "local"       # "local"     | "global"
+        self.space     = "global"      # "local"     | "global"
 
         self.use_snapping      = False
         self.snap_translation  = 0.5
@@ -362,17 +362,19 @@ class Gizmo:
         ax_names   = ['axis_x', 'axis_y', 'axis_z']
         ax_orients = [Rx, Ry, Rz]
         ax_cols    = [self.COL_X, self.COL_Y, self.COL_Z]
+        active     = self.active_handle
 
-        # ---- shafts (lines) ----
-        gl.glBindVertexArray(self._line_vao)
+        # ---- shafts (lines) & arrowheads (cones) ----
         for name, ori, col in zip(ax_names, ax_orients, ax_cols):
+            if active is not None and active != name:
+                continue
+            # shaft
+            gl.glBindVertexArray(self._line_vao)
             self._set_color(self._active_col(name, col))
             self._set_model(self._build_model(obj, sf, ori))
             gl.glDrawArrays(gl.GL_LINES, 0, 2)
-
-        # ---- arrowheads (cones) ----
-        gl.glBindVertexArray(self._cone_vao)
-        for name, ori, col in zip(ax_names, ax_orients, ax_cols):
+            # cone arrowhead
+            gl.glBindVertexArray(self._cone_vao)
             self._set_color(self._active_col(name, col))
             self._set_model(self._build_model(obj, sf, ori, TIP))
             gl.glDrawElements(gl.GL_TRIANGLES, self._CONE_TRIS, gl.GL_UNSIGNED_INT, None)
@@ -386,62 +388,72 @@ class Gizmo:
             np.array([0.85, 0.15, 0.15, 0.28], dtype=np.float32),  # YZ ≈ red (X perp)
         ]
 
-        gl.glEnable(gl.GL_BLEND)
-        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
-        gl.glBindVertexArray(self._plane_vao)
-        for name, ori, fill in zip(pl_names, pl_orients, pl_fills):
-            model = self._build_model(obj, sf, ori)
-            self._set_model(model)
-            # filled quad
-            hover_fill = np.array([1.0, 0.9, 0.0, 0.55], dtype=np.float32)
-            self._set_color(hover_fill if self.is_handle_active_or_hovered(name) else fill)
-            gl.glDrawElements(gl.GL_TRIANGLES, self._PLANE_TRIS, gl.GL_UNSIGNED_INT, None)
-            # outline
-            outline = self.COL_HOVER if self.is_handle_active_or_hovered(name) else np.array([*fill[:3], 1.0], dtype=np.float32)
-            self._set_color(outline)
-            gl.glDrawArrays(gl.GL_LINE_LOOP, 0, 4)
-        gl.glDisable(gl.GL_BLEND)
+        if active is None or active.startswith('plane_'):
+            gl.glEnable(gl.GL_BLEND)
+            gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+            gl.glBindVertexArray(self._plane_vao)
+            for name, ori, fill in zip(pl_names, pl_orients, pl_fills):
+                if active is not None and active != name:
+                    continue
+                model = self._build_model(obj, sf, ori)
+                self._set_model(model)
+                # filled quad
+                hover_fill = np.array([1.0, 0.9, 0.0, 0.55], dtype=np.float32)
+                self._set_color(hover_fill if self.is_handle_active_or_hovered(name) else fill)
+                gl.glDrawElements(gl.GL_TRIANGLES, self._PLANE_TRIS, gl.GL_UNSIGNED_INT, None)
+                # outline
+                outline = self.COL_HOVER if self.is_handle_active_or_hovered(name) else np.array([*fill[:3], 1.0], dtype=np.float32)
+                self._set_color(outline)
+                gl.glDrawArrays(gl.GL_LINE_LOOP, 0, 4)
+            gl.glDisable(gl.GL_BLEND)
 
     def _draw_scale(self, obj, sf, Rx, Ry, Rz, TIP):
         ax_names   = ['axis_x', 'axis_y', 'axis_z']
         ax_orients = [Rx, Ry, Rz]
         ax_cols    = [self.COL_X, self.COL_Y, self.COL_Z]
+        active     = self.active_handle
 
-        # shafts
-        gl.glBindVertexArray(self._line_vao)
         for name, ori, col in zip(ax_names, ax_orients, ax_cols):
+            if active is not None and active != name:
+                continue
+            # shaft
+            gl.glBindVertexArray(self._line_vao)
             self._set_color(self._active_col(name, col))
             self._set_model(self._build_model(obj, sf, ori))
             gl.glDrawArrays(gl.GL_LINES, 0, 2)
-
-        # cube tips
-        gl.glBindVertexArray(self._cube_vao)
-        for name, ori, col in zip(ax_names, ax_orients, ax_cols):
+            # cube tip
+            gl.glBindVertexArray(self._cube_vao)
             self._set_color(self._active_col(name, col))
             self._set_model(self._build_model(obj, sf, ori, TIP))
             gl.glDrawElements(gl.GL_TRIANGLES, self._CUBE_TRIS, gl.GL_UNSIGNED_INT, None)
 
         # centre uniform-scale cube
-        self._set_color(self._active_col('center', self.COL_WHITE))
-        self._set_model(self._build_model(obj, sf))
-        gl.glDrawElements(gl.GL_TRIANGLES, self._CUBE_TRIS, gl.GL_UNSIGNED_INT, None)
+        if active is None or active == 'center':
+            gl.glBindVertexArray(self._cube_vao)
+            self._set_color(self._active_col('center', self.COL_WHITE))
+            self._set_model(self._build_model(obj, sf))
+            gl.glDrawElements(gl.GL_TRIANGLES, self._CUBE_TRIS, gl.GL_UNSIGNED_INT, None)
 
     def _draw_rotate(self, obj, camera, sf, Rx, Ry, Rz):
         ring_names   = ['ring_x', 'ring_y', 'ring_z']
         ring_orients = [Rx, Ry, Rz]
         ring_cols    = [self.COL_X, self.COL_Y, self.COL_Z]
+        active       = self.active_handle
 
         gl.glBindVertexArray(self._circle_vao)
         for name, ori, col in zip(ring_names, ring_orients, ring_cols):
+            if active is not None and active != name:
+                continue
             self._set_color(self._active_col(name, col))
             self._set_model(self._build_model(obj, sf, ori))
             gl.glDrawArrays(gl.GL_LINE_LOOP, 0, 64)
 
         # camera-facing outer ring (always global orientation)
-        outer_col = self._active_col('ring_outer', np.array([0.9, 0.9, 0.9, 0.85], dtype=np.float32))
-        self._set_color(outer_col)
-        self._set_model(self._outer_ring_model(obj, camera, sf))
-        gl.glDrawArrays(gl.GL_LINE_LOOP, 0, 64)
+        if active is None or active == 'ring_outer':
+            outer_col = self._active_col('ring_outer', np.array([0.9, 0.9, 0.9, 0.85], dtype=np.float32))
+            self._set_color(outer_col)
+            self._set_model(self._outer_ring_model(obj, camera, sf))
+            gl.glDrawArrays(gl.GL_LINE_LOOP, 0, 64)
 
     def _outer_ring_model(self, obj, camera, sf) -> np.ndarray:
         """Build a camera-facing ring model (global space, scale 1.15)."""

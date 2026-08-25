@@ -741,23 +741,23 @@ class MeshEditorWidget(QWidget):
         line.setStyleSheet("background-color: #333333; margin: 4px;")
         toolbar_layout.addWidget(line)
         
-        # Space Toggle Button (Defaults to Local)
-        self.btn_tool_space = QPushButton("Local", self.trans_toolbar)
-        self.btn_tool_space.setToolTip("Transform Space: Local (Click to toggle)")
+        # Space Toggle Button (Defaults to Global)
+        self.btn_tool_space = QPushButton("Global", self.trans_toolbar)
+        self.btn_tool_space.setToolTip("Transform Space: Global (Click to toggle)")
         self.btn_tool_space.setStyleSheet("""
             QPushButton {
                 font-size: 10px;
                 font-weight: bold;
                 padding: 6px 2px;
                 background-color: #2D2D2D;
-                color: #00E676;
+                color: #ffffff;
                 border: 1px solid #444444;
                 border-radius: 4px;
                 margin: 4px;
             }
             QPushButton:hover {
                 background-color: #3D3D3D;
-                border-color: #00E676;
+                border-color: #ffffff;
             }
         """)
         toolbar_layout.addWidget(self.btn_tool_space)
