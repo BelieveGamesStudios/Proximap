@@ -12,7 +12,7 @@ from PySide6.QtCore import QThread, Signal
 log = logging.getLogger("mobile_bridge_server")
 
 _FIREWALL_RULE_PREFIX = "ProximapMobileBridge"
-_MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".mp4", ".mov", ".m4v", ".avi", ".mkv"}
+_MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".mp4", ".mov", ".m4v", ".avi", ".mkv", ".ply"}
 _ZIP_MAX_FILES = 500
 _ZIP_MAX_BYTES = 4 * 1024 * 1024 * 1024  # 4 GB limit
 
@@ -607,10 +607,10 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
                 </div>
                 <div class="picker-title">Drag & Drop or Click to Browse</div>
                 <div class="picker-subtitle">
-                    Supports <strong>.jpg</strong>, <strong>.jpeg</strong>, <strong>.png</strong>, <strong>.heic</strong>, <strong>.mp4</strong>, <strong>.mov</strong>, <strong>.zip</strong> files to send directly to desktop.
+                    Supports <strong>.jpg</strong>, <strong>.jpeg</strong>, <strong>.png</strong>, <strong>.heic</strong>, <strong>.mp4</strong>, <strong>.mov</strong>, <strong>.ply</strong>, <strong>.zip</strong> files to send directly to desktop.
                 </div>
             </div>
-            <input type="file" id="fileInput" multiple accept="image/*,video/*,.zip,application/zip,application/x-zip-compressed" onchange="handleFilesSelected(this.files)">
+            <input type="file" id="fileInput" multiple accept="image/*,video/*,.ply,.zip,application/zip,application/x-zip-compressed" onchange="handleFilesSelected(this.files)">
 
             <div id="previewContainer" style="display: none;">
                 <div class="grid-header">
@@ -628,7 +628,7 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
                     <line x1="12" y1="8" x2="12.01" y2="8"></line>
                 </svg>
                 <div class="info-text">
-                    Select photos, videos, or a .zip archive from your device. Zip archives will be automatically extracted directly to your active Proximap project.
+                    Select photos, videos, a point cloud (.ply), or a .zip archive from your device. Zip archives will be automatically extracted directly to your active Proximap project.
                 </div>
             </div>
         </div>
@@ -647,7 +647,7 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
                 </svg>
             </div>
             <h2>Transfer Complete!</h2>
-            <p>Your media files were successfully sent to Proximap on your desktop.</p>
+            <p>Your files were successfully sent to Proximap on your desktop.</p>
         </div>
     </div>
 
@@ -718,6 +718,19 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
                     const badge = document.createElement('span');
                     badge.className = 'video-badge';
                     badge.innerText = 'ZIP ARCHIVE';
+                    item.appendChild(badge);
+                } else if (file.name.toLowerCase().endsWith('.ply')) {
+                    const plyDiv = document.createElement('div');
+                    plyDiv.className = 'zip-card';
+                    plyDiv.innerHTML = `
+                        <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zm0 9l-10-5 10-5 10 5-10 5zm0 2l-10-5 10-5 10 5-10 5z"/></svg>
+                        <div class="zip-name">${file.name}</div>
+                    `;
+                    item.appendChild(plyDiv);
+
+                    const badge = document.createElement('span');
+                    badge.className = 'video-badge';
+                    badge.innerText = 'POINT CLOUD';
                     item.appendChild(badge);
                 } else if (file.type.startsWith('image/') || /\\.(heic|heif|jpg|jpeg|png|webp)$/i.test(file.name)) {
                     const img = document.createElement('img');

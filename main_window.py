@@ -4630,14 +4630,8 @@ class MainWindow(QMainWindow):
     #     self.ref_cloud_container.setVisible(False)
     #     self.console_text.append("[REF_CLOUD] Reference cloud selection cleared.")
 
-    def _import_standalone_cloud_clicked(self):
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Import Point Cloud",
-            self.last_accessed_dir,
-            "Point Cloud Files (*.ply)"
-        )
-        if not file_path:
+    def _load_standalone_point_cloud(self, file_path: str):
+        if not file_path or not os.path.exists(file_path):
             return
 
         self.last_accessed_dir = os.path.dirname(file_path)
@@ -4671,6 +4665,17 @@ class MainWindow(QMainWindow):
             lambda err: self.console_text.append(f"[WARNING] Background cloud load warning: {err}")
         )
         self._cloud_import_worker.start()
+
+    def _import_standalone_cloud_clicked(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Point Cloud",
+            self.last_accessed_dir,
+            "Point Cloud Files (*.ply)"
+        )
+        if not file_path:
+            return
+        self._load_standalone_point_cloud(file_path)
 
     def _clear_standalone_cloud_clicked(self):
         self.standalone_cloud_path = None
@@ -8036,6 +8041,7 @@ class MainWindow(QMainWindow):
         if files:
             images = []
             videos = []
+            ply_files = []
             for f in files:
                 normalized = os.path.normpath(f)
                 ext = os.path.splitext(normalized)[1].lower()
@@ -8043,8 +8049,15 @@ class MainWindow(QMainWindow):
                     images.append(normalized)
                 elif ext in VIDEO_EXTS:
                     videos.append(normalized)
+                elif ext == '.ply':
+                    ply_files.append(normalized)
             
-            self._route_import(images, videos, append_to_existing=True)
+            if ply_files:
+                self._load_standalone_point_cloud(ply_files[0])
+                if len(ply_files) > 1:
+                    self.console_text.append(f"[MOBILE BRIDGE] Note: Multiple .ply files received. Loaded first: {os.path.basename(ply_files[0])}")
+            if images or videos:
+                self._route_import(images, videos, append_to_existing=True)
 
     def _on_mobile_server_error(self, err_msg: str):
         self.console_text.append(f"[MOBILE BRIDGE ERROR] {err_msg}")
@@ -8330,7 +8343,7 @@ class MobileImportSetupDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(12)
 
-        lbl = QLabel("Choose where to save imported images/videos on your PC:", self)
+        lbl = QLabel("Choose where to save imported media / point clouds on your PC:", self)
         lbl.setStyleSheet("font-size: 12px; font-weight: bold;")
         layout.addWidget(lbl)
 
