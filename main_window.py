@@ -167,8 +167,8 @@ def is_session_backup_valid() -> bool:
 
 
 
-from PySide6.QtCore import Qt, QSize, Signal, QTimer, QThread
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QFont, QWindow, QPixmap, QImage
+from PySide6.QtCore import Qt, QSize, Signal, QTimer, QThread, QRectF
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QFont, QWindow, QPixmap, QImage, QPainter, QColor, QPen
 
 import hardware_profiler
 
@@ -671,20 +671,20 @@ class DragDropArea(QFrame):
                     for filename in filenames:
                         fp = os.path.join(root, filename)
                         ext = os.path.splitext(filename)[1].lower()
-                        if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
+                        if ext in IMAGE_EXTS or ext in VIDEO_EXTS or ext == '.ply':
                             files.append(os.path.normpath(fp))
                         else:
                             ignored.append(filename)
             elif os.path.isfile(local_path):
                 ext = os.path.splitext(local_path)[1].lower()
-                if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
+                if ext in IMAGE_EXTS or ext in VIDEO_EXTS or ext == '.ply':
                     files.append(os.path.normpath(local_path))
                 else:
                     ignored.append(os.path.basename(local_path))
                     
         if ignored:
             from PySide6.QtWidgets import QMessageBox
-            msg = "The following files were ignored because they are not supported images or videos:\n\n"
+            msg = "The following files were ignored because they are not supported images, videos, or .ply point clouds:\n\n"
             if len(ignored) > 10:
                 msg += "\n".join(ignored[:10]) + f"\n... and {len(ignored) - 10} more files."
             else:
@@ -1858,20 +1858,20 @@ class ViewerWrapperWidget(QFrame):
                     for filename in filenames:
                         fp = os.path.join(root, filename)
                         ext = os.path.splitext(filename)[1].lower()
-                        if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
+                        if ext in IMAGE_EXTS or ext in VIDEO_EXTS or ext == '.ply':
                              files.append(os.path.normpath(fp))
                         else:
                              ignored.append(filename)
             elif os.path.isfile(local_path):
                 ext = os.path.splitext(local_path)[1].lower()
-                if ext in IMAGE_EXTS or ext in VIDEO_EXTS:
+                if ext in IMAGE_EXTS or ext in VIDEO_EXTS or ext == '.ply':
                     files.append(os.path.normpath(local_path))
                 else:
                     ignored.append(os.path.basename(local_path))
                     
         if ignored:
             from PySide6.QtWidgets import QMessageBox
-            msg = "The following files were ignored because they are not supported images or videos:\n\n"
+            msg = "The following files were ignored because they are not supported images, videos, or .ply point clouds:\n\n"
             if len(ignored) > 10:
                 msg += "\n".join(ignored[:10]) + f"\n... and {len(ignored) - 10} more files."
             else:
@@ -2048,6 +2048,36 @@ class LoadWorker(QThread):
             self.finished.emit(False, "", str(e))
 
 
+def create_point_cloud_thumbnail(size, filename=""):
+    pix = QPixmap(size, size)
+    pix.fill(Qt.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.Antialiasing)
+    
+    # Background rounded rect with emerald border and dark bg
+    painter.setBrush(QColor(22, 34, 28))
+    painter.setPen(QPen(QColor(0, 230, 118, 200), 1.5))
+    margin = 4
+    painter.drawRoundedRect(margin, margin, size - margin * 2, size - margin * 2, 6, 6)
+    
+    # Text badge
+    painter.setPen(QColor("#00E676"))
+    font = painter.font()
+    font.setPointSize(max(10, size // 6))
+    font.setBold(True)
+    painter.setFont(font)
+    painter.drawText(QRectF(0, size * 0.22, size, size * 0.35), Qt.AlignCenter, "☁ PLY")
+    
+    font.setPointSize(max(7, size // 11))
+    font.setBold(False)
+    painter.setFont(font)
+    painter.setPen(QColor("#A5D6A7"))
+    painter.drawText(QRectF(0, size * 0.58, size, size * 0.25), Qt.AlignCenter, "Point Cloud")
+    
+    painter.end()
+    return pix
+
+
 class ThumbnailWorker(QThread):
     """
     Background worker that loads and scales images to QImage asynchronously.
@@ -2065,6 +2095,10 @@ class ThumbnailWorker(QThread):
         for path in self.file_paths:
             if not self._is_running:
                 break
+            if path.lower().endswith('.ply'):
+                pix = create_point_cloud_thumbnail(self.target_size, os.path.basename(path))
+                self.thumbnail_loaded.emit(path, pix.toImage())
+                continue
             # Load the image using QImage (which is thread-safe for background loading/scaling)
             image = QImage(path)
             if not image.isNull():
@@ -2083,15 +2117,16 @@ class ThumbnailWorker(QThread):
 
 class PhotoItemWidget(QWidget):
     """
-    Individual photo thumbnail card display with a selection checkbox.
+    Individual photo / dataset thumbnail card display with a selection checkbox.
     Supports a placeholder initially and lazy updates.
     """
-    def __init__(self, file_path, size, pixmap=None, parent=None):
+    def __init__(self, file_path, size, pixmap=None, parent=None, parent_grid=None):
         super().__init__(parent)
         self.file_path = file_path
         self.size = size
         self.selected = False
         self.pixmap = pixmap
+        self.parent_grid = parent_grid
         self.init_ui()
         
     def init_ui(self):
@@ -2124,6 +2159,9 @@ class PhotoItemWidget(QWidget):
         
         if self.pixmap is not None:
             self.image_label.setPixmap(self.pixmap)
+        elif self.file_path.lower().endswith('.ply'):
+            pix = create_point_cloud_thumbnail(self.size, os.path.basename(self.file_path))
+            self.image_label.setPixmap(pix)
         else:
             # Show a loading placeholder state
             self.image_label.setText("⏳")
@@ -2138,7 +2176,7 @@ class PhotoItemWidget(QWidget):
         
         self.checkbox = QCheckBox(self)
         self.checkbox.setFixedWidth(16)
-        self.checkbox.stateChanged.connect(self._on_check_changed)
+        self.checkbox.clicked.connect(self._on_checkbox_clicked)
         
         self.name_label = QLabel(os.path.basename(self.file_path), self)
         self.name_label.setStyleSheet("color: #cccccc; font-size: 10px;")
@@ -2155,19 +2193,37 @@ class PhotoItemWidget(QWidget):
         layout.addWidget(self.image_container)
         layout.addLayout(bottom_layout)
         
+    def _on_checkbox_clicked(self, checked):
+        from PySide6.QtWidgets import QApplication
+        modifiers = QApplication.keyboardModifiers()
+        if hasattr(self, 'parent_grid') and self.parent_grid:
+            self.parent_grid.handle_item_clicked(self, modifiers, target_checked=checked)
+        else:
+            self.set_checked(checked)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if hasattr(self, 'parent_grid') and self.parent_grid:
+                self.parent_grid.handle_item_clicked(self, event.modifiers())
+            else:
+                self.set_checked(not self.selected)
+        super().mousePressEvent(event)
+        
     def set_pixmap(self, pixmap):
         self.pixmap = pixmap
         if not pixmap.isNull():
             self.image_label.setText("")
             self.image_label.setStyleSheet("")
             self.image_label.setPixmap(pixmap)
+        elif self.file_path.lower().endswith('.ply'):
+            pix = create_point_cloud_thumbnail(self.size, os.path.basename(self.file_path))
+            self.image_label.setPixmap(pix)
         else:
             self.image_label.setPixmap(QPixmap())
             self.image_label.setText("⚠️")
             self.image_label.setStyleSheet("font-size: 20px; color: #ff1744;")
             
-    def _on_check_changed(self, state):
-        self.selected = (state == Qt.Checked.value or state == 2)
+    def _update_style(self):
         if self.selected:
             self.image_container.setStyleSheet("QFrame#ImageContainer { border: 2px solid #00E676; border-radius: 4px; background-color: #213328; }")
         else:
@@ -2181,14 +2237,19 @@ class PhotoItemWidget(QWidget):
                     border-color: #00E676;
                 }
             """)
-            
+
     def set_checked(self, checked):
-        self.checkbox.setChecked(checked)
+        self.selected = bool(checked)
+        self.checkbox.blockSignals(True)
+        self.checkbox.setChecked(self.selected)
+        self.checkbox.blockSignals(False)
+        self._update_style()
 
 
 class PhotosGridWidget(QWidget):
     """
     Grid container that dynamically arranges PhotoItemWidgets depending on container width.
+    Supports Shift+Click range selection and single-item toggles.
     """
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2200,6 +2261,7 @@ class PhotosGridWidget(QWidget):
         self.thumbnail_size = 100
         self.item_widgets = {}  # Map path -> PhotoItemWidget for dynamic updates
         self.current_cols = 0
+        self.last_clicked_index = None
         
     def set_images(self, image_paths):
         self.image_paths = image_paths
@@ -2215,11 +2277,29 @@ class PhotosGridWidget(QWidget):
                 widget.deleteLater()
         self.image_items.clear()
         self.item_widgets.clear()
+        self.last_clicked_index = None
         
+    def handle_item_clicked(self, item_widget, modifiers, target_checked=None):
+        try:
+            current_idx = self.image_items.index(item_widget)
+        except ValueError:
+            return
+
+        if (modifiers & Qt.ShiftModifier) and self.last_clicked_index is not None and 0 <= self.last_clicked_index < len(self.image_items):
+            start = min(self.last_clicked_index, current_idx)
+            end = max(self.last_clicked_index, current_idx)
+            for i in range(start, end + 1):
+                self.image_items[i].set_checked(True)
+        else:
+            new_state = target_checked if target_checked is not None else (not item_widget.selected)
+            item_widget.set_checked(new_state)
+            self.last_clicked_index = current_idx
+
     def rebuild_grid(self, force=False):
         if not self.image_paths:
             self.clear_grid()
             self.current_cols = 0
+            self.last_clicked_index = None
             return
             
         width = self.width()
@@ -2256,7 +2336,7 @@ class PhotosGridWidget(QWidget):
             
             for idx, path in enumerate(self.image_paths):
                 pixmap = cache.get(path)
-                item_widget = PhotoItemWidget(path, self.thumbnail_size, pixmap, self)
+                item_widget = PhotoItemWidget(path, self.thumbnail_size, pixmap, self, parent_grid=self)
                 self.image_items.append(item_widget)
                 self.item_widgets[path] = item_widget
                 
@@ -2316,7 +2396,7 @@ class PhotosTabWidget(QWidget):
         
         self.btn_add_photos = QPushButton("", self.toolbar)
         self.btn_add_photos.setIcon(QIcon(os.path.join(public_dir, "folder.png")))
-        self.btn_add_photos.setToolTip("Add Photos")
+        self.btn_add_photos.setToolTip("Add Files to Dataset (Images, Videos, Point Cloud)")
         self.btn_add_photos.setStyleSheet("QPushButton { padding: 4px 8px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
         
         # Thumbnail size slider
@@ -2416,6 +2496,7 @@ class PhotosTabWidget(QWidget):
     def deselect_all(self):
         for item in self.grid_widget.image_items:
             item.set_checked(False)
+        self.grid_widget.last_clicked_index = None
             
     def get_selected_images(self):
         selected = []
@@ -2777,7 +2858,7 @@ class MainWindow(QMainWindow):
         title_layout = QVBoxLayout(title_container)
         title_layout.setContentsMargins(20, 20, 20, 10)
         
-        title_label = QLabel("Reconstruction Wizard", title_container)
+        title_label = QLabel("Workflow", title_container)
         title_label.setStyleSheet("font-size: 20px; font-weight: bold; color: #ffffff; padding-bottom: 10px; border-bottom: 1px solid #3d3d3d;")
         title_layout.addWidget(title_label)
         sidebar_layout.addWidget(title_container)
@@ -2918,7 +2999,6 @@ class MainWindow(QMainWindow):
         step1_layout.addWidget(self.addon_container)
         # step1_layout.addWidget(self.ref_cloud_btn)
         # step1_layout.addWidget(self.ref_cloud_container)
-        step1_layout.addWidget(self.standalone_cloud_container)
 
         scroll_content_layout.addWidget(step1_box)
         
@@ -3547,7 +3627,7 @@ class MainWindow(QMainWindow):
         console_layout.addWidget(self.console_text)
         
         # Add tabs
-        self.bottom_tabs.addTab(self.photos_tab, "Photos")
+        self.bottom_tabs.addTab(self.photos_tab, "Dataset")
         self.bottom_tabs.addTab(self.console_frame, "Console")
         
         right_layout.addWidget(self.bottom_tabs, stretch=2)
@@ -4329,23 +4409,28 @@ class MainWindow(QMainWindow):
         if not selected:
             return
         
-        # Filter out selected images
         selected_set = set(selected)
+        if self.standalone_cloud_path and self.standalone_cloud_path in selected_set:
+            self._clear_standalone_cloud_clicked()
+            return
+        
+        # Filter out selected images
         self.image_list = [f for f in self.image_list if f not in selected_set]
         
         # Refresh UI
         self._handle_dropped_images(self.image_list)
-        self.console_text.append(f"[INFO] Removed {len(selected)} selected image(s).")
+        self.console_text.append(f"[INFO] Removed {len(selected)} selected file(s).")
 
     def _add_photos_dialog(self):
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Select Images/Videos to Add", self.last_accessed_dir, 
-            "Supported Files (*.png *.jpg *.jpeg *.tif *.tiff *.mp4 *.mov *.avi *.mkv);;Image Files (*.png *.jpg *.jpeg *.tif *.tiff);;Video Files (*.mp4 *.mov *.avi *.mkv)"
+            self, "Select Images/Videos or Point Cloud to Add", self.last_accessed_dir, 
+            "Supported Files (*.png *.jpg *.jpeg *.tif *.tiff *.mp4 *.mov *.avi *.mkv *.ply);;Point Cloud Files (*.ply);;Image Files (*.png *.jpg *.jpeg *.tif *.tiff);;Video Files (*.mp4 *.mov *.avi *.mkv)"
         )
         if files:
             self.last_accessed_dir = os.path.dirname(files[0])
             images = []
             videos = []
+            ply_files = []
             ignored = []
             for f in files:
                 normalized = os.path.normpath(f)
@@ -4354,20 +4439,49 @@ class MainWindow(QMainWindow):
                     images.append(normalized)
                 elif ext in VIDEO_EXTS:
                     videos.append(normalized)
+                elif ext == '.ply':
+                    ply_files.append(normalized)
                 else:
                     ignored.append(os.path.basename(normalized))
             if ignored:
                 self._warn_ignored_files(ignored)
-            if images or videos:
+            if ply_files:
+                self._load_standalone_point_cloud(ply_files[0])
+                if len(ply_files) > 1:
+                    self.console_text.append(f"[INFO] Note: Multiple .ply files selected. Loaded first: {os.path.basename(ply_files[0])}")
+            elif images or videos:
                 self._route_import(images, videos, append_to_existing=True)
 
     def _open_files_dialog(self):
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Select Images/Videos", self.last_accessed_dir, 
-            "Supported Files (*.png *.jpg *.jpeg *.tif *.tiff *.mp4 *.mov *.avi *.mkv);;Image Files (*.png *.jpg *.jpeg *.tif *.tiff);;Video Files (*.mp4 *.mov *.avi *.mkv)"
+            self, "Select Images/Videos or Point Cloud", self.last_accessed_dir, 
+            "Supported Files (*.png *.jpg *.jpeg *.tif *.tiff *.mp4 *.mov *.avi *.mkv *.ply);;Point Cloud Files (*.ply);;Image Files (*.png *.jpg *.jpeg *.tif *.tiff);;Video Files (*.mp4 *.mov *.avi *.mkv)"
         )
         if files:
             self.last_accessed_dir = os.path.dirname(files[0])
+            images = []
+            videos = []
+            ply_files = []
+            ignored = []
+            for f in files:
+                normalized = os.path.normpath(f)
+                ext = os.path.splitext(normalized)[1].lower()
+                if ext in IMAGE_EXTS:
+                    images.append(normalized)
+                elif ext in VIDEO_EXTS:
+                    videos.append(normalized)
+                elif ext == '.ply':
+                    ply_files.append(normalized)
+                else:
+                    ignored.append(os.path.basename(normalized))
+            if ignored:
+                self._warn_ignored_files(ignored)
+            if ply_files:
+                self._load_standalone_point_cloud(ply_files[0])
+                if len(ply_files) > 1:
+                    self.console_text.append(f"[INFO] Note: Multiple .ply files selected. Loaded first: {os.path.basename(ply_files[0])}")
+            elif images or videos:
+                self._route_import(images, videos, append_to_existing=False)
             images = []
             videos = []
             ignored = []
@@ -4488,6 +4602,7 @@ class MainWindow(QMainWindow):
     def _on_files_dropped(self, files: list):
         images = []
         videos = []
+        ply_files = []
         for f in files:
             normalized = os.path.normpath(f)
             ext = os.path.splitext(normalized)[1].lower()
@@ -4495,11 +4610,17 @@ class MainWindow(QMainWindow):
                 images.append(normalized)
             elif ext in VIDEO_EXTS:
                 videos.append(normalized)
-        if images or videos:
+            elif ext == '.ply':
+                ply_files.append(normalized)
+        if ply_files:
+            self._load_standalone_point_cloud(ply_files[0])
+            if len(ply_files) > 1:
+                self.console_text.append(f"[INFO] Note: Multiple .ply files dropped. Loaded first: {os.path.basename(ply_files[0])}")
+        elif images or videos:
             self._route_import(images, videos, append_to_existing=False)
 
     def _warn_ignored_files(self, ignored: list):
-        msg = "The following files were ignored because they are not supported images or videos:\n\n"
+        msg = "The following files were ignored because they are not supported images, videos, or .ply point clouds:\n\n"
         if len(ignored) > 10:
             msg += "\n".join(ignored[:10]) + f"\n... and {len(ignored) - 10} more files."
         else:
@@ -4644,11 +4765,12 @@ class MainWindow(QMainWindow):
         peek_fn = getattr(point_cloud_io, "peek_has_colors", lambda path: True)
         has_colors = peek_fn(file_path)
 
-        # 2. Update UI immediately — no freeze
+        # 2. Update UI immediately — place point cloud in Dataset tab
         self.standalone_cloud_path = file_path
         filename = os.path.basename(file_path)
-        self.standalone_cloud_label.setText(f"✓ {filename}")
-        self.standalone_cloud_container.setVisible(True)
+        self.image_list = [file_path]
+        if hasattr(self, 'photos_tab'):
+            self.photos_tab.set_images([file_path])
         self._enter_standalone_mode(has_colors)
 
         # 3. Kick off viewer preview in background (non-blocking)
@@ -4679,17 +4801,18 @@ class MainWindow(QMainWindow):
 
     def _clear_standalone_cloud_clicked(self):
         self.standalone_cloud_path = None
-        self.standalone_cloud_label.setText("")
-        self.standalone_cloud_container.setVisible(False)
+        self.image_list = []
+        if hasattr(self, 'photos_tab'):
+            self.photos_tab.set_images([])
         self.console_text.append("[STANDALONE] Standalone cloud cleared.")
         self._exit_standalone_mode()
 
     def _enter_standalone_mode(self, has_colors: bool):
-        # 1. Clear any loaded images
-        self.image_list = []
+        # 1. Clear any loaded images / video frames
         self.extracted_frames = []
-        self.img_count_label.setText("Images Loaded: 0 (Standalone Mode)")
-        self.camera_label.setText("Camera: N/A (Direct point cloud reconstruction)")
+        filename = os.path.basename(self.standalone_cloud_path) if self.standalone_cloud_path else "Point Cloud"
+        self.img_count_label.setText(f"Point Cloud: {filename}")
+        self.camera_label.setText("Type: PLY Point Cloud (Direct Reconstruction)")
         
         # 2. Clear & disable reference cloud fusion
         # self._clear_reference_cloud_clicked()

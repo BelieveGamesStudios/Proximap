@@ -610,7 +610,7 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
                     Supports <strong>.jpg</strong>, <strong>.jpeg</strong>, <strong>.png</strong>, <strong>.heic</strong>, <strong>.mp4</strong>, <strong>.mov</strong>, <strong>.ply</strong>, <strong>.zip</strong> files to send directly to desktop.
                 </div>
             </div>
-            <input type="file" id="fileInput" multiple accept="image/*,video/*,.ply,.zip,application/zip,application/x-zip-compressed" onchange="handleFilesSelected(this.files)">
+            <input type="file" id="fileInput" multiple accept="*/*" onchange="handleFilesSelected(this.files)">
 
             <div id="previewContainer" style="display: none;">
                 <div class="grid-header">
@@ -653,14 +653,25 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
 
     <script>
         let selectedFiles = [];
+        const ALLOWED_EXTS = ['.jpg', '.jpeg', '.png', '.webp', '.heic', '.heif', '.mp4', '.mov', '.m4v', '.avi', '.mkv', '.ply', '.zip'];
 
         function handleFilesSelected(files) {
             if (!files || files.length === 0) return;
             const newFiles = Array.from(files);
+            let skipped = 0;
             for (let nf of newFiles) {
+                const ext = '.' + nf.name.split('.').pop().toLowerCase();
+                const isImageOrVideo = nf.type.startsWith('image/') || nf.type.startsWith('video/');
+                if (!ALLOWED_EXTS.includes(ext) && !isImageOrVideo) {
+                    skipped++;
+                    continue;
+                }
                 if (!selectedFiles.some(f => f.name === nf.name && f.size === nf.size)) {
                     selectedFiles.push(nf);
                 }
+            }
+            if (skipped > 0) {
+                alert(`${skipped} unsupported file(s) were skipped. Proximap supports images, videos, .ply point clouds, and .zip archives.`);
             }
             renderPreviewGrid();
             document.getElementById('fileInput').value = '';
