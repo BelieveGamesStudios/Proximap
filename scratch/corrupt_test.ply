@@ -1,6 +1,0 @@
-ply
-format ascii 1.0
-element vertex invalid_count
-property float x
-end_header
-CORRUPTED_DATA_xyz
