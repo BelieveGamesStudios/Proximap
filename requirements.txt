@@ -11,7 +11,5 @@ scipy
 scikit-image
 open3d
 psutil
-laspy
-lazrs
 flask
 pyinstaller==6.9.0

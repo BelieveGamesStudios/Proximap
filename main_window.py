@@ -1228,6 +1228,25 @@ class ViewerWrapperWidget(QFrame):
         self.action_load = self.file_menu.addAction("Load Project (.pxm)")
         self.action_recover = self.file_menu.addAction("Recover Last Session")
         self.file_menu.addSeparator()
+        
+        # Unified sub-menu for importing media, archives, & point clouds
+        self.import_menu = QMenu("Import", self.file_menu)
+        self.import_menu.setStyleSheet(self.file_menu.styleSheet())
+        
+        self.action_import_media = self.import_menu.addAction("Media Files (Images/Videos)...")
+        self.action_import_dir = self.import_menu.addAction("Media Directory / Folder...")
+        self.action_import_zip = self.import_menu.addAction("ZIP Archive (.zip)...")
+        self.import_menu.addSeparator()
+        self.action_import_mobile = self.import_menu.addAction("From Mobile Device (Local Network)...")
+        self.action_import_point_cloud = self.import_menu.addAction("Point Cloud (.ply)...")
+        
+        # Backward compatibility aliases
+        self.action_import_standalone = self.action_import_point_cloud
+        self.action_mobile_import = self.action_import_mobile
+
+        self.file_menu.addMenu(self.import_menu)
+        self.file_menu.addSeparator()
+
         self.action_export_dense = self.file_menu.addAction("Export Dense")
         self.action_export_sparse = self.file_menu.addAction("Export Sparse")
         
@@ -1240,24 +1259,6 @@ class ViewerWrapperWidget(QFrame):
         self.action_export_usdz = self.export_mesh_menu.addAction("USDZ (.usdz)")
         
         self.file_menu.addMenu(self.export_mesh_menu)
-        self.file_menu.addSeparator()
-        
-        # Unified sub-menu for importing media, archives, & point clouds
-        self.import_menu = QMenu("Import", self.file_menu)
-        self.import_menu.setStyleSheet(self.file_menu.styleSheet())
-        
-        self.action_import_media = self.import_menu.addAction("Media Files (Images/Videos)...")
-        self.action_import_dir = self.import_menu.addAction("Media Directory / Folder...")
-        self.action_import_zip = self.import_menu.addAction("ZIP Archive (.zip)...")
-        self.import_menu.addSeparator()
-        self.action_import_mobile = self.import_menu.addAction("From Mobile Device (Local Network)...")
-        self.action_import_point_cloud = self.import_menu.addAction("Point Cloud (.ply, .las, .laz)...")
-        
-        # Backward compatibility aliases
-        self.action_import_standalone = self.action_import_point_cloud
-        self.action_mobile_import = self.action_import_mobile
-
-        self.file_menu.addMenu(self.import_menu)
         self.file_menu.addSeparator()
         self.action_mobile_export = self.file_menu.addAction("Send 3D Model to Mobile")
         self.file_menu.addSeparator()
@@ -4634,7 +4635,7 @@ class MainWindow(QMainWindow):
             self,
             "Import Point Cloud",
             self.last_accessed_dir,
-            "Point Cloud Files (*.ply *.las *.laz *.xyz *.pts *.txt)"
+            "Point Cloud Files (*.ply)"
         )
         if not file_path:
             return
