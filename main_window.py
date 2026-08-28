@@ -1503,7 +1503,7 @@ class ViewerWrapperWidget(QFrame):
         self.crop_modal_title.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold; background: transparent; border: none;")
         crop_modal_layout.addWidget(self.crop_modal_title)
 
-        # Row 1: Bounding Box Buttons (Crop, Reset Crop, Finalize Crop)
+        # Row 1: Bounding Box Buttons (Crop, Reset Crop, Finalize Crop, Retexture)
         self.crop_btn_row = QWidget(self.crop_modal)
         self.crop_btn_row.setStyleSheet("background: transparent; border: none;")
         crop_btn_layout = QHBoxLayout(self.crop_btn_row)
@@ -1561,16 +1561,40 @@ class ViewerWrapperWidget(QFrame):
             }
         """)
 
+        self.btn_retexture_crop = QPushButton("Retexture", self.crop_btn_row)
+        self.btn_retexture_crop.setToolTip("Reruns OpenMVS texture projection on the cropped mesh geometry")
+        self.btn_retexture_crop.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 5px 12px;
+                font-weight: bold;
+                background-color: #00C853;
+                color: #121212;
+                border: 1px solid #00C853;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #00E676;
+            }
+            QPushButton:disabled {
+                background-color: #2D2D2D;
+                color: #666666;
+                border-color: #444444;
+            }
+        """)
+
         crop_btn_layout.addWidget(self.btn_remove_outside)
         crop_btn_layout.addWidget(self.btn_reset_crop)
         crop_btn_layout.addWidget(self.btn_finalize_crop)
+        crop_btn_layout.addWidget(self.btn_retexture_crop)
         crop_modal_layout.addWidget(self.crop_btn_row)
 
         self.btn_remove_outside.clicked.connect(self.remove_outside_requested.emit)
         self.btn_reset_crop.clicked.connect(self.reset_crop_requested.emit)
         self.btn_finalize_crop.clicked.connect(self.finalize_crop_requested.emit)
+        self.btn_retexture_crop.clicked.connect(self.retexture_mesh_tool_requested.emit)
 
-        # Row 2: Selection Action Buttons (Delete Selection, Clear Selection, Invert Selection)
+        # Row 2: Selection Action Buttons (Delete Selection, Clear Selection, Invert Selection, Retexture)
         self.select_btn_row = QWidget(self.crop_modal)
         self.select_btn_row.setStyleSheet("background: transparent; border: none;")
         select_btn_layout = QHBoxLayout(self.select_btn_row)
@@ -1628,14 +1652,38 @@ class ViewerWrapperWidget(QFrame):
             }
         """)
 
+        self.btn_retexture_select = QPushButton("Retexture", self.select_btn_row)
+        self.btn_retexture_select.setToolTip("Reruns OpenMVS texture projection on the modified mesh geometry")
+        self.btn_retexture_select.setStyleSheet("""
+            QPushButton {
+                font-size: 11px;
+                padding: 5px 12px;
+                font-weight: bold;
+                background-color: #00C853;
+                color: #121212;
+                border: 1px solid #00C853;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #00E676;
+            }
+            QPushButton:disabled {
+                background-color: #2D2D2D;
+                color: #666666;
+                border-color: #444444;
+            }
+        """)
+
         select_btn_layout.addWidget(self.btn_delete_selection)
         select_btn_layout.addWidget(self.btn_clear_selection)
         select_btn_layout.addWidget(self.btn_invert_selection)
+        select_btn_layout.addWidget(self.btn_retexture_select)
         crop_modal_layout.addWidget(self.select_btn_row)
 
         self.btn_delete_selection.clicked.connect(self.delete_selection_requested.emit)
         self.btn_clear_selection.clicked.connect(self.clear_selection_requested.emit)
         self.btn_invert_selection.clicked.connect(self.invert_selection_requested.emit)
+        self.btn_retexture_select.clicked.connect(self.retexture_mesh_tool_requested.emit)
 
         # Selection Hint Label (Instructs user to hold Ctrl + Left Drag to select)
         self.select_hint_label = QLabel("Hold Ctrl + Left Click & Drag to select", self.crop_modal)
