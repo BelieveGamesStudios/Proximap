@@ -1,3 +1,4 @@
 # Auto detect text files and perform LF normalization
 * text=auto
-models/u2net.onnx filter=lfs diff=lfs merge=lfs -text
+models/silueta.onnx filter=lfs diff=lfs merge=lfs -text
+

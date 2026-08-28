@@ -44,7 +44,7 @@ python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all numpy --collect-all scipy \
     --collect-all vispy --collect-all imgui_bundle \
     --collect-all trimesh --collect-all pyrr --collect-all cv2 \
-    --add-data "pymeshlab_worker.py:." \
+    --collect-all rembg --collect-all onnxruntime \
     --exclude-module PySide6.QtWebEngineCore \
     --exclude-module PySide6.QtWebEngineWidgets \
     --exclude-module PySide6.QtWebEngineQuick \
@@ -63,6 +63,7 @@ python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --exclude-module PySide6.QtXml \
     --exclude-module matplotlib \
     --add-data "mesh_editor/shaders:mesh_editor/shaders" \
+    --add-data "models:models" \
     --add-data "pymeshlab_worker.py:." main_window.py
 
 if [ ! -d "dist/Proximap.app" ]; then
@@ -139,6 +140,12 @@ if [ -d "public" ]; then
 else
     echo "  [WARNING] Public directory not found."
 fi
+
+echo "  Copying offline AI models..."
+if [ -d "models" ]; then
+    cp -r "models" "$MAC_OS_DIR/"
+fi
+
 
 # Fix permissions
 chmod -R 755 "$MAC_OS_DIR/backend_bin"

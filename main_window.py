@@ -2447,6 +2447,30 @@ class PhotosTabWidget(QWidget):
         self.btn_add_photos.setToolTip("Add Files to Dataset (Images, Videos, Point Cloud)")
         self.btn_add_photos.setStyleSheet("QPushButton { padding: 4px 8px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
         
+        self.btn_bg_remove = QPushButton("Remove BG", self.toolbar)
+        self.btn_bg_remove.setToolTip("Remove image backgrounds offline model")
+        self.btn_bg_remove.setEnabled(False)
+        self.btn_bg_remove.setStyleSheet("""
+            QPushButton {
+                padding: 4px 8px;
+                font-size: 11px;
+                font-weight: bold;
+                background-color: #2a1b40;
+                color: #d8c8f0;
+                border: 1px solid #5a3d8c;
+                border-radius: 4px;
+            }
+            QPushButton:hover:enabled {
+                background-color: #3b275c;
+                border-color: #00E676;
+            }
+            QPushButton:disabled {
+                background-color: #202020;
+                color: #555555;
+                border-color: #2D2D2D;
+            }
+        """)
+
         # Thumbnail size slider
         self.size_label = QLabel("Size:", self.toolbar)
         self.size_label.setStyleSheet("color: #888888; font-size: 11px;")
@@ -2474,6 +2498,7 @@ class PhotosTabWidget(QWidget):
         toolbar_layout.addWidget(self.btn_deselect_all)
         toolbar_layout.addWidget(self.btn_remove_selected)
         toolbar_layout.addWidget(self.btn_add_photos)
+        toolbar_layout.addWidget(self.btn_bg_remove)
         toolbar_layout.addStretch()
         toolbar_layout.addWidget(self.size_label)
         toolbar_layout.addWidget(self.size_slider)
@@ -2499,6 +2524,8 @@ class PhotosTabWidget(QWidget):
         
     def set_images(self, image_paths):
         self.image_list = image_paths
+        if hasattr(self, 'btn_bg_remove'):
+            self.btn_bg_remove.setEnabled(bool(image_paths))
         
         # 1. Stop any current loader thread
         if self.loader_thread and self.loader_thread.isRunning():
@@ -2957,6 +2984,11 @@ class MainWindow(QMainWindow):
         self.mobile_import_btn = QPushButton("Import from Mobile Device", step1_box)
         self.mobile_import_btn.clicked.connect(self._on_import_from_mobile_clicked)
         
+        self.bg_remove_btn = QPushButton("Remove Image Background", step1_box)
+        self.bg_remove_btn.setObjectName("BgRemoveBtn")
+        self.bg_remove_btn.setEnabled(False)
+        self.bg_remove_btn.clicked.connect(self._remove_backgrounds_clicked)
+        
         # Add-on Panels Container (Step 1)
         self.addon_container = QWidget(step1_box)
         self.addon_container_layout = QVBoxLayout(self.addon_container)
@@ -3044,6 +3076,7 @@ class MainWindow(QMainWindow):
         step1_layout.addWidget(self.browse_files_btn)
         step1_layout.addWidget(self.browse_btn)
         step1_layout.addWidget(self.mobile_import_btn)
+        step1_layout.addWidget(self.bg_remove_btn)
         step1_layout.addWidget(self.addon_container)
         # step1_layout.addWidget(self.ref_cloud_btn)
         # step1_layout.addWidget(self.ref_cloud_container)
@@ -3633,6 +3666,7 @@ class MainWindow(QMainWindow):
         self.photos_tab = PhotosTabWidget(self.bottom_tabs)
         self.photos_tab.btn_remove_selected.clicked.connect(self._remove_selected_photos)
         self.photos_tab.btn_add_photos.clicked.connect(self._add_photos_dialog)
+        self.photos_tab.btn_bg_remove.clicked.connect(self._remove_backgrounds_clicked)
         
         # Console Tab
         self.console_frame = QFrame(self.bottom_tabs)
@@ -4436,9 +4470,17 @@ class MainWindow(QMainWindow):
         if files:
             self.console_text.append(f"[INFO] Successfully imported {len(files)} files. Camera identified: {camera_name}")
             self._set_process_btn_state("ready")
+            if hasattr(self, 'bg_remove_btn'):
+                self.bg_remove_btn.setEnabled(True)
+            if hasattr(self, 'photos_tab') and hasattr(self.photos_tab, 'btn_bg_remove'):
+                self.photos_tab.btn_bg_remove.setEnabled(True)
         else:
             self.console_text.append("[INFO] Image list cleared.")
             self._set_process_btn_state("idle")
+            if hasattr(self, 'bg_remove_btn'):
+                self.bg_remove_btn.setEnabled(False)
+            if hasattr(self, 'photos_tab') and hasattr(self.photos_tab, 'btn_bg_remove'):
+                self.photos_tab.btn_bg_remove.setEnabled(False)
 
 
     def _camera_name_for_display(self, camera_name: str) -> str:
@@ -4530,46 +4572,91 @@ class MainWindow(QMainWindow):
                     self.console_text.append(f"[INFO] Note: Multiple .ply files selected. Loaded first: {os.path.basename(ply_files[0])}")
             elif images or videos:
                 self._route_import(images, videos, append_to_existing=False)
-            images = []
-            videos = []
-            ignored = []
-            for f in files:
-                normalized = os.path.normpath(f)
-                ext = os.path.splitext(normalized)[1].lower()
-                if ext in IMAGE_EXTS:
-                    images.append(normalized)
-                elif ext in VIDEO_EXTS:
-                    videos.append(normalized)
-                else:
-                    ignored.append(os.path.basename(normalized))
-            if ignored:
-                self._warn_ignored_files(ignored)
-            if images or videos:
-                self._route_import(images, videos, append_to_existing=False)
 
-    def _open_files_dialog(self):
-        files, _ = QFileDialog.getOpenFileNames(
-            self, "Select Images/Videos", self.last_accessed_dir, 
-            "Supported Files (*.png *.jpg *.jpeg *.tif *.tiff *.mp4 *.mov *.avi *.mkv);;Image Files (*.png *.jpg *.jpeg *.tif *.tiff);;Video Files (*.mp4 *.mov *.avi *.mkv)"
+    def _remove_backgrounds_clicked(self):
+        if not self.image_list:
+            return
+
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Confirm Background Removal")
+        msg_box.setIcon(QMessageBox.Information)
+        msg_box.setText("Remove Background from Imported Images?")
+        msg_box.setInformativeText(
+            "This process will remove the backgrounds from your images and add them to your dataset. "
+            "Your original files will not be changed.\n\n"
+            "Do you want to proceed?"
         )
-        if files:
-            self.last_accessed_dir = os.path.dirname(files[0])
-            images = []
-            videos = []
-            ignored = []
-            for f in files:
-                normalized = os.path.normpath(f)
-                ext = os.path.splitext(normalized)[1].lower()
-                if ext in IMAGE_EXTS:
-                    images.append(normalized)
-                elif ext in VIDEO_EXTS:
-                    videos.append(normalized)
-                else:
-                    ignored.append(os.path.basename(normalized))
-            if ignored:
-                self._warn_ignored_files(ignored)
-            if images or videos:
-                self._route_import(images, videos, append_to_existing=False)
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.Yes)
+        
+        # Apply the app stylesheet
+        msg_box.setStyleSheet(self.styleSheet())
+        
+        ret = msg_box.exec()
+        if ret == QMessageBox.Yes:
+            self._start_background_removal()
+
+    def _start_background_removal(self):
+        if not self.image_list:
+            return
+            
+        # Terminate any active viewer
+        self._terminate_viewer()
+        
+        # Disable inputs to avoid modification during processing
+        if hasattr(self, 'browse_files_btn'):
+            self.browse_files_btn.setEnabled(False)
+        if hasattr(self, 'browse_btn'):
+            self.browse_btn.setEnabled(False)
+        if hasattr(self, 'mobile_import_btn'):
+            self.mobile_import_btn.setEnabled(False)
+        if hasattr(self, 'bg_remove_btn'):
+            self.bg_remove_btn.setEnabled(False)
+        if hasattr(self, 'photos_tab') and hasattr(self.photos_tab, 'btn_bg_remove'):
+            self.photos_tab.btn_bg_remove.setEnabled(False)
+        if hasattr(self, 'process_btn'):
+            self.process_btn.setEnabled(False)
+        if hasattr(self, 'step3_box'):
+            self.step3_box.setEnabled(False)
+        if hasattr(self, 'photos_tab'):
+            self.photos_tab.setEnabled(False)
+        
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Starting background removal (silueta.onnx)...")
+        
+        out_dir = os.path.join(get_reconstruction_out_dir(), "bg_removed_images")
+        
+        from pipeline_manager import BackgroundRemovalWorker
+        self.bg_worker = BackgroundRemovalWorker(self.image_list, output_dir=out_dir, parent=self)
+        self.bg_worker.progress_changed.connect(self.progress_bar.setValue)
+        self.bg_worker.status_changed.connect(self.status_label.setText)
+        self.bg_worker.log_message.connect(self._append_log)
+        self.bg_worker.finished.connect(self._on_bg_removal_finished)
+        
+        self.console_text.append(f"[START] Initializing background removal worker thread (silueta.onnx)...")
+        self.bg_worker.start()
+
+    def _on_bg_removal_finished(self, success: bool, updated_list: list, message: str):
+        if hasattr(self, 'browse_files_btn'):
+            self.browse_files_btn.setEnabled(True)
+        if hasattr(self, 'browse_btn'):
+            self.browse_btn.setEnabled(True)
+        if hasattr(self, 'mobile_import_btn'):
+            self.mobile_import_btn.setEnabled(True)
+        if hasattr(self, 'photos_tab'):
+            self.photos_tab.setEnabled(True)
+        
+        if success:
+            self.console_text.append(f"[FINISHED] {message}")
+            # Refresh photos list with the new files
+            self._handle_dropped_images(updated_list)
+        else:
+            self.console_text.append(f"[FAILED] Background removal failed: {message}")
+            # Re-enable controls with the current list
+            self._handle_dropped_images(self.image_list)
+            
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Status: Idle")
 
     def _open_dir_dialog(self):
         dir_path = QFileDialog.getExistingDirectory(self, "Select Images/Videos Folder", self.last_accessed_dir)

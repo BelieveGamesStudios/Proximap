@@ -57,9 +57,9 @@ $excludes = @(
 )
 
 if ($iconFlag) {
-    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy --collect-all scipy --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --collect-all pymeshlab --add-data "mesh_editor/shaders;mesh_editor/shaders" $excludes main_window.py
+    python -m PyInstaller --onedir --noconsole $iconFlag --name Proximap --collect-all numpy --collect-all scipy --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --collect-all pymeshlab --collect-all rembg --collect-all onnxruntime --add-data "mesh_editor/shaders;mesh_editor/shaders" --add-data "models;models" $excludes main_window.py
 } else {
-    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all scipy --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --collect-all pymeshlab --add-data "mesh_editor/shaders;mesh_editor/shaders" $excludes main_window.py
+    python -m PyInstaller --onedir --noconsole --name Proximap --collect-all numpy --collect-all scipy --collect-all vispy --collect-all imgui_bundle --collect-all trimesh --collect-all pyrr --collect-all cv2 --collect-all pymeshlab --collect-all rembg --collect-all onnxruntime --add-data "mesh_editor/shaders;mesh_editor/shaders" --add-data "models;models" $excludes main_window.py
 }
 
 
@@ -144,6 +144,13 @@ if (Test-Path "public") {
 } else {
     Write-Warning "Public directory not found. UI icons will fail to load."
 }
+
+# Copy offline background removal models
+Write-Host "  Copying offline AI models..." -ForegroundColor DarkGray
+if (Test-Path "models") {
+    Copy-Item -Path "models" -Destination "dist/Proximap/models" -Recurse
+}
+
 
 # 5. Compress the finalized distribution folder to ZIP
 Write-Host "[5/5] Compressing distribution into release ZIP..." -ForegroundColor Yellow

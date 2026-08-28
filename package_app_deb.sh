@@ -111,6 +111,7 @@ python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --collect-all pyrr --collect-all OpenGL --collect-all qrcode \
     --collect-all scipy --collect-all skimage --collect-all open3d \
     --collect-all mesh_editor --collect-all addons \
+    --collect-all rembg --collect-all onnxruntime \
     --exclude-module lightglue --exclude-module torch --exclude-module torchvision --exclude-module nvidia --exclude-module triton \
     --exclude-module PySide6.QtWebEngineCore \
     --exclude-module PySide6.QtWebEngineWidgets \
@@ -131,6 +132,7 @@ python3 -m PyInstaller --windowed --noconsole $ICON_FLAG --name Proximap \
     --exclude-module matplotlib \
     --add-data "mesh_editor/shaders:mesh_editor/shaders" \
     --add-data "addons:addons" \
+    --add-data "models:models" \
     --add-data "pymeshlab_worker.py:." \
     main_window.py
 

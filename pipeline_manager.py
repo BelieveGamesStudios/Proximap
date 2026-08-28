@@ -2870,5 +2870,107 @@ class RetextureOnlyWorker(PipelineWorker):
             self.finished.emit(False, str(e))
 
 
+class BackgroundRemovalWorker(QThread):
+    """
+    Worker thread that executes background removal offline on a list of image files
+    using the compact silueta.onnx model.
+    Clones the images into a project working directory (preserving original source files).
+    """
+    progress_changed = Signal(int)
+    status_changed = Signal(str)
+    log_message = Signal(str)
+    finished = Signal(bool, list, str)
+
+    def __init__(self, image_paths: list, output_dir: str = None, parent=None):
+        super().__init__(parent)
+        self.image_paths = list(image_paths)
+        self.output_dir = output_dir
+        self.is_running = True
+
+    def run(self):
+        try:
+            # Set U2NET_HOME to local models directory before importing/initializing rembg
+            models_dir = os.path.join(get_base_dir(), "models")
+            os.environ["U2NET_HOME"] = models_dir
+
+            import rembg
+            from PIL import Image
+        except Exception as e:
+            self.log_message.emit(f"[ERROR] Failed to import rembg or PIL: {e}")
+            self.finished.emit(False, self.image_paths, f"Required dependencies not installed: {e}")
+            return
+
+        total = len(self.image_paths)
+        if total == 0:
+            self.finished.emit(True, [], "No images provided.")
+            return
+
+        out_dir = self.output_dir
+        if not out_dir:
+            base_dir = get_base_dir()
+            out_dir = os.path.join(base_dir, "reconstruction_out", "bg_removed_images")
+        os.makedirs(out_dir, exist_ok=True)
+
+        self.log_message.emit(f"[START] Initializing offline background removal for {total} images (silueta.onnx)...")
+        self.log_message.emit(f"[INFO] Source files will be preserved. Transparent copies saved to: {out_dir}")
+
+        try:
+            session = rembg.new_session("silueta")
+        except Exception as e:
+            self.log_message.emit(f"[ERROR] Failed to initialize silueta ONNX session: {e}")
+            self.finished.emit(False, self.image_paths, f"Failed to initialize AI model session: {e}")
+            return
+
+        updated_paths = []
+        used_names = set()
+
+        for i, path in enumerate(self.image_paths):
+            if not self.is_running:
+                self.log_message.emit("[INFO] Background removal cancelled by user.")
+                self.finished.emit(False, self.image_paths, "Background removal cancelled by user.")
+                return
+
+            self.status_changed.emit(f"Removing background: {i + 1}/{total}")
+            self.progress_changed.emit(int((i / total) * 100))
+            filename = os.path.basename(path)
+            self.log_message.emit(f"[BG_REMOVE] Processing ({i + 1}/{total}): {filename}")
+
+            try:
+                # Open source image using Pillow
+                with Image.open(path) as img:
+                    # Run background removal using silueta session
+                    output = rembg.remove(img, session=session)
+
+                    # Determine unique destination filename in out_dir
+                    base_stem, _ = os.path.splitext(filename)
+                    target_name = f"{base_stem}.png"
+                    counter = 1
+                    while target_name.lower() in used_names:
+                        target_name = f"{base_stem}_{counter}.png"
+                        counter += 1
+                    used_names.add(target_name.lower())
+
+                    dst_path = os.path.join(out_dir, target_name)
+                    output.save(dst_path, "PNG")
+
+                    norm_dst = os.path.normpath(dst_path)
+                    updated_paths.append(norm_dst)
+                    self.log_message.emit(f"[BG_REMOVE] Saved transparent clone: {os.path.basename(norm_dst)}")
+
+            except Exception as e:
+                self.log_message.emit(f"[ERROR] Failed to process {filename}: {e}")
+                # Fallback: keep original path
+                updated_paths.append(path)
+
+        self.progress_changed.emit(100)
+        self.status_changed.emit("Background removal complete!")
+        self.finished.emit(True, updated_paths, f"Successfully created {len(updated_paths)} transparent clones in {os.path.basename(out_dir)}.")
+
+    def stop(self):
+        self.is_running = False
+
+
+
+
 
 
