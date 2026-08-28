@@ -246,7 +246,7 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Proximap Mobile Import</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -255,10 +255,16 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
             color: #E0E0E0;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             padding: 16px;
+            padding-top: max(16px, env(safe-area-inset-top));
+            padding-bottom: max(36px, calc(env(safe-area-inset-bottom) + 24px));
+            padding-left: max(16px, env(safe-area-inset-left));
+            padding-right: max(16px, env(safe-area-inset-right));
             display: flex;
             flex-direction: column;
             align-items: center;
             min-height: 100vh;
+            min-height: 100dvh;
+            -webkit-text-size-adjust: 100%;
         }
         .app-header {
             width: 100%;
@@ -332,6 +338,7 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
             align-items: center;
             justify-content: center;
             gap: 12px;
+            touch-action: manipulation;
         }
         .picker-box:active {
             background-color: #1E1E1E;
@@ -419,10 +426,11 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
         }
         .preview-grid {
             display: grid;
-            grid-template-columns: repeat(3, 1fr);
+            grid-template-columns: repeat(3, minmax(0, 1fr));
             gap: 10px;
-            max-height: 320px;
+            max-height: 340px;
             overflow-y: auto;
+            -webkit-overflow-scrolling: touch;
             background-color: #181818;
             padding: 10px;
             border-radius: 10px;
@@ -430,13 +438,18 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
         }
         .preview-item {
             position: relative;
-            aspect-ratio: 1;
+            width: 100%;
+            aspect-ratio: 1 / 1;
             border-radius: 8px;
             overflow: hidden;
             background-color: #222222;
             border: 1px solid #2A2A2A;
+            box-sizing: border-box;
         }
         .preview-item img, .preview-item video {
+            position: absolute;
+            top: 0;
+            left: 0;
             width: 100%;
             height: 100%;
             object-fit: cover;
@@ -454,8 +467,13 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
             padding: 2px 6px;
             border-radius: 4px;
             backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            z-index: 4;
         }
         .zip-card {
+            position: absolute;
+            top: 0;
+            left: 0;
             width: 100%;
             height: 100%;
             display: flex;
@@ -467,11 +485,13 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
             background-color: #1A1A1A;
             border-radius: 6px;
             text-align: center;
+            box-sizing: border-box;
         }
         .zip-card svg {
-            width: 32px;
-            height: 32px;
+            width: 28px;
+            height: 28px;
             fill: #00E676;
+            flex-shrink: 0;
         }
         .zip-name {
             font-size: 10px;
@@ -480,34 +500,38 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
             word-break: break-all;
             max-height: 28px;
             overflow: hidden;
+            line-height: 1.2;
         }
         .btn-remove-file {
             position: absolute;
-            top: 6px;
-            right: 6px;
-            width: 24px;
-            height: 24px;
+            top: 4px;
+            right: 4px;
+            width: 26px;
+            height: 26px;
             border-radius: 50%;
-            background-color: rgba(0, 0, 0, 0.8);
-            border: 1px solid rgba(255, 255, 255, 0.25);
+            background-color: rgba(0, 0, 0, 0.85);
+            border: 1px solid rgba(255, 255, 255, 0.3);
             color: #FFFFFF;
             display: flex;
             align-items: center;
             justify-content: center;
             cursor: pointer;
             transition: all 0.15s ease;
-            z-index: 5;
+            z-index: 10;
             backdrop-filter: blur(4px);
+            -webkit-backdrop-filter: blur(4px);
+            touch-action: manipulation;
         }
         .btn-remove-file:active {
             background-color: #FF5252;
             border-color: #FF5252;
-            transform: scale(1.1);
+            transform: scale(1.08);
         }
         .btn-remove-file svg {
             width: 12px;
             height: 12px;
             fill: currentColor;
+            pointer-events: none;
         }
 
         .btn-submit {
@@ -523,10 +547,13 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
             width: 100%;
             margin-top: 16px;
             display: none;
-            transition: background-color 0.2s;
+            transition: background-color 0.2s, transform 0.1s;
+            touch-action: manipulation;
+            -webkit-tap-highlight-color: transparent;
         }
         .btn-submit:active {
             background-color: #00C853;
+            transform: scale(0.99);
         }
 
         .progress-box {
@@ -584,6 +611,31 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
         .success-box p {
             color: #9E9E9E;
             font-size: 13px;
+        }
+
+        @media (max-width: 480px) {
+            body {
+                padding: 12px;
+                padding-top: max(12px, env(safe-area-inset-top));
+                padding-bottom: max(32px, calc(env(safe-area-inset-bottom) + 20px));
+                padding-left: max(12px, env(safe-area-inset-left));
+                padding-right: max(12px, env(safe-area-inset-right));
+            }
+            .card {
+                padding: 16px;
+            }
+            .picker-box {
+                padding: 28px 16px;
+            }
+            .preview-grid {
+                max-height: 280px;
+                gap: 8px;
+                padding: 8px;
+            }
+            .btn-submit {
+                padding: 14px;
+                font-size: 14px;
+            }
         }
     </style>
 </head>
@@ -750,6 +802,8 @@ IMPORT_PORTAL_HTML = """<!DOCTYPE html>
                 } else {
                     const video = document.createElement('video');
                     video.src = URL.createObjectURL(file);
+                    video.muted = true;
+                    video.playsInline = true;
                     item.appendChild(video);
 
                     const badge = document.createElement('span');
@@ -837,7 +891,7 @@ EXPORT_PORTAL_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     <title>Proximap 3D Download</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -846,11 +900,17 @@ EXPORT_PORTAL_HTML = """<!DOCTYPE html>
             color: #E0E0E0;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             padding: 24px;
+            padding-top: max(24px, env(safe-area-inset-top));
+            padding-bottom: max(32px, calc(env(safe-area-inset-bottom) + 24px));
+            padding-left: max(16px, env(safe-area-inset-left));
+            padding-right: max(16px, env(safe-area-inset-right));
             display: flex;
             flex-direction: column;
             align-items: center;
             justify-content: center;
             min-height: 100vh;
+            min-height: 100dvh;
+            -webkit-text-size-adjust: 100%;
         }
         .card {
             background-color: #1E1E1E;
@@ -873,7 +933,7 @@ EXPORT_PORTAL_HTML = """<!DOCTYPE html>
         }
         .icon svg { width: 32px; height: 32px; fill: #00E676; }
         h1 { font-size: 20px; color: #FFFFFF; margin-bottom: 8px; }
-        p { font-size: 13px; color: #9E9E9E; margin-bottom: 24px; }
+        p { font-size: 13px; color: #9E9E9E; margin-bottom: 24px; word-break: break-all; }
         .btn-download {
             display: inline-block;
             background-color: #00E676;
@@ -884,6 +944,12 @@ EXPORT_PORTAL_HTML = """<!DOCTYPE html>
             padding: 16px 24px;
             border-radius: 10px;
             width: 100%;
+            touch-action: manipulation;
+            transition: background-color 0.2s, transform 0.1s;
+        }
+        .btn-download:active {
+            background-color: #00C853;
+            transform: scale(0.99);
         }
     </style>
 </head>
