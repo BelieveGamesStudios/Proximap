@@ -978,7 +978,7 @@ class MeshToolModal(QFrame):
 
         self.btn_retexture = QPushButton("Retexture", action_row)
         self.btn_retexture.setToolTip("Reruns OpenMVS texture projection on the modified mesh geometry.")
-        self.btn_retexture.setVisible(False)
+        self.btn_retexture.setVisible(True)
         self.btn_retexture.setStyleSheet("""
             QPushButton {
                 font-size: 11px; padding: 5px 12px; font-weight: bold;
@@ -1018,7 +1018,8 @@ class MeshToolModal(QFrame):
         self.bbox_diagonal = max(0.0001, bbox_diagonal)
         self.has_applied_preview = False
         self.btn_revert.setEnabled(False)
-        self.btn_retexture.setVisible(False)
+        self.btn_retexture.setVisible(True)
+        self.btn_retexture.setEnabled(True)
         self.btn_apply.setEnabled(True)
 
         if tool_id == "cleanup":
@@ -1125,7 +1126,8 @@ class MeshToolModal(QFrame):
     def on_reverted(self):
         self.has_applied_preview = False
         self.btn_revert.setEnabled(False)
-        self.btn_retexture.setVisible(False)
+        self.btn_retexture.setVisible(True)
+        self.btn_retexture.setEnabled(True)
         self.btn_apply.setEnabled(True)
         self.adjustSize()
 
@@ -1720,7 +1722,7 @@ class ViewerWrapperWidget(QFrame):
             self.tools_modal.adjustSize()
             margin = 15
             modal_size = self.tools_modal.sizeHint()
-            modal_w = max(self.tools_modal.width(), modal_size.width(), 310)
+            modal_w = max(self.tools_modal.width(), modal_size.width(), 350)
             modal_h = max(self.tools_modal.height(), modal_size.height())
             x = margin
             y = margin
@@ -1873,6 +1875,8 @@ class ViewerWrapperWidget(QFrame):
         super().resizeEvent(event)
         self._position_crop_modal()
         self._position_tools_modal()
+        if self.parent() and hasattr(self.parent(), '_position_overlay'):
+            self.parent()._position_overlay()
         w = self.width()
             
         if w < 600:
@@ -2850,6 +2854,7 @@ class MainWindow(QMainWindow):
         self._selected_vertex_indices = None
         self.selection_markers_visual = None
         self.selection_overlay = None
+        self.nav_gizmo = None
         
         self.last_accessed_dir = os.path.expanduser("~")
         self.viewport_bg_color = '#0C0C0C'
@@ -2994,45 +2999,6 @@ class MainWindow(QMainWindow):
         self.addon_container_layout = QVBoxLayout(self.addon_container)
         self.addon_container_layout.setContentsMargins(0, 0, 0, 0)
         self.addon_container_layout.setSpacing(4)
-
-        # Reference Cloud Import (Optional)
-        # self.ref_cloud_btn = QPushButton("Import Reference Cloud", step1_box)
-        # self.ref_cloud_btn.setObjectName("RefCloudBtn")
-        # self.ref_cloud_btn.clicked.connect(self._import_reference_cloud_clicked)
-        # 
-        # self.ref_cloud_container = QWidget(step1_box)
-        # ref_cloud_layout = QHBoxLayout(self.ref_cloud_container)
-        # ref_cloud_layout.setContentsMargins(0, 0, 0, 0)
-        # ref_cloud_layout.setSpacing(5)
-        # 
-        # self.ref_cloud_label = QLabel("", self.ref_cloud_container)
-        # self.ref_cloud_label.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold;")
-        # self.ref_cloud_label.setTextFormat(Qt.PlainText)
-        # 
-        # self.ref_cloud_clear_btn = QPushButton("✕", self.ref_cloud_container)
-        # self.ref_cloud_clear_btn.setFixedSize(20, 20)
-        # self.ref_cloud_clear_btn.setToolTip("Clear reference cloud selection")
-        # self.ref_cloud_clear_btn.setStyleSheet("""
-        #     QPushButton {
-        #         background: transparent;
-        #         color: #ff5252;
-        #         border: 1px solid #ff5252;
-        #         border-radius: 10px;
-        #         font-weight: bold;
-        #         font-size: 10px;
-        #     }
-        #     QPushButton:hover {
-        #         background: #ff5252;
-        #         color: #ffffff;
-        #     }
-        # """)
-        # self.ref_cloud_clear_btn.clicked.connect(self._clear_reference_cloud_clicked)
-        # 
-        # ref_cloud_layout.addWidget(self.ref_cloud_label, stretch=1)
-        # ref_cloud_layout.addWidget(self.ref_cloud_clear_btn)
-        # self.ref_cloud_container.setVisible(False)
-        # 
-        # self.ref_cloud_path = None
         
         # Standalone Cloud Import Container (Populated when importing via File Menu)
         self.standalone_cloud_container = QWidget(step1_box)
@@ -3078,8 +3044,6 @@ class MainWindow(QMainWindow):
         step1_layout.addWidget(self.mobile_import_btn)
         step1_layout.addWidget(self.bg_remove_btn)
         step1_layout.addWidget(self.addon_container)
-        # step1_layout.addWidget(self.ref_cloud_btn)
-        # step1_layout.addWidget(self.ref_cloud_container)
 
         scroll_content_layout.addWidget(step1_box)
         
@@ -3133,6 +3097,13 @@ class MainWindow(QMainWindow):
             "Default: Off."
         )
         self.mc_enabled = self.auto_cleanup_checkbox
+
+        self.manhattan_align_checkbox = QCheckBox("Manhattan Alignment (Auto-Level)", step2_box)
+        self.manhattan_align_checkbox.setChecked(True)
+        self.manhattan_align_checkbox.setToolTip(
+            "Automatically levels the 3D model and aligns ground/walls to the coordinate grid using COLMAP Manhattan-World vanishing point analysis.\n"
+            "Default: On."
+        )
         
         # Advanced Options Collapsible Panel
         self.advanced_toggle_btn = QPushButton("▸  Advanced Options", step2_box)
@@ -3348,10 +3319,16 @@ class MainWindow(QMainWindow):
         self.custom_ba_check.setChecked(False)
         custom_grid.addWidget(self.custom_ba_check, 7, 0, 1, 2)
 
+        # Manhattan Alignment
+        self.custom_manhattan_check = QCheckBox("Manhattan-World Alignment (Auto-Level)", self.custom_settings_container)
+        self.custom_manhattan_check.setStyleSheet("font-size: 10px; color: #aaaaaa; border: none; background: transparent;")
+        self.custom_manhattan_check.setChecked(True)
+        custom_grid.addWidget(self.custom_manhattan_check, 8, 0, 1, 2)
+
         # OpenMVS section
         openmvs_sec = QLabel("OpenMVS Settings", self.custom_settings_container)
         openmvs_sec.setStyleSheet("font-size: 11px; font-weight: bold; color: #00E676; margin-top: 4px; border: none; background: transparent;")
-        custom_grid.addWidget(openmvs_sec, 8, 0, 1, 2)
+        custom_grid.addWidget(openmvs_sec, 9, 0, 1, 2)
 
         # Densification Resolution
         lbl_densify_res = QLabel("Densification Res:", self.custom_settings_container)
@@ -3365,8 +3342,8 @@ class MainWindow(QMainWindow):
         ])
         self.custom_densify_res_combo.setCurrentIndex(1)
         self.custom_densify_res_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_densify_res, 9, 0)
-        custom_grid.addWidget(self.custom_densify_res_combo, 9, 1)
+        custom_grid.addWidget(lbl_densify_res, 10, 0)
+        custom_grid.addWidget(self.custom_densify_res_combo, 10, 1)
 
         # Max Views for Densification
         lbl_densify_views = QLabel("Max Densify Views:", self.custom_settings_container)
@@ -3375,8 +3352,8 @@ class MainWindow(QMainWindow):
         self.custom_densify_views_spin.setRange(1, 16)
         self.custom_densify_views_spin.setValue(4)
         self.custom_densify_views_stepper = SpinBoxStepper(self.custom_densify_views_spin, self.custom_settings_container)
-        custom_grid.addWidget(lbl_densify_views, 10, 0)
-        custom_grid.addWidget(self.custom_densify_views_stepper, 10, 1)
+        custom_grid.addWidget(lbl_densify_views, 11, 0)
+        custom_grid.addWidget(self.custom_densify_views_stepper, 11, 1)
 
         # Mesh Refinement Scales
         lbl_refine_scales = QLabel("Mesh Refinement Scales:", self.custom_settings_container)
@@ -3456,6 +3433,7 @@ class MainWindow(QMainWindow):
         step2_layout.addWidget(self.gpu_label)
         step2_layout.addWidget(self.gpu_combo)
         step2_layout.addWidget(self.auto_cleanup_checkbox)
+        step2_layout.addWidget(self.manhattan_align_checkbox)
 
         # Dynamic Mesh Cleanup Parameters sub-panel (visible only when Auto Cleanup is checked)
         self.mc_options_container = QFrame(step2_box)
@@ -3516,6 +3494,8 @@ class MainWindow(QMainWindow):
         
         self.mc_options_container.setVisible(False)
         self.auto_cleanup_checkbox.toggled.connect(self._on_auto_cleanup_toggled)
+        self.manhattan_align_checkbox.toggled.connect(self._sync_manhattan_to_custom)
+        self.custom_manhattan_check.toggled.connect(self._sync_custom_to_manhattan)
         
         step2_layout.addWidget(self.mc_options_container)
         step2_layout.addWidget(self.advanced_toggle_btn)
@@ -3639,6 +3619,16 @@ class MainWindow(QMainWindow):
         self.selection_overlay = SelectionOverlayWidget(self.viewer_widget.container_area, underlying_widget=self.canvas.native)
         self.selection_overlay.shape_changed.connect(self._on_selection_shape_changed)
         self.selection_overlay.setVisible(False)
+
+        # Initialize 3D Navigation Orientation Gizmo for VisPy Viewport (Y-up coordinate system)
+        from mesh_editor.nav_gizmo import NavGizmoWidget
+        self.nav_gizmo = NavGizmoWidget(self.viewer_widget.container_area, coord_system="y-up")
+        self.nav_gizmo.snap_requested.connect(self._on_vispy_nav_gizmo_snap)
+        self.nav_gizmo.update_from_vispy(self.view.camera.azimuth, self.view.camera.elevation)
+        self.nav_gizmo.show()
+
+        if hasattr(self.view.camera, 'events') and hasattr(self.view.camera.events, 'transform_change'):
+            self.view.camera.events.transform_change.connect(self._on_vispy_camera_transform_changed)
 
         # Initialize floating camera controls overlay
         self.overlay_label = QLabel(self.viewer_widget.container_area)
@@ -4862,30 +4852,6 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "Video Extraction Error", f"An error occurred while extracting frames:\n\n{err_msg}")
         self._cleanup_extraction_ui()
 
-    # def _import_reference_cloud_clicked(self):
-    #     file_path, _ = QFileDialog.getOpenFileName(
-    #         self,
-    #         "Import Reference Point Cloud",
-    #         self.last_accessed_dir,
-    #         "Point Cloud Files (*.ply *.las *.laz *.xyz *.pts *.txt)"
-    #     )
-    #     if not file_path:
-    #         return
-    # 
-    #     self.last_accessed_dir = os.path.dirname(file_path)
-    #     self.ref_cloud_path = file_path
-    #     filename = os.path.basename(file_path)
-    # 
-    #     self.ref_cloud_label.setText(f"✓ {filename}")
-    #     self.ref_cloud_container.setVisible(True)
-    #     self.console_text.append(f"[REF_CLOUD] Selected external reference cloud: {file_path}")
-    # 
-    # def _clear_reference_cloud_clicked(self):
-    #     self.ref_cloud_path = None
-    #     self.ref_cloud_label.setText("")
-    #     self.ref_cloud_container.setVisible(False)
-    #     self.console_text.append("[REF_CLOUD] Reference cloud selection cleared.")
-
     def _load_standalone_point_cloud(self, file_path: str):
         if not file_path or not os.path.exists(file_path):
             return
@@ -4969,6 +4935,8 @@ class MainWindow(QMainWindow):
             self.auto_cleanup_row.setVisible(False)
         else:
             self.auto_cleanup_checkbox.setVisible(False)
+        if hasattr(self, 'manhattan_align_checkbox'):
+            self.manhattan_align_checkbox.setVisible(False)
         self.advanced_toggle_btn.setVisible(False)
         self.advanced_panel.setVisible(False)
         if hasattr(self, 'step3_box'):
@@ -4988,7 +4956,6 @@ class MainWindow(QMainWindow):
         self.browse_files_btn.setEnabled(True)
         self.browse_btn.setEnabled(True)
         self.mobile_import_btn.setEnabled(True)
-        # self.ref_cloud_btn.setEnabled(True)
         
         self.img_count_label.setText("Images Loaded: 0")
         self.camera_label.setText("Camera: Undetected")
@@ -5007,6 +4974,8 @@ class MainWindow(QMainWindow):
             self.auto_cleanup_row.setVisible(True)
         else:
             self.auto_cleanup_checkbox.setVisible(True)
+        if hasattr(self, 'manhattan_align_checkbox'):
+            self.manhattan_align_checkbox.setVisible(True)
         self.advanced_toggle_btn.setVisible(False)
         if hasattr(self, 'step3_box'):
             self.step3_box.setVisible(True)
@@ -5213,6 +5182,18 @@ class MainWindow(QMainWindow):
             self.auto_cleanup_checkbox.blockSignals(False)
         self._on_mc_enabled_toggled(checked)
 
+    def _sync_manhattan_to_custom(self, checked):
+        if hasattr(self, 'custom_manhattan_check') and self.custom_manhattan_check.isChecked() != checked:
+            self.custom_manhattan_check.blockSignals(True)
+            self.custom_manhattan_check.setChecked(checked)
+            self.custom_manhattan_check.blockSignals(False)
+
+    def _sync_custom_to_manhattan(self, checked):
+        if hasattr(self, 'manhattan_align_checkbox') and self.manhattan_align_checkbox.isChecked() != checked:
+            self.manhattan_align_checkbox.blockSignals(True)
+            self.manhattan_align_checkbox.setChecked(checked)
+            self.manhattan_align_checkbox.blockSignals(False)
+
 
     def _on_mesh_mode_changed(self, index):
         self.poisson_widget.setVisible(index == 1)
@@ -5374,6 +5355,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'recon_mode_combo'):
             self.recon_mode_combo.setEnabled(False)
         self.auto_cleanup_checkbox.setEnabled(False)
+        if hasattr(self, 'manhattan_align_checkbox'):
+            self.manhattan_align_checkbox.setEnabled(False)
         if hasattr(self, 'mc_enabled'):
             self.mc_enabled.setEnabled(False)
         if hasattr(self, 'mc_options_container'):
@@ -5436,8 +5419,6 @@ class MainWindow(QMainWindow):
             self.browse_files_btn.setEnabled(True)
             self.browse_btn.setEnabled(True)
             self.mobile_import_btn.setEnabled(True)
-            # self.ref_cloud_btn.setEnabled(True)
-            # self.ref_cloud_clear_btn.setEnabled(True)
             self.gpu_combo.setEnabled(True)
             if hasattr(self, 'recon_mode_combo'):
                 self.recon_mode_combo.setEnabled(True)
@@ -5455,6 +5436,7 @@ class MainWindow(QMainWindow):
         mapper_mode = mapper_modes[self.mapper_combo.currentIndex()]
         has_plain = (self.mapper_combo.currentIndex() == 1) if hasattr(self, 'mapper_combo') else False
         auto_cleanup = self.mc_enabled.isChecked() if hasattr(self, 'mc_enabled') else self.auto_cleanup_checkbox.isChecked()
+        manhattan_align = self.custom_manhattan_check.isChecked() if (hasattr(self, 'custom_manhattan_check') and self.custom_settings_toggle.isChecked()) else (self.manhattan_align_checkbox.isChecked() if hasattr(self, 'manhattan_align_checkbox') else True)
         mesh_mode = "poisson" if self.mesh_mode_combo.currentIndex() == 1 else "default"
         poisson_depth = self.poisson_depth_slider.value()
 
@@ -5490,6 +5472,7 @@ class MainWindow(QMainWindow):
                 "colmap_block_size": self.custom_block_size_spin.value(),
                 "guided_matching": "1" if self.custom_guided_check.isChecked() else "0",
                 "run_bundle_adjuster": self.custom_ba_check.isChecked(),
+                "manhattan_align": manhattan_align,
                 "densify_res": str(self.custom_densify_res_combo.currentIndex()),
                 "densify_views": str(self.custom_densify_views_spin.value()),
                 "refine_scales": str(self.custom_refine_scales_spin.value()),
@@ -5499,6 +5482,7 @@ class MainWindow(QMainWindow):
         else:
             custom_params = {
                 "image_max_resolution": selected_max_res,
+                "manhattan_align": manhattan_align,
                 "cleanup_params": cleanup_params
             }
 
@@ -5510,8 +5494,8 @@ class MainWindow(QMainWindow):
             gpu_mode=gpu_mode, 
             has_plain_surfaces=has_plain,
             auto_cleanup=auto_cleanup,
+            manhattan_align=manhattan_align,
             mapper_mode=mapper_mode,
-            ref_cloud_path=None,
             mesh_mode=mesh_mode,
             poisson_depth=poisson_depth,
             custom_params=custom_params,
@@ -5585,6 +5569,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'recon_mode_combo'):
             self.recon_mode_combo.setEnabled(True)
         self.auto_cleanup_checkbox.setEnabled(True)
+        if hasattr(self, 'manhattan_align_checkbox'):
+            self.manhattan_align_checkbox.setEnabled(True)
         if hasattr(self, 'mc_enabled'):
             self.mc_enabled.setEnabled(True)
         if hasattr(self, 'mc_options_container'):
@@ -5592,8 +5578,6 @@ class MainWindow(QMainWindow):
         self.custom_settings_toggle.setEnabled(True)
         self._on_custom_settings_toggled(self.custom_settings_toggle.isChecked())
         self.advanced_toggle_btn.setEnabled(True)
-        # self.ref_cloud_btn.setEnabled(True)
-        # self.ref_cloud_clear_btn.setEnabled(True)
         
         if success:
             self._last_failed_stage = None
@@ -5728,6 +5712,8 @@ class MainWindow(QMainWindow):
         self.mobile_import_btn.setEnabled(True)
         self.gpu_combo.setEnabled(True)
         self.auto_cleanup_checkbox.setEnabled(True)
+        if hasattr(self, 'manhattan_align_checkbox'):
+            self.manhattan_align_checkbox.setEnabled(True)
         if hasattr(self, 'mc_enabled'):
             self.mc_enabled.setEnabled(True)
         if hasattr(self, 'mc_options_container'):
@@ -7400,6 +7386,7 @@ class MainWindow(QMainWindow):
                 self.crop_box.drag_start_pos = mouse_xy
         except Exception:
             pass
+        self._on_vispy_camera_transform_changed()
 
     def _on_canvas_mouse_release(self, event):
         """Release handle drag and unlock camera rotation."""
@@ -7409,6 +7396,7 @@ class MainWindow(QMainWindow):
             self.crop_box.drag_start_pos = None
             # Unlock camera rotation on mouse release
             self.view.camera.interactive = True
+        self._on_vispy_camera_transform_changed()
 
     def _apply_crop(self):
         """RealityScan-style crop operation: trims mesh vertices/faces outside the 3D crop box."""
@@ -7507,6 +7495,18 @@ class MainWindow(QMainWindow):
         from point_cloud_io import apply_photogrammetry_coordinate_flip
         save_pts, _, _, _ = apply_photogrammetry_coordinate_flip(points=points)
         os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+        
+        # Filter valid non-degenerate faces (each vertex distinct and within bounds)
+        valid_faces = []
+        if faces is not None:
+            n_pts = len(save_pts)
+            for face in faces:
+                if len(face) == 3:
+                    v0, v1, v2 = int(face[0]), int(face[1]), int(face[2])
+                    if v0 != v1 and v1 != v2 and v0 != v2:
+                        if 0 <= v0 < n_pts and 0 <= v1 < n_pts and 0 <= v2 < n_pts:
+                            valid_faces.append((v0, v1, v2))
+                            
         with open(file_path, 'w') as f:
             f.write("ply\nformat ascii 1.0\n")
             f.write(f"element vertex {len(save_pts)}\n")
@@ -7514,8 +7514,7 @@ class MainWindow(QMainWindow):
             has_color = colors is not None and len(colors) == len(save_pts)
             if has_color:
                 f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
-            num_faces = len(faces) if faces is not None else 0
-            f.write(f"element face {num_faces}\n")
+            f.write(f"element face {len(valid_faces)}\n")
             f.write("property list uchar int vertex_indices\nend_header\n")
             for idx, v in enumerate(save_pts):
                 if has_color:
@@ -7523,9 +7522,8 @@ class MainWindow(QMainWindow):
                     f.write(f"{v[0]:.6f} {v[1]:.6f} {v[2]:.6f} {int(c[0])} {int(c[1])} {int(c[2])}\n")
                 else:
                     f.write(f"{v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
-            if faces is not None:
-                for face in faces:
-                    f.write(f"3 {face[0]} {face[1]} {face[2]}\n")
+            for face in valid_faces:
+                f.write(f"3 {face[0]} {face[1]} {face[2]}\n")
 
     def _open_mesh_tool(self, tool_id: str):
         """Opens the floating tool modal for Mesh Cleanup, Merge Vertices, or Taubin Smooth Mesh."""
@@ -7658,7 +7656,13 @@ class MainWindow(QMainWindow):
 
         # Save current preview mesh to scene_dense_mesh_modified.ply
         modified_ply = os.path.join(mvs_dir, "scene_dense_mesh_modified.ply")
-        self._export_temp_mesh_ply(self._current_points, self._current_faces, self._current_colors, modified_ply)
+        pts = self._current_points if self._current_points is not None else self._last_points
+        fcs = self._current_faces
+        cls = self._current_colors
+        if pts is None or len(pts) == 0:
+            QMessageBox.warning(self, "Retexture Unavailable", "No active mesh geometry found to retexture.")
+            return
+        self._export_temp_mesh_ply(pts, fcs, cls, modified_ply)
 
         # Update UI: Disable Start Reconstruction button & animate shared progress bar
         self.process_btn.setEnabled(False)
@@ -8041,6 +8045,10 @@ class MainWindow(QMainWindow):
                 pass
         super().closeEvent(event)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._position_overlay()
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._position_overlay()
@@ -8054,6 +8062,12 @@ class MainWindow(QMainWindow):
                 self.selection_overlay.raise_()
         if hasattr(self, 'viewer_widget') and hasattr(self.viewer_widget, '_position_crop_modal'):
             self.viewer_widget._position_crop_modal()
+        if hasattr(self, 'nav_gizmo') and self.nav_gizmo is not None:
+            margin = 12
+            gx = container_w - self.nav_gizmo.width() - margin
+            gy = margin
+            self.nav_gizmo.move(max(margin, gx), gy)
+            self.nav_gizmo.raise_()
         if hasattr(self, 'overlay_label') and self.overlay_label.isVisible():
             label_w = self.overlay_label.width()
             label_h = self.overlay_label.height()
@@ -8067,6 +8081,44 @@ class MainWindow(QMainWindow):
             y = container_h - label_h - margin
             self.overlay_label.setGeometry(x, y, label_w, label_h)
             self.overlay_label.raise_()
+
+    def _on_vispy_camera_transform_changed(self, event=None):
+        """Synchronizes the 3D navigation gizmo orientation when the VisPy turntable camera moves."""
+        if hasattr(self, 'nav_gizmo') and self.nav_gizmo is not None and hasattr(self, 'view') and self.view.camera is not None:
+            try:
+                az = float(getattr(self.view.camera, 'azimuth', 45.0))
+                el = float(getattr(self.view.camera, 'elevation', 30.0))
+                self.nav_gizmo.update_from_vispy(az, el)
+            except Exception:
+                pass
+
+    def _on_vispy_nav_gizmo_snap(self, view_name: str):
+        """Snaps the VisPy TurntableCamera to canonical views when clicking nav gizmo axis dots."""
+        if not hasattr(self, 'view') or self.view.camera is None:
+            return
+        
+        _SNAP_ANGLES = {
+            "front":  (0.0,   0.0),
+            "back":   (180.0, 0.0),
+            "right":  (90.0,  0.0),
+            "left":   (-90.0, 0.0),
+            "top":    (0.0,   89.9),
+            "bottom": (0.0,  -89.9),
+        }
+        
+        if view_name in _SNAP_ANGLES:
+            az, el = _SNAP_ANGLES[view_name]
+            try:
+                self.view.camera.azimuth = az
+                self.view.camera.elevation = el
+                if hasattr(self.view.camera, 'roll'):
+                    self.view.camera.roll = 0.0
+                if hasattr(self, 'nav_gizmo') and self.nav_gizmo:
+                    self.nav_gizmo.update_from_vispy(az, el)
+                if self.canvas:
+                    self.canvas.update()
+            except Exception as err:
+                print(f"[GIZMO] Error snapping camera: {err}")
 
     def _on_show_controls_changed(self, state):
         visible = (state == Qt.Checked.value or state == 2)

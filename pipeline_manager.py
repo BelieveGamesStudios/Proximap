@@ -119,7 +119,7 @@ class PipelineWorker(QThread):
         return target_idx < resume_idx
 
 
-    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, auto_cleanup: bool = False, mapper_mode: str = "incremental", ref_cloud_path: str = None, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, resume_from_step: str = None, parent=None):
+    def __init__(self, image_dir: str, output_dir: str, quality_preset: str = "medium", gpu_mode: str = "auto", has_plain_surfaces: bool = False, auto_cleanup: bool = False, mapper_mode: str = "incremental", manhattan_align: bool = True, mesh_mode: str = "default", poisson_depth: int = 9, custom_params: dict = None, resume_from_step: str = None, parent=None):
         super().__init__(parent)
         self.image_dir = os.path.abspath(image_dir) if image_dir else image_dir
         self.output_dir = os.path.abspath(output_dir) if output_dir else output_dir
@@ -132,7 +132,9 @@ class PipelineWorker(QThread):
             self.mapper_mode = "global"
         else:
             self.mapper_mode = mapper_mode
-        self.ref_cloud_path = ref_cloud_path
+        self.manhattan_align = manhattan_align
+        if custom_params and "manhattan_align" in custom_params:
+            self.manhattan_align = bool(custom_params["manhattan_align"])
         self.mesh_mode = mesh_mode
         self.poisson_depth = poisson_depth
         self.custom_params = custom_params
@@ -1236,6 +1238,42 @@ class PipelineWorker(QThread):
                 ]
                 self._run_process_realtime(cmd_ba, timeout=600.0, env=colmap_env, line_parser=self._parse_mapper_line)
 
+            # Optional Manhattan World Alignment (Auto-Leveling)
+            if self.manhattan_align:
+                self.status_changed.emit(f"Step 4b/{total_steps}: Aligning Scene Orientation (Manhattan World)...")
+                self.log_message.emit("[INFO] Running COLMAP Manhattan-World model orientation aligner (Auto-Level)...")
+                aligned_model_dir = self._to_colmap_path(os.path.join(sparse_dir, "aligned"))
+                os.makedirs(aligned_model_dir, exist_ok=True)
+                cmd_align = [
+                    colmap_exe, "model_orientation_aligner",
+                    "--image_path", working_image_dir,
+                    "--input_path", target_model_dir,
+                    "--output_path", aligned_model_dir,
+                    "--method", "MANHATTAN-WORLD",
+                    "--max_image_size", "1024"
+                ]
+                align_ok = self._run_process_realtime(cmd_align, timeout=300.0, env=colmap_env)
+                has_aligned_files = False
+                if align_ok and os.path.exists(aligned_model_dir):
+                    aligned_files = os.listdir(aligned_model_dir)
+                    if any(f.startswith("images.") or f.startswith("points3D.") for f in aligned_files):
+                        has_aligned_files = True
+                        for filename in aligned_files:
+                            src_f = os.path.join(aligned_model_dir, filename)
+                            dst_f = os.path.join(target_model_dir, filename)
+                            if os.path.isfile(src_f):
+                                shutil.copy2(src_f, dst_f)
+                        self.log_message.emit("[SUCCESS] Manhattan-World alignment applied. 3D model leveled to coordinate grid.")
+
+                if not has_aligned_files:
+                    self.log_message.emit("[INFO] Manhattan-World alignment skipped (scene vanishing points unconstrained). Keeping default orientation.")
+
+                if os.path.exists(aligned_model_dir):
+                    try:
+                        shutil.rmtree(aligned_model_dir)
+                    except Exception:
+                        pass
+
             # Get reconstruction statistics
             self._last_reconstruction_stats = self._run_model_analyzer(target_model_dir)
             if "images" in self._last_reconstruction_stats:
@@ -1318,11 +1356,6 @@ class PipelineWorker(QThread):
             self.progress_changed.emit(80)
 
         # =========================================================================
-        # STEP 6b — Optional Reference Point Cloud Alignment & Fusion
-        # =========================================================================
-        fused_mesh_name = self._run_reference_cloud_fusion(mvs_out)
-
-        # =========================================================================
         # STEP 7/9 — Surface Mesh Reconstruction
         # =========================================================================
         if self.mesh_mode == "poisson":
@@ -1342,8 +1375,6 @@ class PipelineWorker(QThread):
             self.log_message.emit("[RESUME] Skipping Step 7 (Surface Mesh Reconstruction already complete).")
             if os.path.exists(os.path.join(mvs_out, "scene_dense_mesh.ply")):
                 mesh_input = "scene_dense_mesh.ply"
-            elif os.path.exists(os.path.join(mvs_out, "scene_dense_mesh_refcloud.ply")):
-                mesh_input = "scene_dense_mesh_refcloud.ply"
             else:
                 mesh_input = "scene_mesh.ply"
             self.progress_changed.emit(88)
@@ -1354,30 +1385,26 @@ class PipelineWorker(QThread):
             if target_scene == "scene.mvs":
                 self.log_message.emit("[WARNING] scene_dense.mvs not found. Meshing from sparse scene.mvs.")
 
-            if fused_mesh_name and os.path.exists(os.path.join(mvs_out, fused_mesh_name)):
-                self.log_message.emit(f"[INFO] Skipping ReconstructMesh (Delaunay) — using Reference Cloud fused Poisson mesh: {fused_mesh_name}")
-                mesh_input = fused_mesh_name
+            cmd = [
+                mvs_mesh_exe,
+                target_scene,
+                "--remove-spurious", "20",
+                "--remove-spikes",   "1",
+                "--close-holes",     "30",
+                "--smooth",          "2",
+            ]
+            self._mesh_vertices = 0
+            self._mesh_faces = 0
+            self._spurious_removed = 0
+            self._spikes_removed = 0
+            self._holes_closed = 0
+            if not self._run_process_realtime(cmd, timeout=1800.0, cwd=mvs_out, env=env, line_parser=self._parse_mesh_line):
+                return False
+            self._emit_mesh_summary()
+            if target_scene == "scene_dense.mvs":
+                mesh_input = "scene_dense_mesh.ply"
             else:
-                cmd = [
-                    mvs_mesh_exe,
-                    target_scene,
-                    "--remove-spurious", "20",
-                    "--remove-spikes",   "1",
-                    "--close-holes",     "30",
-                    "--smooth",          "2",
-                ]
-                self._mesh_vertices = 0
-                self._mesh_faces = 0
-                self._spurious_removed = 0
-                self._spikes_removed = 0
-                self._holes_closed = 0
-                if not self._run_process_realtime(cmd, timeout=1800.0, cwd=mvs_out, env=env, line_parser=self._parse_mesh_line):
-                    return False
-                self._emit_mesh_summary()
-                if target_scene == "scene_dense.mvs":
-                    mesh_input = "scene_dense_mesh.ply"
-                else:
-                    mesh_input = "scene_mesh.ply"
+                mesh_input = "scene_mesh.ply"
 
             self._backup_checkpoint("mesh_reconstructed")
             self.progress_changed.emit(88)
@@ -1387,7 +1414,7 @@ class PipelineWorker(QThread):
         # =========================================================================
         refine_mvs_output = "scene_dense_mesh_refine.mvs"
         if not os.path.exists(os.path.join(mvs_out, mesh_input)):
-            for candidate in ["scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+            for candidate in ["scene_dense_mesh.ply", "scene_mesh.ply"]:
                 if os.path.exists(os.path.join(mvs_out, candidate)):
                     mesh_input = candidate
                     break
@@ -1440,7 +1467,7 @@ class PipelineWorker(QThread):
             else:
                 self.status_changed.emit(f"Step 9/{total_steps}: Auto-Cleaning Mesh...")
                 cleanup_input_ply = None
-                for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+                for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
                     candidate_path = os.path.join(mvs_out, candidate)
                     if os.path.exists(candidate_path):
                         cleanup_input_ply = candidate_path
@@ -1477,7 +1504,7 @@ class PipelineWorker(QThread):
         mvs_texture_exe = os.path.join(base_dir, self.toolchain_map["openMVS"]["TextureMesh"])
 
         texture_mesh_ply = None
-        candidates = ["scene_dense_mesh_cleaned.ply", "scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"] if self.auto_cleanup else ["scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]
+        candidates = ["scene_dense_mesh_cleaned.ply", "scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"] if self.auto_cleanup else ["scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]
         for candidate in candidates:
             if os.path.exists(os.path.join(mvs_out, candidate)):
                 texture_mesh_ply = candidate
@@ -1841,74 +1868,6 @@ class PipelineWorker(QThread):
                     best_count = size
                     best_dir = model_dir
         return best_dir
-
-    def _run_reference_cloud_fusion(self, mvs_out: str) -> str | None:
-        """
-        Step 6b: Optional reference cloud alignment, gap fusion, and Poisson meshing.
-        Returns the filename of the generated fused mesh PLY, or None if skipped/failed.
-        """
-        if not self.ref_cloud_path or not os.path.exists(self.ref_cloud_path):
-            return None
-
-        self.status_changed.emit("Step 6b: Aligning & Fusing Reference Cloud...")
-        self.log_message.emit(f"[REF_CLOUD] Starting reference cloud alignment and fusion pipeline...")
-
-        dense_ply = os.path.join(mvs_out, "scene_dense.ply")
-        if not os.path.exists(dense_ply):
-            dense_ply = os.path.join(mvs_out, "scene.ply")
-        if not os.path.exists(dense_ply):
-            self.log_message.emit("[WARNING] No dense or sparse PLY cloud found for reference cloud alignment. Skipping fusion.")
-            return None
-
-        try:
-            import point_cloud_io
-            import cloud_aligner
-            import cloud_fusion
-            import open3d as o3d
-
-            # 1. Load point clouds
-            ref_load = point_cloud_io.load_point_cloud(self.ref_cloud_path, self.log_message.emit)
-            if not ref_load.success or ref_load.cloud is None:
-                self.log_message.emit(f"[WARNING] Failed to load reference cloud: {'; '.join(ref_load.warnings)}. Skipping fusion.")
-                return None
-
-            dense_load = point_cloud_io.load_point_cloud(dense_ply, self.log_message.emit)
-            if not dense_load.success or dense_load.cloud is None:
-                self.log_message.emit(f"[WARNING] Failed to load scene point cloud ({dense_ply}). Skipping fusion.")
-                return None
-
-            # 2. Align reference cloud to scene point cloud
-            align_res = cloud_aligner.align_to_dense(ref_load.cloud, dense_load.cloud, self.log_message.emit)
-            if not align_res.success:
-                self.log_message.emit(f"[WARNING] Reference cloud alignment low confidence: {'; '.join(align_res.warnings)}. Continuing without fusion.")
-                return None
-
-            # 3. Transform reference cloud using similarity matrix
-            aligned_ref = ref_load.cloud.transform(align_res.transform)
-
-            # Save aligned reference cloud for diagnostics
-            aligned_ref_path = os.path.join(mvs_out, "scene_refcloud_aligned.ply")
-            point_cloud_io.save_point_cloud(aligned_ref, aligned_ref_path)
-
-            # 4. Merge gap-filling points into dense cloud
-            merged_cloud = cloud_fusion.merge_clouds(dense_load.cloud, aligned_ref, self.log_message.emit, gap_radius_mult=3.0)
-
-            merged_cloud_path = os.path.join(mvs_out, "scene_dense_refcloud.ply")
-            point_cloud_io.save_point_cloud(merged_cloud, merged_cloud_path)
-
-            # 5. Generate Poisson surface mesh
-            fused_mesh = cloud_fusion.generate_mesh(merged_cloud, self.log_message.emit, poisson_depth=9, density_threshold_pct=5.0)
-
-            fused_mesh_name = "scene_dense_mesh_refcloud.ply"
-            fused_mesh_path = os.path.join(mvs_out, fused_mesh_name)
-            o3d.io.write_triangle_mesh(fused_mesh_path, fused_mesh)
-
-            self.log_message.emit(f"[SUCCESS] Reference cloud fusion complete! Fused Poisson mesh saved as {fused_mesh_name}")
-            return fused_mesh_name
-
-        except Exception as e:
-            self.log_message.emit(f"[WARNING] Reference cloud fusion encountered an error: {e}. Falling back to standard pipeline.")
-            return None
 
     def _run_model_analyzer(self, model_dir: str) -> dict:
         """Runs COLMAP model_analyzer and returns parsed stats."""
@@ -2421,7 +2380,7 @@ class PipelineWorker(QThread):
 
     def _run_poisson_reconstruction(self, mvs_out: str, depth: int) -> bool:
         """
-        Step 7P: Poisson Surface Reconstruction using Open3D and cloud_fusion module.
+        Step 7P: Poisson Surface Reconstruction using Open3D.
         Reads the dense point cloud, reconstructs surface, trims low-density components,
         and saves PLY, OBJ, and GLB mesh outputs.
         """
@@ -2438,7 +2397,6 @@ class PipelineWorker(QThread):
 
         try:
             import open3d as o3d
-            import cloud_fusion
             import trimesh
             import numpy as np
 
@@ -2449,17 +2407,32 @@ class PipelineWorker(QThread):
                 self.log_message.emit("[ERROR] Point cloud is empty or failed to load.")
                 return False
 
-            self.status_changed.emit("Step 7P: Reconstructing Poisson Surface...")
-            self.progress_changed.emit(83)
+            self.status_changed.emit("Step 7P: Estimating Normals & Cleaning...")
+            self.progress_changed.emit(82)
 
-            # Generate Poisson mesh using the cloud_fusion module's helper
-            # This handles normal estimation, orientation consistency check, density trimming, and cluster fragment cleaning.
-            mesh = cloud_fusion.generate_mesh(
-                pcd, 
-                log_fn=self.log_message.emit, 
-                poisson_depth=depth, 
-                density_threshold_pct=5.0
-            )
+            if not pcd.has_normals():
+                self.log_message.emit("[POISSON] Estimating normals...")
+                bbox = pcd.get_axis_aligned_bounding_box()
+                extent = np.asarray(bbox.get_extent())
+                radius_normal = float(np.max(extent)) * 0.015
+                if radius_normal <= 0:
+                    radius_normal = 0.05
+                pcd.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius_normal, max_nn=30))
+                pcd.orient_normals_consistent_tangent_plane(k=15)
+
+            self.status_changed.emit("Step 7P: Reconstructing Poisson Surface...")
+            self.progress_changed.emit(85)
+
+            with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Error):
+                mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                    pcd, depth=depth, linear_fit=True
+                )
+
+            densities_np = np.asarray(densities)
+            if len(densities_np) > 0:
+                cutoff_density = np.percentile(densities_np, 5.0)
+                vertices_to_remove = densities_np < cutoff_density
+                mesh.remove_vertices_by_mask(vertices_to_remove)
 
             if mesh is None or len(mesh.vertices) == 0:
                 self.log_message.emit("[ERROR] Poisson reconstruction produced an empty mesh.")
@@ -2514,7 +2487,6 @@ class CleanupAndTextureWorker(PipelineWorker):
             has_plain_surfaces=False,
             auto_cleanup=True,
             mapper_mode="incremental",
-            ref_cloud_path=None,
             mesh_mode="default",
             poisson_depth=9,
             custom_params=custom_params or {},
@@ -2543,7 +2515,7 @@ class CleanupAndTextureWorker(PipelineWorker):
 
             # Find base mesh candidate to clean
             cleanup_input_ply = None
-            for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh_refcloud.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
+            for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh.ply", "scene_mesh.ply"]:
                 candidate_path = os.path.join(mvs_out, candidate)
                 if os.path.exists(candidate_path):
                     cleanup_input_ply = candidate_path
@@ -2753,7 +2725,6 @@ class RetextureOnlyWorker(PipelineWorker):
             has_plain_surfaces=False,
             auto_cleanup=False,
             mapper_mode="incremental",
-            ref_cloud_path=None,
             mesh_mode="default",
             poisson_depth=9,
             custom_params=custom_params or {},

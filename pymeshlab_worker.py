@@ -180,6 +180,32 @@ def handle_merge_by_distance(ms, pymeshlab, params, input_ply, output_ply):
             _log("[WARNING] Threshold parameter fallback: " + str(e))
             merge_fn()
 
+    # Clean up degenerate/duplicate/null faces and unreferenced vertices produced by vertex merging
+    try:
+        ms.meshing_remove_duplicate_faces()
+    except Exception:
+        pass
+    try:
+        ms.meshing_remove_null_faces()
+    except Exception:
+        pass
+    try:
+        ms.meshing_remove_duplicate_vertices()
+    except Exception:
+        pass
+    try:
+        ms.meshing_remove_unreferenced_vertices()
+    except Exception:
+        pass
+    try:
+        ms.meshing_repair_non_manifold_edges()
+    except Exception:
+        pass
+    try:
+        ms.meshing_repair_non_manifold_vertices()
+    except Exception:
+        pass
+
     os.makedirs(os.path.dirname(os.path.abspath(output_ply)), exist_ok=True)
     ms.save_current_mesh(output_ply)
 

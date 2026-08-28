@@ -331,6 +331,16 @@ class PyMeshLabDirectBackend(MeshProcessingBackend):
             else:
                 ms.meshing_merge_close_vertices()
 
+            # Clean duplicate, null/degenerate faces, and unreferenced vertices produced by vertex merge
+            for fn_name in ["meshing_remove_duplicate_faces", "meshing_remove_null_faces", 
+                            "meshing_remove_duplicate_vertices", "meshing_remove_unreferenced_vertices",
+                            "meshing_repair_non_manifold_edges"]:
+                if hasattr(ms, fn_name):
+                    try:
+                        getattr(ms, fn_name)()
+                    except Exception:
+                        pass
+
             os.makedirs(os.path.dirname(os.path.abspath(output_ply_path)), exist_ok=True)
             ms.save_current_mesh(output_ply_path)
             return os.path.isfile(output_ply_path) and os.path.getsize(output_ply_path) > 0
@@ -606,6 +616,11 @@ class Open3DBackend(MeshProcessingBackend):
             _log(f"[MERGE] Open3D Merge by Distance: threshold_pct={threshold_pct:.2f}%, eps={eps:.5f}", log_callback)
 
             mesh = mesh.merge_close_vertices(eps)
+            mesh.remove_duplicated_triangles()
+            mesh.remove_degenerate_triangles()
+            mesh.remove_duplicated_vertices()
+            mesh.remove_unreferenced_vertices()
+            mesh.remove_non_manifold_edges()
 
             os.makedirs(os.path.dirname(os.path.abspath(output_ply_path)), exist_ok=True)
             o3d.io.write_triangle_mesh(output_ply_path, mesh)

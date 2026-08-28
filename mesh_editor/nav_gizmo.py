@@ -8,17 +8,22 @@ class NavGizmoWidget(QWidget):
     Blender-style 3D view navigation gizmo drawn on screen with QPainter.
     Displays X (Red), Y (Green), Z (Blue) axes and their negative counterparts.
     Clicking any axis snaps the viewport camera to that canonical view.
+    Supports both Z-up (Mesh Editor OpenGL) and Y-up (VisPy 3D Reconstruction) coordinate systems.
     """
     snap_requested = Signal(str)  # Emits the view name: "front", "back", "right", "left", "top", "bottom"
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, coord_system: str = "z-up"):
         super().__init__(parent)
         self.setFixedSize(100, 100)
         self.setMouseTracking(True)
+        self.coord_system = coord_system.lower()
         
         # Camera angles
         self.yaw = 0.0
         self.pitch = 0.0
+        
+        # Custom camera basis vectors (if supplied directly, e.g. from VisPy)
+        self._custom_basis = None  # (right, up, v_dir)
         
         # Gizmo configuration
         self.radius = 35.0  # Axis line length in pixels
@@ -28,58 +33,105 @@ class NavGizmoWidget(QWidget):
         # Hover state
         self.hovered_axis = None  # None or tuple (name, is_pos)
         
-        # Define 3D axis vectors in world space (Z-up)
-        self.axes = {
-            "X": (np.array([1.0, 0.0, 0.0]), QColor(255, 60, 50), "+X", "right"),
-            "-X": (np.array([-1.0, 0.0, 0.0]), QColor(180, 50, 45), "-X", "left"),
-            "Y": (np.array([0.0, 1.0, 0.0]), QColor(50, 200, 80), "+Y", "back"),
-            "-Y": (np.array([0.0, -1.0, 0.0]), QColor(40, 150, 65), "-Y", "front"),
-            "Z": (np.array([0.0, 0.0, 1.0]), QColor(30, 140, 255), "+Z", "top"),
-            "-Z": (np.array([0.0, 0.0, -1.0]), QColor(25, 100, 190), "-Z", "bottom"),
-        }
+        self._init_axes()
+
+    def _init_axes(self):
+        """Initializes 3D axis vectors and canonical view mappings based on coordinate system."""
+        if self.coord_system == "y-up":
+            # VisPy coordinate system (Y-up, X-right, Z-front)
+            self.axes = {
+                "X": (np.array([1.0, 0.0, 0.0], dtype=np.float32), QColor(255, 60, 50), "+X", "right"),
+                "-X": (np.array([-1.0, 0.0, 0.0], dtype=np.float32), QColor(180, 50, 45), "-X", "left"),
+                "Y": (np.array([0.0, 1.0, 0.0], dtype=np.float32), QColor(50, 200, 80), "+Y", "top"),
+                "-Y": (np.array([0.0, -1.0, 0.0], dtype=np.float32), QColor(40, 150, 65), "-Y", "bottom"),
+                "Z": (np.array([0.0, 0.0, 1.0], dtype=np.float32), QColor(30, 140, 255), "+Z", "front"),
+                "-Z": (np.array([0.0, 0.0, -1.0], dtype=np.float32), QColor(25, 100, 190), "-Z", "back"),
+            }
+        else:
+            # Z-up coordinate system (Mesh Editor / Blender)
+            self.axes = {
+                "X": (np.array([1.0, 0.0, 0.0], dtype=np.float32), QColor(255, 60, 50), "+X", "right"),
+                "-X": (np.array([-1.0, 0.0, 0.0], dtype=np.float32), QColor(180, 50, 45), "-X", "left"),
+                "Y": (np.array([0.0, 1.0, 0.0], dtype=np.float32), QColor(50, 200, 80), "+Y", "back"),
+                "-Y": (np.array([0.0, -1.0, 0.0], dtype=np.float32), QColor(40, 150, 65), "-Y", "front"),
+                "Z": (np.array([0.0, 0.0, 1.0], dtype=np.float32), QColor(30, 140, 255), "+Z", "top"),
+                "-Z": (np.array([0.0, 0.0, -1.0], dtype=np.float32), QColor(25, 100, 190), "-Z", "bottom"),
+            }
+
+    def set_coordinate_system(self, coord_system: str):
+        """Switch between 'z-up' and 'y-up' coordinate conventions."""
+        self.coord_system = coord_system.lower()
+        self._init_axes()
+        self.update()
 
     def update_orientation(self, yaw: float, pitch: float):
-        """Updates the internal camera angles and redraws the gizmo."""
+        """Updates internal camera angles (Z-up standard) and redraws."""
+        self._custom_basis = None
         self.yaw = yaw
         self.pitch = pitch
         self.update()
 
+    def update_from_vispy(self, azimuth_deg: float, elevation_deg: float):
+        """
+        Updates gizmo orientation directly from VisPy TurntableCamera (Y-up standard).
+        Computes the camera basis vectors in real-time.
+        """
+        self.coord_system = "y-up"
+        az = np.radians(azimuth_deg)
+        el = np.radians(elevation_deg)
+        
+        cos_el = np.cos(el)
+        sin_el = np.sin(el)
+        cos_az = np.cos(az)
+        sin_az = np.sin(az)
+        
+        # Camera right vector: [cos_az, 0, -sin_az]
+        right = np.array([cos_az, 0.0, -sin_az], dtype=np.float32)
+        
+        # Camera up vector: [-sin_el * sin_az, cos_el, -sin_el * cos_az]
+        up = np.array([-sin_el * sin_az, cos_el, -sin_el * cos_az], dtype=np.float32)
+        
+        # View direction (from camera towards target at origin):
+        v_dir = np.array([-cos_el * sin_az, -sin_el, -cos_el * cos_az], dtype=np.float32)
+        
+        self._custom_basis = (right, up, v_dir)
+        self.update()
+
     def _get_projected_axes(self):
         """
-        Projects the 3D axes to 2D widget coordinates using the camera yaw and pitch.
-        Returns a sorted list of (axis_name, screen_x, screen_y, depth, color, view_name, is_positive)
-        ordered from back-to-front (largest depth to smallest depth).
+        Projects the 3D axes to 2D widget coordinates using either custom basis or yaw/pitch.
+        Returns a sorted list of axis dicts ordered from back-to-front (largest depth to smallest depth).
         """
         center_x = self.width() / 2.0
         center_y = self.height() / 2.0
         
-        # Compute camera right, up, and view direction vectors
-        # Note: target coordinates are not needed since the gizmo is centered at target=0
-        cos_pitch = np.cos(self.pitch)
-        sin_pitch = np.sin(self.pitch)
-        cos_yaw = np.cos(self.yaw)
-        sin_yaw = np.sin(self.yaw)
-        
-        # Camera right vector: [cos_yaw, sin_yaw, 0]
-        right = np.array([cos_yaw, sin_yaw, 0.0], dtype=np.float32)
-        
-        # Camera up vector: [-sin_yaw * sin_pitch, cos_yaw * sin_pitch, cos_pitch]
-        up = np.array([-sin_yaw * sin_pitch, cos_yaw * sin_pitch, cos_pitch], dtype=np.float32)
-        
-        # View direction (pointing from camera to target):
-        # dir = [-cos_pitch * sin_yaw, cos_pitch * cos_yaw, -sin_pitch]
-        v_dir = np.array([-cos_pitch * sin_yaw, cos_pitch * cos_yaw, -sin_pitch], dtype=np.float32)
+        if self._custom_basis is not None:
+            right, up, v_dir = self._custom_basis
+        else:
+            cos_pitch = np.cos(self.pitch)
+            sin_pitch = np.sin(self.pitch)
+            cos_yaw = np.cos(self.yaw)
+            sin_yaw = np.sin(self.yaw)
+            
+            # Camera right vector: [cos_yaw, sin_yaw, 0]
+            right = np.array([cos_yaw, sin_yaw, 0.0], dtype=np.float32)
+            
+            # Camera up vector: [-sin_yaw * sin_pitch, cos_yaw * sin_pitch, cos_pitch]
+            up = np.array([-sin_yaw * sin_pitch, cos_yaw * sin_pitch, cos_pitch], dtype=np.float32)
+            
+            # View direction (pointing from camera to target):
+            v_dir = np.array([-cos_pitch * sin_yaw, cos_pitch * cos_yaw, -sin_pitch], dtype=np.float32)
         
         projected = []
         for name, (vec, color, label, view_name) in self.axes.items():
             is_pos = not name.startswith("-")
             
             # Project onto screen plane using right and up vectors
-            dx = np.dot(vec, right)
-            dy = np.dot(vec, up)
+            dx = float(np.dot(vec, right))
+            dy = float(np.dot(vec, up))
             
             # Depth along camera view direction (positive = away, negative = towards viewer)
-            depth = np.dot(vec, v_dir)
+            depth = float(np.dot(vec, v_dir))
             
             # Screen space mapping (Qt Y goes down)
             sx = center_x + self.radius * dx
