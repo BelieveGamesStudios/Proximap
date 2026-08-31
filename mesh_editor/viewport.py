@@ -51,6 +51,8 @@ class MeshEditorViewport(QOpenGLWidget):
         self.scene = Scene()
         self.gizmo = Gizmo()
         self._gizmo_dragging = False
+        self.transform_enabled = True
+        self.enable_gizmo = True
         
         # Box selection states
         self._is_box_selecting = False
@@ -500,11 +502,21 @@ void main() { fragColor = pickColor; }
         gl.glDisable(gl.GL_BLEND)
         gl.glDepthMask(gl.GL_TRUE)
         
-        # 4. Render Custom Gizmo Overlay
-        if self.scene.selected_object is not None:
+        # 4. Render Custom Gizmo Overlay (Only if transform tools are enabled)
+        if self.transform_enabled and self.enable_gizmo and self.scene.selected_object is not None:
             pivot = self._get_gizmo_pivot()
             if pivot is not None:
                 self.gizmo.draw(pivot, self.camera, w_logical, h_logical)
+
+    def set_transform_enabled(self, enabled: bool):
+        """Enable or disable Mesh Editor transformation gizmos and editing handles."""
+        self.transform_enabled = enabled
+        self.enable_gizmo = enabled
+        if not enabled:
+            self._gizmo_dragging = False
+            self.scene.selected_objects = []
+            self.scene.active_object = None
+        self.update()
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -608,7 +620,7 @@ void main() { fragColor = pickColor; }
         if self.invert_y:
             dy = -dy
         
-        if self._gizmo_dragging:
+        if self.transform_enabled and self._gizmo_dragging:
             self.gizmo.update_drag(pos.x(), pos.y(), self._drag_pivot, self.camera, self.width(), self.height())
             
             # Propagate pivot modifications to all selected objects
@@ -646,7 +658,7 @@ void main() { fragColor = pickColor; }
             self.update()
         else:
             # Hover check for cursor change or highlight
-            if self.scene.selected_object is not None:
+            if self.transform_enabled and self.scene.selected_object is not None:
                 pivot = self._get_gizmo_pivot()
                 if pivot is not None:
                     old_hover = self.gizmo.hovered_handle
@@ -684,8 +696,8 @@ void main() { fragColor = pickColor; }
         pos = event.position()
         self.last_mouse_pos = pos.toPoint()
         
-        # 1. First check if mouse clicked the gizmo
-        if self.scene.selected_object is not None and event.button() == Qt.MouseButton.LeftButton:
+        # 1. First check if mouse clicked the gizmo (if transform tools are enabled)
+        if self.transform_enabled and self.scene.selected_object is not None and event.button() == Qt.MouseButton.LeftButton:
             pivot = self._get_gizmo_pivot()
             if pivot is not None:
                 dragged = self.gizmo.begin_drag(pos.x(), pos.y(), pivot, self.camera, self.width(), self.height())
@@ -840,26 +852,27 @@ void main() { fragColor = pickColor; }
             event.accept()
             return
             
-        if key == Qt.Key.Key_G:
-            # G: Translate
-            self.gizmo.operation = "translate"
-            self.tool_changed.emit(self.gizmo.operation)
-            self.update()
-        elif key == Qt.Key.Key_R:
-            # R: Rotate
-            self.gizmo.operation = "rotate"
-            self.tool_changed.emit(self.gizmo.operation)
-            self.update()
-        elif key == Qt.Key.Key_S:
-            # S: Scale
-            self.gizmo.operation = "scale"
-            self.tool_changed.emit(self.gizmo.operation)
-            self.update()
-        elif key in [Qt.Key.Key_Delete, Qt.Key.Key_Backspace]:
-            # Delete/Backspace: Remove Selected Object
-            self.delete_pressed.emit()
-            event.accept()
-            return
+        if self.transform_enabled:
+            if key == Qt.Key.Key_G:
+                # G: Translate
+                self.gizmo.operation = "translate"
+                self.tool_changed.emit(self.gizmo.operation)
+                self.update()
+            elif key == Qt.Key.Key_R:
+                # R: Rotate
+                self.gizmo.operation = "rotate"
+                self.tool_changed.emit(self.gizmo.operation)
+                self.update()
+            elif key == Qt.Key.Key_S:
+                # S: Scale
+                self.gizmo.operation = "scale"
+                self.tool_changed.emit(self.gizmo.operation)
+                self.update()
+            elif key in [Qt.Key.Key_Delete, Qt.Key.Key_Backspace]:
+                # Delete/Backspace: Remove Selected Object
+                self.delete_pressed.emit()
+                event.accept()
+                return
         
         # Camera snap shortcuts (keys 1,3,5,7 and numpad counterparts)
         if key == Qt.Key.Key_1:

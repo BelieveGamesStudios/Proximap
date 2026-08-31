@@ -3604,6 +3604,53 @@ class MainWindow(QMainWindow):
         placeholder_layout.addStretch()
         
         self.main_tabs.addTab(self.mesh_editor_placeholder, "Mesh Editor")
+
+        # Register Spatial Texture Engine tab
+        self.ste_tab = None
+        self.ste_placeholder = QWidget(self.main_tabs)
+        ste_placeholder_layout = QVBoxLayout(self.ste_placeholder)
+        ste_placeholder_layout.setContentsMargins(20, 20, 20, 20)
+        
+        ste_loading_container = QWidget(self.ste_placeholder)
+        ste_loading_container.setFixedWidth(360)
+        ste_loading_layout = QVBoxLayout(ste_loading_container)
+        ste_loading_layout.setSpacing(12)
+        ste_loading_layout.setAlignment(Qt.AlignCenter)
+        
+        self.ste_loading_msg_label = QLabel("Opening Spatial Texture Engine...", ste_loading_container)
+        self.ste_loading_msg_label.setStyleSheet("color: #ffffff; font-size: 15px; font-weight: bold;")
+        self.ste_loading_msg_label.setAlignment(Qt.AlignCenter)
+        
+        self.ste_loading_progress = QProgressBar(ste_loading_container)
+        self.ste_loading_progress.setRange(0, 0)  # Indeterminate loading bar
+        self.ste_loading_progress.setTextVisible(False)
+        self.ste_loading_progress.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #3A3A3A;
+                background-color: #222222;
+                height: 6px;
+                border-radius: 3px;
+            }
+            QProgressBar::chunk {
+                background-color: #00E676;
+                border-radius: 3px;
+            }
+        """)
+        
+        self.ste_loading_sub_label = QLabel("Initializing CCCoreLib alignment engine and 3D viewport...", ste_loading_container)
+        self.ste_loading_sub_label.setStyleSheet("color: #737373; font-size: 11px;")
+        self.ste_loading_sub_label.setAlignment(Qt.AlignCenter)
+        
+        ste_loading_layout.addWidget(self.ste_loading_msg_label)
+        ste_loading_layout.addWidget(self.ste_loading_progress)
+        ste_loading_layout.addWidget(self.ste_loading_sub_label)
+        
+        ste_placeholder_layout.addStretch()
+        ste_placeholder_layout.addWidget(ste_loading_container, 0, Qt.AlignCenter)
+        ste_placeholder_layout.addStretch()
+        
+        self.main_tabs.addTab(self.ste_placeholder, "Spatial Texture Engine")
+
         self.main_tabs.currentChanged.connect(self._on_tab_changed)
         
         self._set_process_btn_state("idle")
@@ -3615,6 +3662,32 @@ class MainWindow(QMainWindow):
                 self._mesh_editor_loading = True
                 QApplication.setOverrideCursor(Qt.WaitCursor)
                 QTimer.singleShot(100, self._load_mesh_editor)
+        elif index == 2 and self.ste_tab is None:
+            if not getattr(self, "_ste_loading", False):
+                self._ste_loading = True
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                QTimer.singleShot(100, self._load_ste_workspace)
+
+    def _load_ste_workspace(self):
+        try:
+            from ste_workspace import STEWorkspace
+            self.ste_tab = STEWorkspace(self)
+            layout = self.ste_placeholder.layout()
+            if layout:
+                while layout.count():
+                    child = layout.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.addWidget(self.ste_tab)
+            # Auto-connect active photogrammetry session if available
+            self.ste_tab._load_active_session_reconstruction()
+        except Exception as e:
+            import traceback
+            print(f"[ERROR] Failed to load Spatial Texture Engine: {e}\n{traceback.format_exc()}")
+        finally:
+            self._ste_loading = False
+            QApplication.restoreOverrideCursor()
 
     def _load_mesh_editor(self):
         try:
