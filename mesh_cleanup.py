@@ -85,6 +85,13 @@ def _find_python310() -> str:
     base   = _app_base_dir()
     intdir = _internal_dir()
 
+    # --- Priority 1: user-level pymeshlab venv (created by ensure_pymeshlab_venv) ---
+    # This is a proper pip-installed environment — most reliable.
+    venv_python = _get_venv_python()
+    if venv_python and os.path.isfile(venv_python) and os.access(venv_python, os.X_OK):
+        return venv_python
+
+    # --- Priority 2: Bundled standalone Python 3.10 (from python-build-standalone) ---
     for candidate in [
         os.path.join(base,   "backend_bin", "python3.10", "bin", "python3.10"),
         os.path.join(base,   "backend_bin", "python3.11", "bin", "python3.11"),
@@ -113,6 +120,208 @@ def _find_python310() -> str:
         return sys.executable
 
     return ""
+
+
+def _get_venv_dir() -> str:
+    """Return the path to the user-level pymeshlab venv."""
+    # Store in XDG_DATA_HOME or ~/.local/share/proximap/pymeshlab_venv
+    xdg = os.environ.get("XDG_DATA_HOME", os.path.join(os.path.expanduser("~"), ".local", "share"))
+    return os.path.join(xdg, "proximap", "pymeshlab_venv")
+
+
+def _get_venv_python() -> str:
+    """Return the python executable inside the pymeshlab venv (may not exist yet)."""
+    venv_dir = _get_venv_dir()
+    # Linux/macOS
+    p = os.path.join(venv_dir, "bin", "python3")
+    if os.path.isfile(p):
+        return p
+    p = os.path.join(venv_dir, "bin", "python")
+    if os.path.isfile(p):
+        return p
+    # Windows
+    p = os.path.join(venv_dir, "Scripts", "python.exe")
+    if os.path.isfile(p):
+        return p
+    return ""
+
+
+def _find_bundled_whl() -> str:
+    """Return the path to the platform-appropriate bundled PyMeshLab .whl file."""
+    base   = _app_base_dir()
+    intdir = _internal_dir()
+
+    import platform, glob
+    machine = platform.machine().lower()  # x86_64, aarch64, arm64
+    system  = sys.platform               # linux, darwin, win32
+
+    # Map platform to wheel tag substrings
+    if system == "linux":
+        tags = ["manylinux", "linux"]
+    elif system == "darwin":
+        tags = ["macosx", "darwin"]
+    else:
+        tags = ["win"]
+
+    search_dirs = [
+        os.path.join(base,   "backend_bin", "PymeshLab"),
+        os.path.join(intdir, "backend_bin", "PymeshLab"),
+        os.path.join(intdir, "PymeshLab"),
+    ]
+    for d in search_dirs:
+        if not os.path.isdir(d):
+            continue
+        for tag in tags:
+            for whl in glob.glob(os.path.join(d, f"pymeshlab-*{tag}*.whl")):
+                return whl
+    return ""
+
+
+def ensure_pymeshlab_venv(log_callback=None) -> bool:
+    """
+    Create a user-level Python 3.10 venv and pip-install the bundled PyMeshLab .whl
+    into it (if not already done). This is the canonical way to get a working
+    pymeshlab that has correct Qt plugin paths, .dist-info metadata, and shared libs.
+
+    Returns True if the venv is ready and pymeshlab can be imported, False otherwise.
+    Called once at application startup (during the splash screen).
+    """
+    venv_dir    = _get_venv_dir()
+    venv_python = _get_venv_python()
+    sentinel    = os.path.join(venv_dir, ".pymeshlab_installed")
+
+    # If sentinel exists, venv is already set up — do a quick sanity check.
+    if os.path.isfile(sentinel) and venv_python:
+        result = subprocess.run(
+            [venv_python, "-c", "import pymeshlab; print('ok')"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0 and "ok" in result.stdout:
+            _log("[PYMESHLAB] Venv already set up and verified.", log_callback)
+            return True
+        else:
+            # Sentinel exists but import failed — re-create venv
+            _log("[PYMESHLAB] Venv check failed, recreating...", log_callback)
+            import shutil as _shutil
+            _shutil.rmtree(venv_dir, ignore_errors=True)
+            try:
+                os.remove(sentinel)
+            except FileNotFoundError:
+                pass
+
+    # Find bundled standalone Python 3.10 to create the venv
+    base   = _app_base_dir()
+    intdir = _internal_dir()
+    bundled_py310 = ""
+    for candidate in [
+        os.path.join(base,   "backend_bin", "python3.10", "bin", "python3.10"),
+        os.path.join(intdir, "backend_bin", "python3.10", "bin", "python3.10"),
+        os.path.join(intdir, "python3.10",  "bin", "python3.10"),
+        os.path.join(base,   "backend_bin", "python3.10", "python.exe"),
+    ]:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            bundled_py310 = candidate
+            break
+
+    if not bundled_py310:
+        import shutil
+        bundled_py310 = shutil.which("python3.10") or ""
+
+    if not bundled_py310:
+        _log("[PYMESHLAB] No Python 3.10 runtime found — cannot create pymeshlab venv.", log_callback)
+        return False
+
+    whl = _find_bundled_whl()
+    if not whl:
+        _log("[PYMESHLAB] No bundled .whl file found — cannot install pymeshlab.", log_callback)
+        return False
+
+    _log(f"[PYMESHLAB] Setting up mesh tools (first launch only)...", log_callback)
+    _log(f"[PYMESHLAB] Python: {bundled_py310}", log_callback)
+    _log(f"[PYMESHLAB] Wheel:  {os.path.basename(whl)}", log_callback)
+
+    os.makedirs(venv_dir, exist_ok=True)
+
+    # Step 1: Create the venv
+    try:
+        result = subprocess.run(
+            [bundled_py310, "-m", "venv", "--without-pip", venv_dir],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.returncode != 0:
+            _log(f"[PYMESHLAB] venv creation failed: {result.stderr[:500]}", log_callback)
+            return False
+        _log("[PYMESHLAB] Venv created.", log_callback)
+    except Exception as e:
+        _log(f"[PYMESHLAB] venv creation exception: {e}", log_callback)
+        return False
+
+    # Step 2: Bootstrap pip into the venv using ensurepip via the venv's own python
+    new_python = _get_venv_python()
+    if not new_python:
+        _log("[PYMESHLAB] Venv python not found after creation.", log_callback)
+        return False
+
+    try:
+        result = subprocess.run(
+            [new_python, "-m", "ensurepip", "--upgrade"],
+            capture_output=True, text=True, timeout=120
+        )
+        if result.returncode != 0:
+            # ensurepip might fail if pip is missing from the standalone; try get-pip
+            _log("[PYMESHLAB] ensurepip failed, trying get-pip fallback...", log_callback)
+            import urllib.request
+            get_pip_path = os.path.join(venv_dir, "get-pip.py")
+            urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", get_pip_path)
+            subprocess.run([new_python, get_pip_path], capture_output=True, text=True, timeout=120)
+        _log("[PYMESHLAB] pip bootstrapped.", log_callback)
+    except Exception as e:
+        _log(f"[PYMESHLAB] ensurepip failed (non-fatal): {e}", log_callback)
+
+    # Step 3: pip install numpy first (pymeshlab depends on it), then pymeshlab from the .whl
+    try:
+        # Install numpy from PyPI (required dependency for pymeshlab)
+        _log("[PYMESHLAB] Installing numpy dependency...", log_callback)
+        result = subprocess.run(
+            [new_python, "-m", "pip", "install", "--quiet", "numpy"],
+            capture_output=True, text=True, timeout=300
+        )
+        if result.returncode != 0:
+            _log(f"[PYMESHLAB] numpy install failed: {result.stderr[-300:]}", log_callback)
+            # Non-fatal: pymeshlab may still work if numpy is already available
+
+        # Now install pymeshlab itself from the bundled .whl
+        _log("[PYMESHLAB] Installing pymeshlab from bundled wheel...", log_callback)
+        result = subprocess.run(
+            [new_python, "-m", "pip", "install", "--no-deps", "--force-reinstall", whl],
+            capture_output=True, text=True, timeout=300
+        )
+        if result.returncode != 0:
+            _log(f"[PYMESHLAB] pip install failed:\n{result.stdout[-500:]}\n{result.stderr[-500:]}", log_callback)
+            return False
+        _log("[PYMESHLAB] pymeshlab installed into venv.", log_callback)
+    except Exception as e:
+        _log(f"[PYMESHLAB] pip install exception: {e}", log_callback)
+        return False
+
+    # Step 4: Verify the install
+    try:
+        result = subprocess.run(
+            [new_python, "-c", "import pymeshlab; print('ok')"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0 and "ok" in result.stdout:
+            # Write sentinel so we skip setup on future launches
+            with open(sentinel, "w") as f:
+                f.write("1")
+            _log("[PYMESHLAB] Venv verified — pymeshlab ready.", log_callback)
+            return True
+        else:
+            _log(f"[PYMESHLAB] Verification failed: {result.stderr[:500]}", log_callback)
+            return False
+    except Exception as e:
+        _log(f"[PYMESHLAB] Verification exception: {e}", log_callback)
+        return False
 
 
 def _find_worker_script() -> str:
@@ -247,6 +456,7 @@ class PyMeshLabDirectBackend(MeshProcessingBackend):
         if cleanup_params is None:
             cleanup_params = {}
 
+        enable_reduction     = bool(cleanup_params.get("enable_reduction", True))
         target_reduction_pct = float(cleanup_params.get("target_reduction_pct", 50))
         remove_duplicates    = bool(cleanup_params.get("remove_duplicates", True))
         repair_nonmanifold   = bool(cleanup_params.get("repair_nonmanifold", True))
@@ -276,19 +486,25 @@ class PyMeshLabDirectBackend(MeshProcessingBackend):
                 ms.meshing_close_holes(maxholesize=max_hole_size)
 
             ms.meshing_remove_connected_component_by_face_number(mincomponentsize=25)
-            ms.meshing_re_orient_faces_coherentely()
+            try:
+                ms.meshing_re_orient_faces_coherently()
+            except Exception as e:
+                _log(f"[CLEANUP] Note: Face re-orientation skipped: {e}", log_callback)
             ms.meshing_merge_close_vertices()
 
-            target_perc = max(0.05, min(0.95, (100.0 - target_reduction_pct) / 100.0))
-            _log(f"[CLEANUP] Applying {int(target_reduction_pct)}% Quadric Edge Collapse Decimation...",
-                 log_callback)
-            ms.meshing_decimation_quadric_edge_collapse(
-                targetperc=target_perc,
-                qualitythr=0.3,
-                preserveboundary=True,
-                preservenormal=True,
-                preservetopology=True,
-            )
+            if enable_reduction and target_reduction_pct > 0:
+                target_perc = max(0.05, min(0.95, (100.0 - target_reduction_pct) / 100.0))
+                _log(f"[CLEANUP] Applying {int(target_reduction_pct)}% Quadric Edge Collapse Decimation...",
+                     log_callback)
+                ms.meshing_decimation_quadric_edge_collapse(
+                    targetperc=target_perc,
+                    qualitythr=0.3,
+                    preserveboundary=True,
+                    preservenormal=True,
+                    preservetopology=True,
+                )
+            else:
+                _log("[CLEANUP] Face reduction disabled. Keeping original face resolution.", log_callback)
 
             final_mesh = ms.current_mesh()
             final_v    = final_mesh.vertex_number()
@@ -474,6 +690,7 @@ class PyMeshLabWorkerBackend(MeshProcessingBackend):
             "action":               "cleanup",
             "input_ply":            input_ply_path,
             "output_ply":           output_ply_path,
+            "enable_reduction":     bool(cleanup_params.get("enable_reduction", True)),
             "target_reduction_pct": float(cleanup_params.get("target_reduction_pct", 50)),
             "remove_duplicates":    bool(cleanup_params.get("remove_duplicates", True)),
             "repair_nonmanifold":   bool(cleanup_params.get("repair_nonmanifold", True)),
@@ -554,6 +771,7 @@ class Open3DBackend(MeshProcessingBackend):
         if cleanup_params is None:
             cleanup_params = {}
 
+        enable_reduction     = bool(cleanup_params.get("enable_reduction", True))
         target_reduction_pct = float(cleanup_params.get("target_reduction_pct", 50))
         remove_duplicates    = bool(cleanup_params.get("remove_duplicates", True))
 
@@ -574,12 +792,14 @@ class Open3DBackend(MeshProcessingBackend):
                 mesh.remove_unreferenced_vertices()
                 mesh.remove_degenerate_triangles()
 
-            if init_f > 0:
+            if enable_reduction and target_reduction_pct > 0 and init_f > 0:
                 target_perc      = max(0.05, min(0.95, (100.0 - target_reduction_pct) / 100.0))
                 target_triangles = max(10, int(init_f * target_perc))
                 _log(f"[CLEANUP] Applying {int(target_reduction_pct)}% Quadric Edge Collapse Decimation "
                      f"(target {target_triangles:,} faces)...", log_callback)
                 mesh = mesh.simplify_quadric_decimation(target_number_of_triangles=target_triangles)
+            else:
+                _log("[CLEANUP] Face reduction disabled. Keeping original face resolution.", log_callback)
 
             os.makedirs(os.path.dirname(os.path.abspath(output_ply_path)), exist_ok=True)
             o3d.io.write_triangle_mesh(output_ply_path, mesh)

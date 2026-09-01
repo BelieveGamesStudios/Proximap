@@ -25,11 +25,13 @@ if [ ! -d "dist/Proximap" ]; then
 fi
 
 mkdir -p dist/Proximap/backend_bin
+mkdir -p dist/Proximap/_internal/backend_bin
 mkdir -p dist/Proximap/models
 mkdir -p dist/Proximap/public
 
 if [ -d "backend_bin" ]; then
     cp -r backend_bin/* dist/Proximap/backend_bin/ 2>/dev/null || true
+    cp -r backend_bin/* dist/Proximap/_internal/backend_bin/ 2>/dev/null || true
 fi
 if [ -d "models" ]; then
     cp -r models/* dist/Proximap/models/ 2>/dev/null || true

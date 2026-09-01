@@ -823,8 +823,8 @@ def load_mesh_file(file_path: str) -> list[tuple[str, Mesh]]:
                     elif hasattr(mat, 'baseColorTexture') and mat.baseColorTexture is not None:
                         texture_data = mat.baseColorTexture
 
-        local_min = geom.bounds[0].astype(np.float32)
-        local_max = geom.bounds[1].astype(np.float32)
+        local_min = np.min(vertices, axis=0).astype(np.float32) if len(vertices) > 0 else np.zeros(3, dtype=np.float32)
+        local_max = np.max(vertices, axis=0).astype(np.float32) if len(vertices) > 0 else np.zeros(3, dtype=np.float32)
 
         mesh = Mesh(
             vertices.flatten(), 

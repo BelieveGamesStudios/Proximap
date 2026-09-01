@@ -780,6 +780,11 @@ class MeshToolModal(QFrame):
         cleanup_layout.setContentsMargins(0, 4, 0, 4)
         cleanup_layout.setSpacing(6)
 
+        self.mc_enable_reduction_check = QCheckBox("Enable Face Reduction", self.cleanup_panel)
+        self.mc_enable_reduction_check.setStyleSheet("font-size: 11px; color: #CCCCCC; font-weight: bold;")
+        self.mc_enable_reduction_check.setChecked(True)
+        cleanup_layout.addWidget(self.mc_enable_reduction_check)
+
         c_grid = QGridLayout()
         c_grid.setContentsMargins(0, 0, 0, 0)
         c_grid.setSpacing(6)
@@ -787,7 +792,7 @@ class MeshToolModal(QFrame):
         lbl_reduc = QLabel("Face Reduction (%):", self.cleanup_panel)
         lbl_reduc.setStyleSheet(lbl_style)
         self.mc_reduction_spin = QSpinBox(self.cleanup_panel)
-        self.mc_reduction_spin.setRange(10, 90)
+        self.mc_reduction_spin.setRange(5, 95)
         self.mc_reduction_spin.setSingleStep(5)
         self.mc_reduction_spin.setSuffix("%")
         self.mc_reduction_spin.setValue(50)
@@ -796,11 +801,14 @@ class MeshToolModal(QFrame):
         c_grid.addWidget(lbl_reduc, 0, 0)
         c_grid.addWidget(self.mc_reduction_stepper, 0, 1)
 
+        self.mc_enable_reduction_check.toggled.connect(self.mc_reduction_stepper.setEnabled)
+        self.mc_enable_reduction_check.toggled.connect(lbl_reduc.setEnabled)
+
         lbl_hole = QLabel("Max Hole Size (faces):", self.cleanup_panel)
         lbl_hole.setStyleSheet(lbl_style)
         self.mc_max_hole_spin = QSpinBox(self.cleanup_panel)
-        self.mc_max_hole_spin.setRange(5, 500)
-        self.mc_max_hole_spin.setSingleStep(5)
+        self.mc_max_hole_spin.setRange(5, 5000)
+        self.mc_max_hole_spin.setSingleStep(10)
         self.mc_max_hole_spin.setValue(30)
         self.mc_max_hole_spin.setToolTip("Maximum hole size in faces to automatically close during mesh repair.")
         self.mc_max_hole_stepper = SpinBoxStepper(self.mc_max_hole_spin, self.cleanup_panel)
@@ -1087,7 +1095,8 @@ class MeshToolModal(QFrame):
         params = {}
         if self.current_tool_id == "cleanup":
             params = {
-                "target_reduction_pct": self.mc_reduction_spin.value(),
+                "enable_reduction": self.mc_enable_reduction_check.isChecked(),
+                "target_reduction_pct": self.mc_reduction_spin.value() if self.mc_enable_reduction_check.isChecked() else 0,
                 "max_hole_size": self.mc_max_hole_spin.value(),
                 "remove_duplicates": self.mc_remove_dups_check.isChecked(),
                 "repair_nonmanifold": self.mc_repair_nm_check.isChecked(),
@@ -1112,23 +1121,28 @@ class MeshToolModal(QFrame):
                 "iterations": self.smooth_iter_spin.value(),
             }
 
-        self.btn_apply.setEnabled(False)
+        self.set_busy(True)
         self.apply_requested.emit(self.current_tool_id, params)
+
+    def set_busy(self, busy: bool):
+        """Disables/enables modal controls during async operations (mesh operations, retexturing)."""
+        self.btn_apply.setEnabled(not busy)
+        self.btn_revert.setEnabled((not busy) and self.has_applied_preview)
+        self.btn_retexture.setEnabled(not busy)
+        self.btn_close.setEnabled(not busy)
+        self.close_btn.setEnabled(not busy)
+        self.cleanup_panel.setEnabled(not busy)
+        self.merge_panel.setEnabled(not busy)
+        self.smooth_panel.setEnabled(not busy)
 
     def on_preview_applied(self, num_vertices: int, num_faces: int):
         self.has_applied_preview = True
-        self.btn_revert.setEnabled(True)
-        self.btn_retexture.setVisible(True)
-        self.btn_retexture.setEnabled(True)
-        self.btn_apply.setEnabled(True)
+        self.set_busy(False)
         self.adjustSize()
 
     def on_reverted(self):
         self.has_applied_preview = False
-        self.btn_revert.setEnabled(False)
-        self.btn_retexture.setVisible(True)
-        self.btn_retexture.setEnabled(True)
-        self.btn_apply.setEnabled(True)
+        self.set_busy(False)
         self.adjustSize()
 
     def set_status(self, msg: str):
@@ -1735,6 +1749,15 @@ class ViewerWrapperWidget(QFrame):
             self.tools_modal.setVisible(True)
             self._position_tools_modal()
             self.tools_modal.raise_()
+
+    def set_tool_modals_busy(self, busy: bool):
+        """Enables/disables buttons and controls on tool modals during async tasks."""
+        if hasattr(self, 'tools_modal'):
+            self.tools_modal.set_busy(busy)
+        if hasattr(self, 'crop_btn_row'):
+            self.crop_btn_row.setEnabled(not busy)
+        if hasattr(self, 'select_btn_row'):
+            self.select_btn_row.setEnabled(not busy)
 
     def _position_crop_modal(self):
         if hasattr(self, 'crop_modal') and self.crop_modal.isVisible():
@@ -3454,43 +3477,51 @@ class MainWindow(QMainWindow):
         
         lbl_mc_style = "font-size: 11px; color: #aaaaaa; border: none; background: transparent;"
         
+        self.mc_enable_reduction_check = QCheckBox("Enable Face Reduction", self.mc_options_container)
+        self.mc_enable_reduction_check.setStyleSheet("font-size: 11px; color: #cccccc; font-weight: bold; border: none; background: transparent;")
+        self.mc_enable_reduction_check.setChecked(True)
+        mc_grid.addWidget(self.mc_enable_reduction_check, 0, 0, 1, 2)
+
         lbl_reduction = QLabel("Face Reduction (%):", self.mc_options_container)
         lbl_reduction.setStyleSheet(lbl_mc_style)
         self.mc_reduction_spin = QSpinBox(self.mc_options_container)
-        self.mc_reduction_spin.setRange(10, 90)
+        self.mc_reduction_spin.setRange(5, 95)
         self.mc_reduction_spin.setSingleStep(5)
         self.mc_reduction_spin.setSuffix("%")
         self.mc_reduction_spin.setValue(50)
         self.mc_reduction_spin.setToolTip("Target face reduction percentage for mesh decimation (default: 50%).")
         self.mc_reduction_stepper = SpinBoxStepper(self.mc_reduction_spin, self.mc_options_container)
-        mc_grid.addWidget(lbl_reduction, 0, 0)
-        mc_grid.addWidget(self.mc_reduction_stepper, 0, 1)
+        mc_grid.addWidget(lbl_reduction, 1, 0)
+        mc_grid.addWidget(self.mc_reduction_stepper, 1, 1)
+
+        self.mc_enable_reduction_check.toggled.connect(self.mc_reduction_stepper.setEnabled)
+        self.mc_enable_reduction_check.toggled.connect(lbl_reduction.setEnabled)
         
         lbl_max_hole = QLabel("Max Hole Size (faces):", self.mc_options_container)
         lbl_max_hole.setStyleSheet(lbl_mc_style)
         self.mc_max_hole_spin = QSpinBox(self.mc_options_container)
-        self.mc_max_hole_spin.setRange(5, 500)
-        self.mc_max_hole_spin.setSingleStep(5)
+        self.mc_max_hole_spin.setRange(5, 5000)
+        self.mc_max_hole_spin.setSingleStep(10)
         self.mc_max_hole_spin.setValue(30)
         self.mc_max_hole_spin.setToolTip("Maximum hole size in faces to automatically close during mesh repair.")
         self.mc_max_hole_stepper = SpinBoxStepper(self.mc_max_hole_spin, self.mc_options_container)
-        mc_grid.addWidget(lbl_max_hole, 1, 0)
-        mc_grid.addWidget(self.mc_max_hole_stepper, 1, 1)
+        mc_grid.addWidget(lbl_max_hole, 2, 0)
+        mc_grid.addWidget(self.mc_max_hole_stepper, 2, 1)
         
         self.mc_remove_dups_check = QCheckBox("Remove Duplicate Faces / Vertices", self.mc_options_container)
         self.mc_remove_dups_check.setStyleSheet("font-size: 11px; color: #cccccc; border: none; background: transparent;")
         self.mc_remove_dups_check.setChecked(True)
-        mc_grid.addWidget(self.mc_remove_dups_check, 2, 0, 1, 2)
+        mc_grid.addWidget(self.mc_remove_dups_check, 3, 0, 1, 2)
         
         self.mc_repair_nm_check = QCheckBox("Repair Non-Manifold Edges", self.mc_options_container)
         self.mc_repair_nm_check.setStyleSheet("font-size: 11px; color: #cccccc; border: none; background: transparent;")
         self.mc_repair_nm_check.setChecked(True)
-        mc_grid.addWidget(self.mc_repair_nm_check, 3, 0, 1, 2)
+        mc_grid.addWidget(self.mc_repair_nm_check, 4, 0, 1, 2)
         
         self.mc_close_holes_check = QCheckBox("Close Mesh Holes", self.mc_options_container)
         self.mc_close_holes_check.setStyleSheet("font-size: 11px; color: #cccccc; border: none; background: transparent;")
         self.mc_close_holes_check.setChecked(True)
-        mc_grid.addWidget(self.mc_close_holes_check, 4, 0, 1, 2)
+        mc_grid.addWidget(self.mc_close_holes_check, 5, 0, 1, 2)
         
         self.mc_options_container.setVisible(False)
         self.auto_cleanup_checkbox.toggled.connect(self._on_auto_cleanup_toggled)
@@ -5134,6 +5165,7 @@ class MainWindow(QMainWindow):
                 "has_plain_surfaces": (self.mapper_combo.currentIndex() == 1) if hasattr(self, 'mapper_combo') else False,
                 "auto_cleanup": self.mc_enabled.isChecked() if hasattr(self, 'mc_enabled') else self.auto_cleanup_checkbox.isChecked(),
                 "cleanup_params": {
+                    "enable_reduction": self.mc_enable_reduction_check.isChecked() if hasattr(self, 'mc_enable_reduction_check') else True,
                     "target_reduction_pct": self.mc_reduction_spin.value() if hasattr(self, 'mc_reduction_spin') else 50,
                     "remove_duplicates": self.mc_remove_dups_check.isChecked() if hasattr(self, 'mc_remove_dups_check') else True,
                     "repair_nonmanifold": self.mc_repair_nm_check.isChecked() if hasattr(self, 'mc_repair_nm_check') else True,
@@ -5454,6 +5486,7 @@ class MainWindow(QMainWindow):
 
         cleanup_params = {
             "enable_cleanup": auto_cleanup,
+            "enable_reduction": self.mc_enable_reduction_check.isChecked() if hasattr(self, 'mc_enable_reduction_check') else True,
             "target_reduction_pct": self.mc_reduction_spin.value() if hasattr(self, 'mc_reduction_spin') else 50,
             "remove_duplicates": self.mc_remove_dups_check.isChecked() if hasattr(self, 'mc_remove_dups_check') else True,
             "repair_nonmanifold": self.mc_repair_nm_check.isChecked() if hasattr(self, 'mc_repair_nm_check') else True,
@@ -5674,6 +5707,7 @@ class MainWindow(QMainWindow):
 
         cleanup_params = {
             "enable_cleanup": True,
+            "enable_reduction": self.mc_enable_reduction_check.isChecked() if hasattr(self, 'mc_enable_reduction_check') else True,
             "target_reduction_pct": self.mc_reduction_spin.value() if hasattr(self, 'mc_reduction_spin') else 50,
             "remove_duplicates": self.mc_remove_dups_check.isChecked() if hasattr(self, 'mc_remove_dups_check') else True,
             "repair_nonmanifold": self.mc_repair_nm_check.isChecked() if hasattr(self, 'mc_repair_nm_check') else True,
@@ -6020,6 +6054,8 @@ class MainWindow(QMainWindow):
             
             clean_p = meta.get("cleanup_params")
             if clean_p and isinstance(clean_p, dict):
+                if "enable_reduction" in clean_p and hasattr(self, 'mc_enable_reduction_check'):
+                    self.mc_enable_reduction_check.setChecked(bool(clean_p["enable_reduction"]))
                 if "target_reduction_pct" in clean_p and hasattr(self, 'mc_reduction_spin'):
                     self.mc_reduction_spin.setValue(int(clean_p["target_reduction_pct"]))
                 if "max_hole_size" in clean_p and hasattr(self, 'mc_max_hole_spin'):
@@ -6089,6 +6125,8 @@ class MainWindow(QMainWindow):
 
                 if "cleanup_params" in cparams and isinstance(cparams["cleanup_params"], dict):
                     clean_p = cparams["cleanup_params"]
+                    if "enable_reduction" in clean_p and hasattr(self, 'mc_enable_reduction_check'):
+                        self.mc_enable_reduction_check.setChecked(bool(clean_p["enable_reduction"]))
                     if "target_reduction_pct" in clean_p and hasattr(self, 'mc_reduction_spin'):
                         self.mc_reduction_spin.setValue(int(clean_p["target_reduction_pct"]))
                     if "max_hole_size" in clean_p and hasattr(self, 'mc_max_hole_spin'):
@@ -7570,8 +7608,9 @@ class MainWindow(QMainWindow):
         }
         operation = op_map.get(tool_id, "cleanup")
 
-        # Update UI: Disable Start Reconstruction button & animate shared progress bar
+        # Update UI: Disable Start Reconstruction button, lock tool modals & animate shared progress bar
         self.process_btn.setEnabled(False)
+        self.viewer_widget.set_tool_modals_busy(True)
         self.progress_bar.setRange(0, 0)
         self.status_label.setText(f"Running {operation.replace('_', ' ').title()}...")
 
@@ -7588,6 +7627,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100 if success else 0)
         self._set_process_btn_state("ready" if len(self.image_list) > 0 else "idle")
+        self.viewer_widget.set_tool_modals_busy(False)
 
         if success and output_ply and os.path.isfile(output_ply):
             pts, cls, fcs = _read_ply_static(output_ply)
@@ -7664,8 +7704,9 @@ class MainWindow(QMainWindow):
             return
         self._export_temp_mesh_ply(pts, fcs, cls, modified_ply)
 
-        # Update UI: Disable Start Reconstruction button & animate shared progress bar
+        # Update UI: Disable Start Reconstruction button, lock tool modals & animate shared progress bar
         self.process_btn.setEnabled(False)
+        self.viewer_widget.set_tool_modals_busy(True)
         self.progress_bar.setRange(0, 0)
         self.status_label.setText("Retexturing mesh...")
         self.console_text.append("[START] Running OpenMVS TextureMesh on modified mesh...")
@@ -7692,6 +7733,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100 if success else 0)
         self._set_process_btn_state("ready" if len(self.image_list) > 0 else "idle")
+        self.viewer_widget.set_tool_modals_busy(False)
 
         if success:
             self.status_label.setText("Retexturing Complete")
@@ -9086,6 +9128,15 @@ class HardwareInitWorker(QThread):
 
     def run(self):
         hardware_profiler.initialize()
+
+        # Set up the PyMeshLab venv on first launch (pip installs the bundled .whl
+        # into ~/.local/share/proximap/pymeshlab_venv using the bundled Python 3.10).
+        # Subsequent launches skip this (sentinel file check) and take <1 second.
+        try:
+            from mesh_cleanup import ensure_pymeshlab_venv
+            ensure_pymeshlab_venv()
+        except Exception:
+            pass  # Non-fatal: mesh cleanup falls back to Open3D if venv setup fails
 
 class StartupManager:
     def __init__(self, splash, icon_path):

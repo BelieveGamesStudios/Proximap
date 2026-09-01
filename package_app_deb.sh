@@ -70,8 +70,8 @@ PY310_DIR="backend_bin/python3.10"
 PY310_BIN="$PY310_DIR/bin/python3.10"
 if [ ! -f "$PY310_BIN" ]; then
     echo "[2b/7] Downloading standalone Python 3.10 interpreter..."
-    PY310_TARBALL="cpython-3.10.17+20250725-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
-    PY310_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20250725/${PY310_TARBALL}"
+    PY310_TARBALL="cpython-3.10.21+20260825-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+    PY310_URL="https://github.com/astral-sh/python-build-standalone/releases/download/20260825/${PY310_TARBALL}"
     mkdir -p "$PY310_DIR"
     if command -v curl > /dev/null 2>&1; then
         curl -L --retry 3 --retry-delay 5 -o "/tmp/${PY310_TARBALL}" "$PY310_URL" && \
@@ -149,7 +149,9 @@ INTERNAL="dist/Proximap/_internal"
 
 if [ -d "backend_bin/pymeshlab_extracted" ]; then
     mkdir -p "$INTERNAL/backend_bin"
+    mkdir -p "dist/Proximap/backend_bin"
     cp -r backend_bin/pymeshlab_extracted "$INTERNAL/backend_bin/"
+    cp -r backend_bin/pymeshlab_extracted "dist/Proximap/backend_bin/" 2>/dev/null || true
     chmod -R 755 "$INTERNAL/backend_bin/pymeshlab_extracted"
     echo "  PyMeshLab extracted files copied to bundle."
 else
@@ -158,8 +160,10 @@ fi
 
 if [ -d "$PY310_DIR" ] && [ -f "$PY310_BIN" ]; then
     mkdir -p "$INTERNAL/backend_bin"
+    mkdir -p "dist/Proximap/backend_bin"
     # Copy the entire standalone Python 3.10 tree
     cp -r "$PY310_DIR" "$INTERNAL/backend_bin/"
+    cp -r "$PY310_DIR" "dist/Proximap/backend_bin/" 2>/dev/null || true
     chmod -R 755 "$INTERNAL/backend_bin/python3.10"
     echo "  Standalone Python 3.10 runtime copied to bundle."
 else

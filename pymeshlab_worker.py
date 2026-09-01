@@ -95,6 +95,7 @@ def _calc_bbox_diagonal(mesh):
 
 
 def handle_cleanup(ms, pymeshlab, params, input_ply, output_ply):
+    enable_reduction     = bool(params.get("enable_reduction", True))
     target_reduction_pct = float(params.get("target_reduction_pct", 50))
     remove_duplicates    = bool(params.get("remove_duplicates", True))
     repair_nonmanifold   = bool(params.get("repair_nonmanifold", True))
@@ -121,20 +122,26 @@ def handle_cleanup(ms, pymeshlab, params, input_ply, output_ply):
         ms.meshing_close_holes(maxholesize=max_hole_size)
 
     ms.meshing_remove_connected_component_by_face_number(mincomponentsize=25)
-    ms.meshing_re_orient_faces_coherentely()
+    try:
+        ms.meshing_re_orient_faces_coherently()
+    except Exception as e:
+        _log(f"[CLEANUP] Note: Face re-orientation skipped: {e}")
 
     merge_fn = _get_merge_filter(ms, pymeshlab)
     merge_fn()
 
-    target_perc = max(0.05, min(0.95, (100.0 - target_reduction_pct) / 100.0))
-    _log("[CLEANUP] Applying {}% Quadric Edge Collapse Decimation...".format(int(target_reduction_pct)))
-    ms.meshing_decimation_quadric_edge_collapse(
-        targetperc=target_perc,
-        qualitythr=0.3,
-        preserveboundary=True,
-        preservenormal=True,
-        preservetopology=True,
-    )
+    if enable_reduction and target_reduction_pct > 0:
+        target_perc = max(0.05, min(0.95, (100.0 - target_reduction_pct) / 100.0))
+        _log("[CLEANUP] Applying {}% Quadric Edge Collapse Decimation...".format(int(target_reduction_pct)))
+        ms.meshing_decimation_quadric_edge_collapse(
+            targetperc=target_perc,
+            qualitythr=0.3,
+            preserveboundary=True,
+            preservenormal=True,
+            preservetopology=True,
+        )
+    else:
+        _log("[CLEANUP] Face reduction disabled. Keeping original face resolution.")
 
     final_mesh = ms.current_mesh()
     final_v = final_mesh.vertex_number()
@@ -285,7 +292,8 @@ def main():
 
     try:
         import pymeshlab
-        _log("[WORKER] PyMeshLab " + pymeshlab.__version__ + " loaded successfully.")
+        _version = getattr(pymeshlab, "__version__", "unknown")
+        _log("[WORKER] PyMeshLab " + _version + " loaded successfully.")
     except ImportError as e:
         _emit({"result": False, "error": "Cannot import pymeshlab: " + str(e)})
         sys.exit(1)

@@ -29,6 +29,32 @@ if (Test-Path "app_icon.png") {
     }
 }
 
+# 1.6 Extract PyMeshLab Windows wheel & download standalone Python 3.10 interpreter
+Write-Host "Setting up PyMeshLab and standalone Python 3.10 runtime for Windows..." -ForegroundColor Yellow
+if (Test-Path "backend_bin/PymeshLab") {
+    $winWhl = Get-ChildItem -Path "backend_bin/PymeshLab/*win_amd64.whl" | Select-Object -First 1
+    if ($winWhl) {
+        Write-Host "  Extracting Windows wheel: $($winWhl.Name)" -ForegroundColor DarkGray
+        python -c "import zipfile, os; z = zipfile.ZipFile(r'$($winWhl.FullName)'); [z.extract(i, 'backend_bin/pymeshlab_extracted') for i in z.infolist() if i.filename.startswith('pymeshlab/')]"
+    }
+}
+
+$py310Dir = "backend_bin/python3.10"
+$py310Exe = "$py310Dir/python.exe"
+if (-not (Test-Path $py310Exe)) {
+    Write-Host "  Downloading standalone Python 3.10 for Windows (x86_64)..." -ForegroundColor DarkGray
+    $pyUrl = "https://github.com/astral-sh/python-build-standalone/releases/download/20260825/cpython-3.10.21+20260825-x86_64-pc-windows-msvc-shared-install_only_stripped.tar.gz"
+    New-Item -ItemType Directory -Force -Path $py310Dir | Out-Null
+    try {
+        Invoke-WebRequest -Uri $pyUrl -OutFile "$env:TEMP/py310_win.tar.gz"
+        tar -xzf "$env:TEMP/py310_win.tar.gz" --strip-components=1 -C $py310Dir
+        Remove-Item "$env:TEMP/py310_win.tar.gz" -Force
+        Write-Host "  Python 3.10 Windows standalone downloaded and extracted." -ForegroundColor Green
+    } catch {
+        Write-Warning "Could not download standalone Python 3.10 for Windows: $_"
+    }
+}
+
 # 2. Run PyInstaller to package the Python GUI
 Write-Host "[2/5] Compiling Python application using PyInstaller..." -ForegroundColor Yellow
 $iconFlag = ""
@@ -125,6 +151,16 @@ foreach ($exe in $mvsExes) {
     } else {
         Write-Warning "OpenMVS executable not found: $exe"
     }
+}
+
+# Copy PyMeshLab and Python 3.10 runtime
+if (Test-Path "backend_bin/pymeshlab_extracted") {
+    Copy-Item -Path "backend_bin/pymeshlab_extracted" -Destination "dist/Proximap/backend_bin/" -Recurse
+    Copy-Item -Path "backend_bin/pymeshlab_extracted" -Destination "dist/Proximap/_internal/backend_bin/" -Recurse
+}
+if (Test-Path "backend_bin/python3.10") {
+    Copy-Item -Path "backend_bin/python3.10" -Destination "dist/Proximap/backend_bin/" -Recurse
+    Copy-Item -Path "backend_bin/python3.10" -Destination "dist/Proximap/_internal/backend_bin/" -Recurse
 }
 
 # Copy toolchain mapping configuration
