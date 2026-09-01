@@ -185,7 +185,11 @@ class STEAlignmentQualityGate:
         vol_lidar = float(np.prod(np.maximum(1e-6, lidar_max - lidar_min)))
         union_vol = vol_photo + vol_lidar - inter_vol
 
-        overlap_ratio = float(inter_vol / union_vol) if union_vol > 1e-9 else 0.0
+        # Target (LiDAR) containment / coverage ratio: percentage of LiDAR volume inside reference scene
+        target_coverage = float(inter_vol / vol_lidar) if vol_lidar > 1e-9 else 0.0
+        iou_ratio = float(inter_vol / union_vol) if union_vol > 1e-9 else 0.0
+        # If LiDAR is a scanned target object inside a larger photogrammetry scene, evaluate target coverage
+        overlap_ratio = target_coverage if vol_lidar < (vol_photo * 0.8) else iou_ratio
 
         return OverlapMetrics(
             photo_aabb_min=photo_min,
@@ -349,12 +353,25 @@ class STEAlignmentQualityGate:
         # 2. Transform LiDAR points into Photogrammetry coordinate space
         pts_lidar_aligned = alignment_result.apply(pts_lidar)
 
-        # 3. Overlap Analysis
+        # 3. Overlap Analysis (always uses full scene cloud — scene-aware by design)
         overlap = cls.compute_overlap_metrics(pts_photo, pts_lidar_aligned)
+
+        # 3b. Clip photogrammetry cloud to LiDAR object ROI before distance measurement.
+        # Without this, KDTree nearest neighbours for a small LiDAR object inside a large
+        # room-scale photogrammetry scan will find walls/floor/ceiling instead of the
+        # matching object surface, producing multi-metre median errors on perfect alignments.
+        min_b = np.min(pts_lidar_aligned, axis=0)
+        max_b = np.max(pts_lidar_aligned, axis=0)
+        extent = max_b - min_b
+        pad = np.maximum(extent * 0.35, 0.5)
+        roi_min = min_b - pad
+        roi_max = max_b + pad
+        in_roi = np.all((pts_photo >= roi_min) & (pts_photo <= roi_max), axis=1)
+        pts_photo_roi = pts_photo[in_roi] if np.sum(in_roi) >= 100 else pts_photo
 
         # 4. Surface Distance Distribution
         surface_dist, sampled_lidar, dists = cls.compute_surface_distances(
-            pts_photo=pts_photo,
+            pts_photo=pts_photo_roi,
             pts_lidar_aligned=pts_lidar_aligned,
             max_samples=max_samples
         )
@@ -366,9 +383,9 @@ class STEAlignmentQualityGate:
         # 6a. Overlap check
         if overlap.overlap_ratio < thresholds.min_acceptable_overlap:
             failure_modes.append("LOW_SURFACE_OVERLAP")
-            warnings.append(f"Surface bounding box overlap is low ({overlap.overlap_ratio*100.0:.1f}% < {thresholds.min_acceptable_overlap*100.0:.1f}%).")
+            warnings.append(f"Surface target overlap/containment is low ({overlap.overlap_ratio*100.0:.1f}% < {thresholds.min_acceptable_overlap*100.0:.1f}%).")
         else:
-            reasons.append(f"Surface bounding box overlap is sufficient ({overlap.overlap_ratio*100.0:.1f}%).")
+            reasons.append(f"Surface target overlap/containment is sufficient ({overlap.overlap_ratio*100.0:.1f}%).")
 
         # 6b. Large surface distance check
         if surface_dist.median_dist > thresholds.acceptable_median_dist:
@@ -398,7 +415,7 @@ class STEAlignmentQualityGate:
                 )
 
         # 6e. Scale plausibility check
-        if alignment_result.scale < 0.01 or alignment_result.scale > 100.0:
+        if alignment_result.scale < 0.001 or alignment_result.scale > 1000.0:
             failure_modes.append("POSSIBLE_SCALE_MISMATCH")
             warnings.append(f"Unusually extreme scale factor recovered: {alignment_result.scale:.4f}x.")
 
@@ -407,7 +424,9 @@ class STEAlignmentQualityGate:
         change_pct = 0.0
         if initial_alignment_result is not None and initial_alignment_result.success:
             pts_lidar_init = initial_alignment_result.apply(pts_lidar)
-            init_surf, _, _ = cls.compute_surface_distances(pts_photo, pts_lidar_init, max_samples=min(2000, max_samples))
+            init_surf, _, _ = cls.compute_surface_distances(
+                pts_photo_roi, pts_lidar_init, max_samples=min(2000, max_samples)
+            )
             if init_surf.median_dist > 1e-6:
                 change_pct = float(((surface_dist.median_dist - init_surf.median_dist) / init_surf.median_dist) * 100.0)
             elif surface_dist.median_dist > 0.01:

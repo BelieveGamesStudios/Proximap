@@ -468,6 +468,167 @@ class TestSTETextureBaking(unittest.TestCase):
         self.assertEqual(res.status, "ready")
         self.assertGreater(res.coverage_ratio, 0.90)
 
+    def test_m_bake_invalidation_after_alignment_change(self):
+        """Test M: Changing alignment transform invalidates previously derived bake result."""
+        from ste_workspace import STEWorkspace
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+
+        ws = STEWorkspace()
+        v_photo, t_photo, u_photo, tex_photo = create_colored_quad_photogrammetry()
+        photo_mesh = o3d.geometry.TriangleMesh()
+        photo_mesh.vertices = o3d.utility.Vector3dVector(v_photo)
+        photo_mesh.triangles = o3d.utility.Vector3iVector(t_photo)
+
+        ws.viewport.set_photogrammetry_data(photo_mesh, tex_photo, point_cloud=v_photo)
+        ws.photo_verts = v_photo
+        ws.photo_tris = t_photo
+        ws.photo_uvs = u_photo
+        ws.photo_texture_img = tex_photo
+        ws.lidar_surface_verts = v_photo.copy()
+        ws.lidar_surface_tris = t_photo.copy()
+        ws.lidar_target_uvs = u_photo.copy()
+
+        align_res = STEAlignmentResult(
+            success=True, status="complete", status_message="OK",
+            rotation=np.eye(3), translation=np.zeros(3), scale=1.0,
+            transformation_matrix=np.eye(4), rms_error=0.0, residuals=[]
+        )
+        ws.alignment_result = align_res
+
+        # Simulate valid bake result
+        ws.bake_result = TextureBakeResult(
+            success=True, status="ready", status_message="OK",
+            output_mesh=photo_mesh, output_texture=tex_photo,
+            texture_width=128, texture_height=128
+        )
+        self.assertIsNotNone(ws.bake_result)
+
+        # Invalidate via alignment change
+        ws._invalidate_alignment_derived_stages()
+        self.assertIsNone(ws.bake_result)
+        self.assertIsNone(ws.projection_result)
+        self.assertIn("Stale", ws.lbl_bake_stats.text())
+
+    def test_n_bake_invalidation_after_uv_regeneration(self):
+        """Test N: Regenerating Target UVs invalidates bake result."""
+        from ste_workspace import STEWorkspace
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+
+        ws = STEWorkspace()
+        v_photo, t_photo, u_photo, tex_photo = create_colored_quad_photogrammetry()
+        photo_mesh = o3d.geometry.TriangleMesh()
+        photo_mesh.vertices = o3d.utility.Vector3dVector(v_photo)
+        photo_mesh.triangles = o3d.utility.Vector3iVector(t_photo)
+
+        ws.photo_verts = v_photo
+        ws.photo_tris = t_photo
+        ws.photo_uvs = u_photo
+        ws.photo_texture_img = tex_photo
+        ws.lidar_surface_verts = v_photo.copy()
+        ws.lidar_surface_tris = t_photo.copy()
+
+        ws.bake_result = TextureBakeResult(
+            success=True, status="ready", status_message="OK",
+            output_mesh=photo_mesh, output_texture=tex_photo
+        )
+
+        ws._generate_target_uvs()
+        self.assertIsNone(ws.bake_result)
+        self.assertIn("Stale", ws.lbl_bake_stats.text())
+
+    def test_o_bake_invalidation_after_projection_change(self):
+        """Test O: Running projection validation invalidates existing bake."""
+        from ste_workspace import STEWorkspace
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+
+        ws = STEWorkspace()
+        v_photo, t_photo, u_photo, tex_photo = create_colored_quad_photogrammetry()
+        photo_mesh = o3d.geometry.TriangleMesh()
+        photo_mesh.vertices = o3d.utility.Vector3dVector(v_photo)
+        photo_mesh.triangles = o3d.utility.Vector3iVector(t_photo)
+
+        ws.photo_verts = v_photo
+        ws.photo_tris = t_photo
+        ws.photo_uvs = u_photo
+        ws.photo_texture_img = tex_photo
+        ws.lidar_surface_verts = v_photo.copy()
+        ws.lidar_surface_tris = t_photo.copy()
+        ws.lidar_target_uvs = u_photo.copy()
+
+        ws.alignment_result = STEAlignmentResult(
+            success=True, status="complete", status_message="OK",
+            rotation=np.eye(3), translation=np.zeros(3), scale=1.0,
+            transformation_matrix=np.eye(4), rms_error=0.0, residuals=[]
+        )
+
+        ws.bake_result = TextureBakeResult(
+            success=True, status="ready", status_message="OK",
+            output_mesh=photo_mesh, output_texture=tex_photo
+        )
+
+        ws._validate_texture_projection()
+        self.assertIsNone(ws.bake_result)
+        self.assertIn("Stale", ws.lbl_bake_stats.text())
+
+    def test_p_worker_signals_and_progress(self):
+        """Test P: STETextureBakingWorker executes and emits progress, finished, and result."""
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+
+        v_photo, t_photo, u_photo, tex_photo = create_colored_quad_photogrammetry()
+        align_res = STEAlignmentResult(
+            success=True, status="complete", status_message="OK",
+            rotation=np.eye(3), translation=np.zeros(3), scale=1.0,
+            transformation_matrix=np.eye(4), rms_error=0.0, residuals=[]
+        )
+
+        worker = STETextureBakingWorker(
+            photogrammetry_mesh=(v_photo, t_photo, u_photo),
+            photogrammetry_texture=tex_photo,
+            lidar_surface_mesh=(v_photo, t_photo),
+            lidar_target_uvs=u_photo,
+            alignment_transform=align_res,
+            texture_resolution=64,
+            texture_padding=2
+        )
+
+        received_results = []
+        received_progress = []
+
+        worker.finished.connect(lambda res: received_results.append(res))
+        worker.progress.connect(lambda pct, msg: received_progress.append((pct, msg)))
+
+        worker.run()  # Synchronous run for deterministic test
+
+        self.assertEqual(len(received_results), 1)
+        self.assertTrue(received_results[0].success)
+        self.assertGreater(len(received_progress), 0)
+
+    def test_q_baked_representation_viewport_display(self):
+        """Test Q: Viewport set_lidar_baked correctly assigns per-wedge UVs and texture."""
+        from ste_workspace import STEUnifiedAlignmentViewport, STELiDARRepresentation
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance() or QApplication([])
+
+        vp = STEUnifiedAlignmentViewport()
+        v_photo, t_photo, u_photo, tex_photo = create_colored_quad_photogrammetry()
+
+        derived_mesh = o3d.geometry.TriangleMesh()
+        derived_mesh.vertices = o3d.utility.Vector3dVector(v_photo)
+        derived_mesh.triangles = o3d.utility.Vector3iVector(t_photo)
+        derived_mesh.triangle_uvs = o3d.utility.Vector2dVector(u_photo)
+
+        vp.set_lidar_baked(derived_mesh, tex_photo)
+
+        self.assertEqual(vp.lidar_display_mode, STELiDARRepresentation.BAKED)
+        self.assertIsNotNone(vp.obj_lidar_baked)
+        self.assertIsNotNone(vp.obj_lidar_baked.mesh.texcoords)
+        self.assertEqual(len(vp.obj_lidar_baked.mesh.texcoords), len(t_photo) * 3)
+        self.assertIsNotNone(vp.obj_lidar_baked.mesh.texture_data)
+
 
 if __name__ == "__main__":
     unittest.main()

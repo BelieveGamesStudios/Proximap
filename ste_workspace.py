@@ -193,6 +193,16 @@ def _create_mesh_from_data(
     if texcoords is not None and len(texcoords) > 0:
         if len(texcoords) == len(vertices):
             uv_arr = np.asarray(texcoords, dtype=np.float32)
+        elif len(texcoords) == len(tris) * 3:
+            # Per-wedge UVs: unindex vertices and normals so each face corner receives its exact UV
+            faces_flat = np.asarray(tris, dtype=np.uint32).ravel()
+            vertices = np.asarray(verts[faces_flat], dtype=np.float32)
+            normals = np.asarray(normals[faces_flat], dtype=np.float32)
+            indices = np.arange(len(faces_flat), dtype=np.uint32)
+            uv_arr = np.asarray(texcoords, dtype=np.float32)
+
+    local_min = np.min(vertices, axis=0) if len(vertices) > 0 else np.zeros(3, dtype=np.float32)
+    local_max = np.max(vertices, axis=0) if len(vertices) > 0 else np.zeros(3, dtype=np.float32)
 
     return Mesh(
         vertices=vertices,
@@ -482,7 +492,18 @@ class STEUnifiedAlignmentViewport(MeshEditorViewport):
         self._lidar_baked_faces = np.asarray(mesh.triangles, dtype=np.int32).copy()
         self._lidar_baked_texture = texture
 
-        gl_mesh = _create_mesh_from_data(self._lidar_baked_verts, self._lidar_baked_faces, texture_img=texture)
+        texcoords = None
+        if hasattr(mesh, 'triangle_uvs') and len(mesh.triangle_uvs) > 0:
+            texcoords = np.asarray(mesh.triangle_uvs, dtype=np.float64)
+        elif hasattr(mesh, 'vertex_uvs') and len(mesh.vertex_uvs) > 0:
+            texcoords = np.asarray(mesh.vertex_uvs, dtype=np.float64)
+
+        gl_mesh = _create_mesh_from_data(
+            self._lidar_baked_verts,
+            self._lidar_baked_faces,
+            texcoords=texcoords,
+            texture_img=texture
+        )
         self._safe_setup_mesh(gl_mesh)
 
         if self.obj_lidar_baked in self.scene.objects:
@@ -548,12 +569,14 @@ class STEUnifiedAlignmentViewport(MeshEditorViewport):
 
     def get_active_lidar_transform(self) -> np.ndarray:
         """Returns active preview matrix if alignment preview is active, else LiDAR staging matrix."""
-        if self._preview_active and not np.allclose(self._preview_matrix, np.eye(4)):
+        if self._preview_active:
             return self._preview_matrix
         return self.get_staging_matrix("lidar")
 
     def get_active_photo_transform(self) -> np.ndarray:
-        """Returns active Photogrammetry staging matrix."""
+        """Returns identity during alignment preview (true photogrammetry space), else Photogrammetry staging matrix."""
+        if self._preview_active:
+            return np.eye(4, dtype=np.float64)
         return self.get_staging_matrix("photo")
 
     def set_staging_tool(self, tool: str):
@@ -1687,6 +1710,7 @@ class STEWorkspace(QWidget):
         self.combo_resolution.addItems(["1024", "2048", "4096", "8192"])
         self.combo_resolution.setCurrentIndex(2)  # 4096
         self.combo_resolution.setStyleSheet(self._combo_style())
+        self.combo_resolution.currentIndexChanged.connect(self._on_bake_settings_changed)
         cfg_row.addWidget(self.combo_resolution)
 
         cfg_row.addWidget(QLabel("Pad:"))
@@ -1694,6 +1718,7 @@ class STEWorkspace(QWidget):
         self.spin_padding.setRange(0, 32)
         self.spin_padding.setValue(4)
         self.spin_padding.setStyleSheet(self._spin_style())
+        self.spin_padding.valueChanged.connect(self._on_bake_settings_changed)
         cfg_row.addWidget(self.spin_padding)
         cfg_row.addStretch()
         layout.addLayout(cfg_row)
@@ -1713,6 +1738,12 @@ class STEWorkspace(QWidget):
         layout.addWidget(self.progress_bake)
 
         return group
+
+    def _on_bake_settings_changed(self):
+        if self.bake_result is not None:
+            self.bake_result = None
+            self.lbl_bake_stats.setText("Bake: Stale (settings changed)")
+            self._update_workflow_state()
 
     def _build_log_group(self) -> QGroupBox:
         group = QGroupBox("CONSOLE FEED")
@@ -2383,6 +2414,7 @@ class STEWorkspace(QWidget):
                 f"{uv_res.chart_count} charts, {uv_res.uv_utilization:.1f}% util, {uv_res.overlapping_triangle_count} overlaps"
             )
             self._log(f"Target UVs generated: {uv_res.chart_count} charts, {uv_res.uv_utilization:.1f}% utilization.")
+            self._invalidate_alignment_derived_stages()
             self._update_workflow_state()
         else:
             self._log(f"Target UV generation failed: {uv_res.status_message}")
@@ -2397,15 +2429,21 @@ class STEWorkspace(QWidget):
         idx = np.linspace(0, self.lidar_surface_verts.shape[0] - 1, sample_count, dtype=int)
         sample_pts = self.lidar_surface_verts[idx]
 
+        photo_uvs_arr = self.photo_uvs if self.photo_uvs is not None else np.zeros((self.photo_tris.shape[0]*3, 2), dtype=np.float64)
+
         proj_res = STETextureProjectionService.project(
             lidar_surface_points=sample_pts,
             photogrammetry_vertices=self.photo_verts,
             photogrammetry_triangles=self.photo_tris,
-            photogrammetry_uvs=self.photo_uvs if self.photo_uvs is not None else np.zeros((self.photo_tris.shape[0]*3, 2)),
+            photogrammetry_uvs=photo_uvs_arr,
             alignment_result=self.alignment_result
         )
 
         self.projection_result = proj_res
+        if self.bake_result is not None:
+            self.bake_result = None
+            self.lbl_bake_stats.setText("Bake: Stale")
+
         if proj_res.is_ready_for_baking:
             self.lbl_proj_stats.setText(f"✓ READY ({proj_res.coverage_ratio*100.0:.1f}% cov, med={proj_res.median_distance*100.0:.2f}cm)")
             self._log(f"Projection verified: {proj_res.coverage_ratio*100.0:.2f}% coverage, {proj_res.median_distance*100.0:.2f} cm median distance.")
@@ -2416,23 +2454,68 @@ class STEWorkspace(QWidget):
         self._update_workflow_state()
 
     def _bake_texture(self):
-        if not self.projection_result or self.lidar_target_uvs is None or self.photo_verts is None:
-            self._log("Cannot bake: Ensure UVs, alignment, and projection validation are complete.")
+        # 1. Photogrammetry Dataset
+        if self.photo_verts is None or self.photo_tris is None or len(self.photo_verts) < 3 or len(self.photo_tris) < 1:
+            self._log("Cannot bake: Valid photogrammetry mesh is required.")
+            QMessageBox.warning(self, "Bake Validation Error", "Valid photogrammetry mesh is required.")
             return
 
-        res_val = int(self.combo_resolution.currentText())
-        padding_val = self.spin_padding.value()
+        # 2. Photogrammetry Texture Source
+        source_tex = self.photo_texture_img if self.photo_texture_img is not None else self.photo_texture_path
+        if source_tex is None:
+            self._log("Cannot bake: Photogrammetry texture source is required.")
+            QMessageBox.warning(self, "Bake Validation Error", "Photogrammetry texture source is required.")
+            return
 
+        # 3. LiDAR Surface Mesh
+        if self.lidar_surface_verts is None or self.lidar_surface_tris is None or len(self.lidar_surface_verts) < 3 or len(self.lidar_surface_tris) < 1:
+            self._log("Cannot bake: Reconstructed LiDAR surface mesh is required.")
+            QMessageBox.warning(self, "Bake Validation Error", "Reconstructed LiDAR surface mesh is required.")
+            return
+
+        # 4. LiDAR Target UVs
+        if self.lidar_target_uvs is None or len(self.lidar_target_uvs) == 0:
+            self._log("Cannot bake: Target UV parameterization is required.")
+            QMessageBox.warning(self, "Bake Validation Error", "Target UV parameterization is required.")
+            return
+
+        # 5. Alignment Result
+        if not self.alignment_result or not self.alignment_result.success:
+            self._log("Cannot bake: Valid scale-aware alignment is required.")
+            QMessageBox.warning(self, "Bake Validation Error", "Valid scale-aware alignment is required.")
+            return
+
+        # 6. Projection Result
+        if not self.projection_result or not self.projection_result.success:
+            self._log("Cannot bake: Texture projection must be validated first.")
+            QMessageBox.warning(self, "Bake Validation Error", "Texture projection must be validated first.")
+            return
+
+        # 7. Finite UV Coordinates
+        if not np.all(np.isfinite(self.lidar_target_uvs)):
+            self._log("Cannot bake: Target UVs contain non-finite coordinates.")
+            QMessageBox.warning(self, "Bake Validation Error", "Target UVs contain non-finite coordinates.")
+            return
+
+        # 8. Resolution & Padding
+        try:
+            res_val = int(self.combo_resolution.currentText())
+            if res_val not in (512, 1024, 2048, 4096, 8192):
+                res_val = 4096
+        except (ValueError, TypeError):
+            res_val = 4096
+
+        padding_val = max(0, int(self.spin_padding.value()))
+
+        self._log(f"Preparing production texture bake ({res_val}x{res_val}, padding={padding_val}px)...")
         self.progress_bake.setVisible(True)
         self.progress_bake.setValue(5)
         self.btn_bake_texture.setEnabled(False)
 
-        source_tex = self.photo_texture_img if self.photo_texture_img is not None else self.photo_texture_path
-        if source_tex is None:
-            source_tex = np.full((512, 512, 3), 200, dtype=np.uint8)
+        photo_uvs_arr = self.photo_uvs if self.photo_uvs is not None else np.zeros((self.photo_tris.shape[0]*3, 2), dtype=np.float64)
 
         self._bake_worker = STETextureBakingWorker(
-            photogrammetry_mesh=(self.photo_verts, self.photo_tris, self.photo_uvs if self.photo_uvs is not None else np.zeros((self.photo_tris.shape[0]*3, 2))),
+            photogrammetry_mesh=(self.photo_verts, self.photo_tris, photo_uvs_arr),
             photogrammetry_texture=source_tex,
             lidar_surface_mesh=(self.lidar_surface_verts, self.lidar_surface_tris),
             lidar_target_uvs=self.lidar_target_uvs,

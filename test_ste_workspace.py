@@ -805,6 +805,106 @@ class TestSTEUnifiedWorkspace(unittest.TestCase):
         self.assertAlmostEqual(self.ws.alignment_result.scale, scale_true, delta=0.01)
         self.assertLess(self.ws.alignment_result.rms_error, 0.01)
 
+        # Trigger Alignment Preview
+        self.ws._toggle_alignment_preview()
+        self.assertTrue(self.ws.preview_active)
+        # During preview: Photogrammetry MUST be in true native space (identity), LiDAR at preview matrix
+        self.assertTrue(np.allclose(self.ws.viewport.get_active_photo_transform(), np.eye(4)))
+        self.assertTrue(np.allclose(self.ws.viewport.get_active_lidar_transform(), self.ws.alignment_result.transformation_matrix))
+
+        # Exit Alignment Preview
+        self.ws._toggle_alignment_preview()
+        self.assertFalse(self.ws.preview_active)
+        # After preview: Staging transforms are restored for both
+        self.assertFalse(np.allclose(self.ws.viewport.get_active_photo_transform(), np.eye(4)))
+        self.assertFalse(np.allclose(self.ws.viewport.get_active_lidar_transform(), np.eye(4)))
+
+    def test_za_end_to_end_texture_baking_pipeline(self):
+        """TEST ZA: Complete end-to-end STE workflow through production texture baking."""
+        # 1. Setup Photogrammetry Quad with Texture
+        verts_photo = np.array([
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 2.0, 0.0],
+            [0.0, 2.0, 0.0]
+        ], dtype=np.float64)
+        tris_photo = np.array([[0, 1, 2], [0, 2, 3]], dtype=np.int32)
+        uvs_photo = np.array([
+            [0.0, 0.0], [1.0, 0.0], [1.0, 1.0],
+            [0.0, 0.0], [1.0, 1.0], [0.0, 1.0]
+        ], dtype=np.float64)
+        tex_photo = np.full((128, 128, 3), 220, dtype=np.uint8)
+
+        photo_mesh = o3d.geometry.TriangleMesh()
+        photo_mesh.vertices = o3d.utility.Vector3dVector(verts_photo)
+        photo_mesh.triangles = o3d.utility.Vector3iVector(tris_photo)
+
+        self.ws.photo_verts = verts_photo.copy()
+        self.ws.photo_tris = tris_photo.copy()
+        self.ws.photo_uvs = uvs_photo.copy()
+        self.ws.photo_texture_img = tex_photo.copy()
+        self.ws.viewport.set_photogrammetry_data(photo_mesh, tex_photo, point_cloud=verts_photo)
+
+        # 2. Setup LiDAR Surface Mesh (identical geometry)
+        v_lidar = verts_photo.copy()
+        t_lidar = tris_photo.copy()
+        self.ws.lidar_source_points = v_lidar.copy()
+        self.ws.lidar_surface_verts = v_lidar.copy()
+        self.ws.lidar_surface_tris = t_lidar.copy()
+
+        lidar_mesh = o3d.geometry.TriangleMesh()
+        lidar_mesh.vertices = o3d.utility.Vector3dVector(v_lidar)
+        lidar_mesh.triangles = o3d.utility.Vector3iVector(t_lidar)
+        self.ws.viewport.set_lidar_surface(lidar_mesh)
+
+        # 3. Control Points and Alignment
+        for i in range(3):
+            self.ws._add_control_point()
+            cp_id = f"CP{i+1}"
+            self.ws.cp_manager.set_photo_marker(cp_id, verts_photo[i])
+            self.ws.cp_manager.set_lidar_marker(cp_id, v_lidar[i])
+
+        self.ws._solve_alignment()
+        self.assertTrue(self.ws.alignment_result.success)
+
+        # 4. Target UV Generation
+        self.ws._generate_target_uvs()
+        self.assertIsNotNone(self.ws.lidar_target_uvs)
+        self.assertTrue(self.ws.lidar_uv_result.success)
+
+        # 5. Projection Validation
+        self.ws._validate_texture_projection()
+        self.assertIsNotNone(self.ws.projection_result)
+        self.assertTrue(self.ws.projection_result.is_ready_for_baking)
+        self.assertTrue(self.ws.btn_bake_texture.isEnabled())
+
+        # 6. Execute Texture Bake
+        self.ws.combo_resolution.setCurrentText("1024")
+        self.ws.spin_padding.setValue(2)
+        self.ws._bake_texture()
+
+        # Run worker synchronously for testing
+        if hasattr(self.ws, '_bake_worker') and self.ws._bake_worker is not None:
+            self.ws._bake_worker.run()
+
+        self.assertIsNotNone(self.ws.bake_result)
+        self.assertTrue(self.ws.bake_result.success)
+        self.assertEqual(self.ws.state, STEWorkflowState.BAKED)
+        self.assertEqual(self.ws.viewport.lidar_display_mode, STELiDARRepresentation.BAKED)
+        self.assertEqual(self.ws.bake_result.texture_width, 1024)
+        self.assertEqual(self.ws.bake_result.texture_height, 1024)
+        self.assertGreater(self.ws.bake_result.valid_texture_pixels, 0)
+
+        # 7. Invalidation check on settings change
+        self.ws.combo_resolution.setCurrentText("2048")
+        self.assertIsNone(self.ws.bake_result)
+        self.assertIn("Stale", self.ws.lbl_bake_stats.text())
+
+        # Source data preservation
+        np.testing.assert_array_equal(self.ws.photo_verts, verts_photo)
+        np.testing.assert_array_equal(self.ws.photo_tris, tris_photo)
+        np.testing.assert_array_equal(self.ws.photo_texture_img, tex_photo)
+
 
 if __name__ == "__main__":
     unittest.main()

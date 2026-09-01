@@ -270,6 +270,7 @@ class STEICPRefinementResult:
 
     def to_alignment_result(self) -> STEAlignmentResult:
         """Convert ICP refinement result into a standard STEAlignmentResult."""
+        cp_rms = float(np.sqrt(np.mean(np.square(self.final_cp_residuals)))) if len(self.final_cp_residuals) > 0 else self.final_rms
         return STEAlignmentResult(
             success=self.success,
             status=self.status,
@@ -278,7 +279,7 @@ class STEICPRefinementResult:
             translation=self.translation,
             scale=self.scale,
             transformation_matrix=self.transformation_matrix,
-            rms_error=self.final_rms,
+            rms_error=cp_rms,
             residuals=self.final_cp_residuals,
             control_point_count=len(self.control_point_ids),
             control_point_ids=self.control_point_ids,
@@ -472,8 +473,8 @@ class STEAlignmentService:
 
         predicted_photo = (pts_lidar @ (s * R).T) + t
         residual_vectors = pts_photo - predicted_photo
-        residual_distances = np.linalg.norm(residual_vectors, axis=1)
-        rms_error = float(np.sqrt(np.mean(residual_distances ** 2)))
+        raw_residual_distances = np.linalg.norm(residual_vectors, axis=1)
+        rms_error = float(np.sqrt(np.mean(raw_residual_distances ** 2)))
 
         cp_ids = control_point_ids if control_point_ids is not None else [f"CP{i+1}" for i in range(count)]
 
@@ -486,7 +487,7 @@ class STEAlignmentService:
             scale=s,
             transformation_matrix=transform_4x4,
             rms_error=rms_error,
-            residuals=[float(r) for r in residual_distances],
+            residuals=[float(r) for r in raw_residual_distances],
             residual_vectors=[residual_vectors[i] for i in range(count)],
             control_point_count=count,
             control_point_ids=cp_ids,
@@ -759,7 +760,8 @@ class STEICPRefinementService:
             lidar_cps, photo_cps, cp_ids = cp_manager.get_complete_pairs()
             if lidar_cps.shape[0] > 0:
                 p_final_cps = (lidar_cps @ (s_final * R_final).T) + t_final
-                final_cp_residuals = [float(r) for r in np.linalg.norm(photo_cps - p_final_cps, axis=1)]
+                raw_final_res = np.linalg.norm(photo_cps - p_final_cps, axis=1)
+                final_cp_residuals = [float(r) for r in raw_final_res]
         elif len(initial_alignment.control_point_ids) > 0 and len(initial_alignment.residuals) > 0:
             final_cp_residuals = initial_alignment.residuals.copy()
 
