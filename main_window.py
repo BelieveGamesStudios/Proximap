@@ -129,7 +129,14 @@ def is_session_backup_valid() -> bool:
     if not meta:
         return False
 
+    # Standalone point clouds do not create or participate in session recovery
+    if meta.get("scan_type") == "point_cloud" or meta.get("is_point_cloud", False):
+        return False
+
     step = meta.get("last_completed_step", "unknown")
+    if step in ["point_cloud_imported", "standalone_point_cloud"]:
+        return False
+
     backup_dir = get_backup_dir()
     out_dir = get_reconstruction_out_dir()
     image_exts = ('.jpg', '.jpeg', '.png', '.tif', '.tiff')
@@ -321,7 +328,30 @@ class ViewerLoadWorker(QThread):
             mode      = self.mode
             points = colors = faces = texcoords = texture_path = None
 
-            if mode == 1:
+            if mode == 0:
+                # Sparse Point Cloud (decimated raw cloud for imported clouds or scene.ply)
+                ply_path = file_path.replace(".mvs", ".ply")
+                if os.path.exists(ply_path):
+                    file_path = ply_path
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext == '.ply':
+                    points, colors, _ = _read_ply_static(file_path)
+                else:
+                    import point_cloud_io
+                    res = point_cloud_io.load_point_cloud(file_path)
+                    if res.success and res.cloud is not None:
+                        points = np.asarray(res.cloud.points, dtype=np.float32)
+                        colors = (np.asarray(res.cloud.colors) * 255).astype(np.uint8) \
+                                 if res.has_colors else np.full((len(points), 3), 180, np.uint8)
+                
+                # Decimate raw points for sparse representation
+                if points is not None and len(points) > 0:
+                    stride = max(2, len(points) // 25000) if len(points) > 1000 else 1
+                    points = points[::stride]
+                    if colors is not None and len(colors) > 0:
+                        colors = colors[::stride]
+
+            elif mode == 1:
                 # Dense Point Cloud
                 ply_path = file_path.replace(".mvs", ".ply")
                 if os.path.exists(ply_path):
@@ -1968,7 +1998,8 @@ class ViewerWrapperWidget(QFrame):
             mvs_dir = self.current_mvs_dir if self.current_mvs_dir else os.path.join(get_reconstruction_out_dir(), "mvs")
             has_reconstruction = os.path.exists(os.path.join(mvs_dir, "scene_dense_mesh_refine.ply")) or \
                                  os.path.exists(os.path.join(mvs_dir, "scene_dense_mesh.ply"))
-            if not has_reconstruction:
+            index = self.mode_select.currentIndex()
+            if index in (0, 1) or not has_reconstruction:
                 return parent.standalone_cloud_path
 
         if not self.current_mvs_dir:
@@ -2141,7 +2172,7 @@ def create_point_cloud_thumbnail(size, filename=""):
     font.setPointSize(max(10, size // 6))
     font.setBold(True)
     painter.setFont(font)
-    painter.drawText(QRectF(0, size * 0.22, size, size * 0.35), Qt.AlignCenter, "☁ PLY")
+    painter.drawText(QRectF(0, size * 0.22, size, size * 0.35), Qt.AlignCenter, "PLY")
     
     font.setPointSize(max(7, size // 11))
     font.setBold(False)
@@ -2482,19 +2513,25 @@ class PhotosTabWidget(QWidget):
                 padding: 4px 8px;
                 font-size: 11px;
                 font-weight: bold;
-                background-color: #2a1b40;
-                color: #d8c8f0;
-                border: 1px solid #5a3d8c;
+                background-color: #1a3325;
+                color: #00E676;
+                border: 1px solid #00E676;
                 border-radius: 4px;
             }
             QPushButton:hover:enabled {
-                background-color: #3b275c;
+                background-color: #00E676;
+                color: #121212;
                 border-color: #00E676;
+            }
+            QPushButton:pressed:enabled {
+                background-color: #00c853;
+                color: #121212;
+                border-color: #00c853;
             }
             QPushButton:disabled {
                 background-color: #202020;
                 color: #555555;
-                border-color: #2D2D2D;
+                border: 1px solid #2D2D2D;
             }
         """)
 
@@ -2552,7 +2589,9 @@ class PhotosTabWidget(QWidget):
     def set_images(self, image_paths):
         self.image_list = image_paths
         if hasattr(self, 'btn_bg_remove'):
-            self.btn_bg_remove.setEnabled(bool(image_paths))
+            image_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
+            has_2d_images = any(isinstance(p, str) and p.lower().endswith(image_exts) for p in (image_paths or []))
+            self.btn_bg_remove.setEnabled(bool(image_paths) and has_2d_images)
         
         # 1. Stop any current loader thread
         if self.loader_thread and self.loader_thread.isRunning():
@@ -3012,11 +3051,6 @@ class MainWindow(QMainWindow):
         self.mobile_import_btn = QPushButton("Import from Mobile Device", step1_box)
         self.mobile_import_btn.clicked.connect(self._on_import_from_mobile_clicked)
         
-        self.bg_remove_btn = QPushButton("Remove Image Background", step1_box)
-        self.bg_remove_btn.setObjectName("BgRemoveBtn")
-        self.bg_remove_btn.setEnabled(False)
-        self.bg_remove_btn.clicked.connect(self._remove_backgrounds_clicked)
-        
         # Add-on Panels Container (Step 1)
         self.addon_container = QWidget(step1_box)
         self.addon_container_layout = QVBoxLayout(self.addon_container)
@@ -3065,7 +3099,6 @@ class MainWindow(QMainWindow):
         step1_layout.addWidget(self.browse_files_btn)
         step1_layout.addWidget(self.browse_btn)
         step1_layout.addWidget(self.mobile_import_btn)
-        step1_layout.addWidget(self.bg_remove_btn)
         step1_layout.addWidget(self.addon_container)
 
         scroll_content_layout.addWidget(step1_box)
@@ -4261,23 +4294,6 @@ class MainWindow(QMainWindow):
                 color: #555555;
                 border-color: #2D2D2D;
             }
-            QPushButton#BgRemoveBtn {
-                background-color: #2a1b40;
-                color: #d8c8f0;
-                border: 1px solid #5a3d8c;
-            }
-            QPushButton#BgRemoveBtn:hover:enabled {
-                background-color: #3b275c;
-                border-color: #00E676;
-            }
-            QPushButton#BgRemoveBtn:pressed:enabled {
-                background-color: #1e1230;
-            }
-            QPushButton#BgRemoveBtn:disabled {
-                background-color: #202020;
-                color: #555555;
-                border-color: #2D2D2D;
-            }
             QComboBox {
                 background-color: #333333;
                 color: #ffffff;
@@ -4491,15 +4507,14 @@ class MainWindow(QMainWindow):
         if files:
             self.console_text.append(f"[INFO] Successfully imported {len(files)} files. Camera identified: {camera_name}")
             self._set_process_btn_state("ready")
-            if hasattr(self, 'bg_remove_btn'):
-                self.bg_remove_btn.setEnabled(True)
             if hasattr(self, 'photos_tab') and hasattr(self.photos_tab, 'btn_bg_remove'):
-                self.photos_tab.btn_bg_remove.setEnabled(True)
+                image_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
+                has_2d_images = any(isinstance(p, str) and p.lower().endswith(image_exts) for p in files)
+                is_standalone = bool(getattr(self, 'standalone_cloud_path', None))
+                self.photos_tab.btn_bg_remove.setEnabled(has_2d_images and not is_standalone)
         else:
             self.console_text.append("[INFO] Image list cleared.")
             self._set_process_btn_state("idle")
-            if hasattr(self, 'bg_remove_btn'):
-                self.bg_remove_btn.setEnabled(False)
             if hasattr(self, 'photos_tab') and hasattr(self.photos_tab, 'btn_bg_remove'):
                 self.photos_tab.btn_bg_remove.setEnabled(False)
 
@@ -4631,8 +4646,6 @@ class MainWindow(QMainWindow):
             self.browse_btn.setEnabled(False)
         if hasattr(self, 'mobile_import_btn'):
             self.mobile_import_btn.setEnabled(False)
-        if hasattr(self, 'bg_remove_btn'):
-            self.bg_remove_btn.setEnabled(False)
         if hasattr(self, 'photos_tab') and hasattr(self.photos_tab, 'btn_bg_remove'):
             self.photos_tab.btn_bg_remove.setEnabled(False)
         if hasattr(self, 'process_btn'):
@@ -4889,6 +4902,11 @@ class MainWindow(QMainWindow):
 
         self.last_accessed_dir = os.path.dirname(file_path)
 
+        # Standalone point clouds are not photogrammetry datasets; clear any existing session backups
+        clear_backup_dir()
+        if hasattr(self, 'viewer_widget') and hasattr(self.viewer_widget, 'action_recover'):
+            self.viewer_widget.action_recover.setEnabled(False)
+
         # 1. Instant header-peek for color detection (reads ~4 KB, never blocks)
         import point_cloud_io
         if not hasattr(point_cloud_io, "peek_has_colors"):
@@ -4977,6 +4995,8 @@ class MainWindow(QMainWindow):
         self.standalone_panel.setVisible(True)
         self.vertex_color_toggle.setVisible(has_colors)
         self.vertex_color_toggle.setChecked(has_colors)
+        if hasattr(self, 'photos_tab') and hasattr(self.photos_tab, 'btn_bg_remove'):
+            self.photos_tab.btn_bg_remove.setEnabled(False)
         
         # 6. Enable process button
         self._set_process_btn_state("ready")
@@ -5019,6 +5039,10 @@ class MainWindow(QMainWindow):
         
         # 4. Reset process button state
         self._set_process_btn_state("idle")
+        if hasattr(self, 'photos_tab') and hasattr(self.photos_tab, 'btn_bg_remove'):
+            image_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
+            has_2d_images = any(isinstance(p, str) and p.lower().endswith(image_exts) for p in (self.image_list or []))
+            self.photos_tab.btn_bg_remove.setEnabled(has_2d_images)
         self.console_text.append("[STANDALONE] UI exited Standalone Reconstruction mode.")
 
     def _on_standalone_poisson_depth_changed(self, value):
@@ -5112,8 +5136,12 @@ class MainWindow(QMainWindow):
         import shutil
         staging_dir = os.path.join(get_reconstruction_out_dir(), "input_images")
         
-        if not self.image_list:
+        image_exts = ('.jpg', '.jpeg', '.png', '.tif', '.tiff')
+        valid_paths = [p for p in (self.image_list or []) if isinstance(p, str) and p.lower().endswith(image_exts)]
+        if not valid_paths:
             self.image_list = self._find_available_session_images()
+        else:
+            self.image_list = valid_paths
 
         staged = []
         seen_names = {}   # Track duplicate basenames and rename to avoid collisions
@@ -7005,7 +7033,8 @@ class MainWindow(QMainWindow):
                     mc = np.hstack([mc, np.ones((mc.shape[0], 1), dtype=np.float32)])
                 marker_colors = mc
             self.markers_visual = scene.visuals.Markers(parent=self.view.scene)
-            self.markers_visual.set_data(pos=points, face_color=marker_colors, size=2, edge_width=0)
+            point_size = 4 if mode == 0 else 2
+            self.markers_visual.set_data(pos=points, face_color=marker_colors, size=point_size, edge_width=0)
 
         self.canvas.native.show()
         self.viewer_widget.fallback_label.hide()
@@ -7801,17 +7830,25 @@ class MainWindow(QMainWindow):
                 points, colors = self._read_points3d_binary(points_bin)
             else:
                 scene_ply_candidates = [
+                    file_path if (file_path and file_path.lower().endswith(('.ply', '.pcd', '.xyz'))) else None,
                     os.path.join(mvs_dir, "scene.ply"),
                     os.path.join(output_dir, "scene.ply"),
                     os.path.join(mvs_dir, "scene_dense.ply"),
                     os.path.join(output_dir, "scene_dense.ply"),
                 ]
                 for sp in scene_ply_candidates:
-                    if os.path.exists(sp):
+                    if sp and os.path.exists(sp):
                         pts, cls, _ = self._read_ply(sp)
                         if pts is not None and len(pts) > 0:
                             points, colors = pts, cls
                             break
+
+            # Decimate raw point cloud for sparse view if not already from COLMAP binary
+            if points is not None and len(points) > 0 and not (points_bin and points_bin.endswith(".bin")):
+                stride = max(2, len(points) // 25000) if len(points) > 1000 else 1
+                points = points[::stride]
+                if colors is not None and len(colors) > 0:
+                    colors = colors[::stride]
                     
             images_bin_candidates = [
                 os.path.join(output_dir, "colmap", "sparse", "images.bin"),
@@ -7864,25 +7901,8 @@ class MainWindow(QMainWindow):
             else:
                 ext = os.path.splitext(file_path)[1].lower()
                 if ext not in [".obj", ".ply"]:
-                    try:
-                        import point_cloud_io
-                        res = point_cloud_io.load_point_cloud(file_path)
-                        if res.success and res.cloud is not None:
-                            points = np.asarray(res.cloud.points, dtype=np.float32)
-                            if res.has_colors:
-                                colors = (np.asarray(res.cloud.colors) * 255.0).astype(np.uint8)
-                            else:
-                                colors = np.ones((len(points), 3), dtype=np.uint8) * 180
-                    except Exception as e:
-                        self.console_text.append(f"[WARNING] Vispy fallback loader failed: {e}")
-                else:
-                    dirname = os.path.dirname(file_path)
-                    cand_obj = os.path.join(dirname, "scene_dense_mesh_texture.obj")
-                    obj_cand = file_path.replace(".ply", ".obj").replace(".mvs", ".obj")
-                    if os.path.exists(cand_obj):
-                        vertices, texcoords, faces, texture_path = self._read_obj(cand_obj)
-                        points = vertices
-                    elif os.path.exists(obj_cand):
+                    obj_cand = os.path.splitext(file_path)[0] + ".obj"
+                    if os.path.exists(obj_cand):
                         vertices, texcoords, faces, texture_path = self._read_obj(obj_cand)
                         points = vertices
                     else:
@@ -7925,10 +7945,11 @@ class MainWindow(QMainWindow):
                 marker_colors = 'white'
                 
             self.markers_visual = scene.visuals.Markers(parent=self.view.scene)
+            point_size = 4 if mode == 0 else 2
             self.markers_visual.set_data(
                 pos=points,
                 face_color=marker_colors,
-                size=2,
+                size=point_size,
                 edge_width=0
             )
             
@@ -7937,19 +7958,22 @@ class MainWindow(QMainWindow):
             pass
         else:
             self.canvas.native.hide()
-            self.viewer_widget.fallback_label.setText("No valid 3D points or faces could be parsed.")
+            self.viewer_widget.fallback_label.setText("No 3D data found to render.")
             self.viewer_widget.fallback_label.show()
             return
             
-        # Store active geometry references
+        self.canvas.native.show()
+        self.viewer_widget.fallback_label.hide()
+        
+        # Track active geometry arrays
         self._current_points = points
         self._current_colors = colors
         self._current_faces = faces
         self._current_texcoords = texcoords
         self._current_texture_path = texture_path
         self._last_points = points
-
-        # Store raw checkpoint for Reset Crop if not already recorded
+        
+        # Store raw uncropped geometry arrays
         if self._raw_points is None:
             self._raw_points = np.copy(points) if points is not None else None
             self._raw_colors = np.copy(colors) if colors is not None else None
@@ -7957,17 +7981,14 @@ class MainWindow(QMainWindow):
             self._raw_texcoords = np.copy(texcoords) if texcoords is not None else None
             self._raw_texture_path = texture_path
         
-        self.canvas.native.show()
-        self.viewer_widget.fallback_label.hide()
-        
-        # Center and zoom camera
-        ref_pts = points if (points is not None and len(points) > 0) else None
-        if ref_pts is not None:
-            bbox_min = np.min(ref_pts, axis=0)
-            bbox_max = np.max(ref_pts, axis=0)
-            center = (bbox_min + bbox_max) / 2.0
-            scale = np.max(bbox_max - bbox_min)
+        if points is not None and len(points) > 0:
+            # Calculate scene bounding box
+            min_bound = np.min(points, axis=0)
+            max_bound = np.max(points, axis=0)
+            center = (min_bound + max_bound) / 2.0
+            scale = np.max(max_bound - min_bound)
             
+            # Reset camera to fit model
             self.view.camera.center = center
             self.view.camera.distance = max(0.1, scale * 1.5)
             self.view.camera.elevation = 30
@@ -7975,8 +7996,26 @@ class MainWindow(QMainWindow):
             self.view.camera.up = '+y'
             
             # Update auto-scaling ground plane grid
-            self._update_ground_grid(ref_pts)
+            self._update_ground_grid(points)
             
+        elif hasattr(self, 'cameras_visual') and self.cameras_visual is not None:
+            ref_pts = getattr(self, '_last_camera_positions', None)
+            if ref_pts is None:
+                ref_pts = np.array([[0, 0, 0]], dtype=np.float32)
+            min_bound = np.min(ref_pts, axis=0)
+            max_bound = np.max(ref_pts, axis=0)
+            center = (min_bound + max_bound) / 2.0
+            scale = np.max(max_bound - min_bound)
+            
+            self.view.camera.center = center
+            self.view.camera.distance = max(1.0, scale * 2.0)
+            self.view.camera.elevation = 30
+            self.view.camera.azimuth = 45
+            self.view.camera.up = '+y'
+            
+            # Update auto-scaling ground plane grid
+            self._update_ground_grid(ref_pts)
+
         self.canvas.update()
 
     def _on_cloud_import_done(self, res, file_path):
@@ -8022,7 +8061,7 @@ class MainWindow(QMainWindow):
         # For mode 0 (sparse), keep existing sync path (reads COLMAP binary, fast)
         # For OBJ files (mode 2), keep sync path (OBJ reader is already needed on UI thread)
         ext = os.path.splitext(file_path)[1].lower()
-        use_background = mode in (1, 2) and ext != '.obj'
+        use_background = mode in (0, 1, 2) and ext != '.obj'
 
         if use_background:
             # Spawn background parser — UI stays responsive
