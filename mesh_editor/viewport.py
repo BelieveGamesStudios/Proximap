@@ -53,6 +53,7 @@ class MeshEditorViewport(QOpenGLWidget):
         self._gizmo_dragging = False
         self.transform_enabled = True
         self.enable_gizmo = True
+        self.picking_enabled = True
         
         # Box selection states
         self._is_box_selecting = False
@@ -171,8 +172,10 @@ class MeshEditorViewport(QOpenGLWidget):
         # Scene starts empty on startup. Primitives/meshes can be imported using the Import button.
         pass
 
-        # Build the minimal flat-color shader used for GPU color-ID picking
-        self._build_pick_program()
+        # Inspection-only consumers can disable picking and avoid allocating the
+        # off-screen ID framebuffer and shader entirely.
+        if self.picking_enabled:
+            self._build_pick_program()
 
         # Enable depth testing
         gl.glEnable(gl.GL_DEPTH_TEST)
@@ -743,7 +746,7 @@ void main() { fragColor = pickColor; }
                 self.is_panning = True
             else:
                 self.is_orbiting = True
-        elif event.button() == Qt.MouseButton.LeftButton:
+        elif event.button() == Qt.MouseButton.LeftButton and self.picking_enabled:
             # GPU color-ID picking (pixel-perfect)
             shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
             old_selection = list(self.scene.selected_objects)
@@ -835,7 +838,7 @@ void main() { fragColor = pickColor; }
             self.redo_requested.emit()
             event.accept()
             return
-        elif ctrl and key == Qt.Key.Key_A:
+        elif ctrl and key == Qt.Key.Key_A and self.picking_enabled:
             # Select all
             self.scene.selected_objects = list(self.scene.objects)
             self.scene.active_object = self.scene.objects[-1] if self.scene.objects else None

@@ -100,6 +100,7 @@ def handle_cleanup(ms, pymeshlab, params, input_ply, output_ply):
     repair_nonmanifold   = bool(params.get("repair_nonmanifold", True))
     close_holes          = bool(params.get("close_holes", True))
     max_hole_size        = int(params.get("max_hole_size", 30))
+    full_cleanup         = bool(params.get("full_cleanup", True))
 
     _log("[CLEANUP] Starting PyMeshLab Auto Cleanup on: " + os.path.basename(input_ply))
 
@@ -120,21 +121,19 @@ def handle_cleanup(ms, pymeshlab, params, input_ply, output_ply):
     if close_holes and max_hole_size > 0:
         ms.meshing_close_holes(maxholesize=max_hole_size)
 
-    ms.meshing_remove_connected_component_by_face_number(mincomponentsize=25)
-    ms.meshing_re_orient_faces_coherentely()
+    if full_cleanup:
+        ms.meshing_remove_connected_component_by_face_number(mincomponentsize=25)
+        ms.meshing_re_orient_faces_coherentely()
+        merge_fn = _get_merge_filter(ms, pymeshlab)
+        merge_fn()
 
-    merge_fn = _get_merge_filter(ms, pymeshlab)
-    merge_fn()
-
-    target_perc = max(0.05, min(0.95, (100.0 - target_reduction_pct) / 100.0))
-    _log("[CLEANUP] Applying {}% Quadric Edge Collapse Decimation...".format(int(target_reduction_pct)))
-    ms.meshing_decimation_quadric_edge_collapse(
-        targetperc=target_perc,
-        qualitythr=0.3,
-        preserveboundary=True,
-        preservenormal=True,
-        preservetopology=True,
-    )
+    if target_reduction_pct > 0:
+        target_perc = max(0.05, min(0.95, (100.0 - target_reduction_pct) / 100.0))
+        _log("[CLEANUP] Applying {}% Quadric Edge Collapse Decimation...".format(int(target_reduction_pct)))
+        ms.meshing_decimation_quadric_edge_collapse(
+            targetperc=target_perc, qualitythr=0.3, preserveboundary=True,
+            preservenormal=True, preservetopology=True,
+        )
 
     final_mesh = ms.current_mesh()
     final_v = final_mesh.vertex_number()

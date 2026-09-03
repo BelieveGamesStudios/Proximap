@@ -47,9 +47,157 @@ Optimized for Apple Silicon (M1/M2/M3) and compatible with Intel Macs on macOS 1
  
  ---
  
- ## Getting Started (Developers)
- 
- ### 1. Prerequisites
+## Getting Started (Developers)
+
+### Deep Mesh Fusion (Milestones 1–11)
+
+The headless Deep Mesh Fusion foundation accepts independent `.ply` scan passes,
+computes per-pass diagnostics, performs FPFH/RANSAC plus robust point-to-plane ICP
+registration, records explicit quality metrics, and exports a derived voxel-fused
+point cloud. Source files are referenced by path and SHA-256 and are never modified.
+
+```bash
+python -m deep_mesh_fusion.cli ./ApartmentFusion \
+  ./Apartment/Pass_01.ply ./Apartment/Pass_02.ply \
+  --voxel-size 0.03
+```
+
+The workspace contains `workspace.json`, per-pass transforms under
+`registration/transforms/`, and the fused cloud under `derived/`. Registrations
+below configured fitness, RMSE, or overlap thresholds are flagged for manual
+alignment and excluded from fusion. A UI or other client can submit a corrected
+source-to-reference 4×4 matrix through `DeepMeshFusionWorkspace.set_manual_transform`;
+manual transforms pass through the same quality gates before fusion.
+
+Milestone 2 adds a localized cross-pass evidence grid. Every occupied region
+records observation count, per-pass density, consensus distance, normal
+agreement, local surface consistency, potential missing observations, conflicts,
+and explainable weighted confidence. The derived `analysis/spatial_evidence_map.json`
+retains point-count and source/transform provenance; `analysis/confidence_map.ply`
+provides red-to-green confidence cell centers for the 3D viewport. The CLI runs
+this analysis after registration and accepts `--analysis-cell-size` when the
+default four-times-voxel grid is not appropriate for the scene scale.
+
+Milestone 3 replaces naïve concatenation with local consensus geometry. At the
+fusion-cell scale, observations are clustered by cross-pass proximity, scored
+for density, local surface quality, and registration reliability, then resolved
+through robust Huber-weighted consensus or best-observation selection when
+averaging would blur a disputed edge. Unsupported alternatives are suppressed
+when a multi-pass cluster exists. The fused PLY propagates normals, colors,
+confidence, observation count, and fusion method; the adjacent
+`derived/fused_point_cloud.provenance.json` records every contributing pass,
+weight, residual, representative point, and source hash.
+Use `--fusion-cell-size` to tune the consensus resolution independently of the
+coarser Milestone 2 evidence grid.
+
+Milestone 4 adds a persistence-driven transient and artifact stage before
+consensus fusion. Pass-specific cells are grouped into connected components and
+scored using independent-pass support, other-pass coverage, conflict with
+stronger persistent geometry, isolation, and continuity with stable structural
+surfaces. This geometric-temporal model suppresses people-like occluders,
+temporary or moving objects, curtains, floaters, and scan fragments without
+claiming semantic object recognition. Coplanar single-pass wall patches can be
+retained when their boundary remains consistent with persistent structure.
+Decisions are written to `analysis/artifact_suppression.json`; rejected points
+are written in red to `analysis/rejected_artifacts.ply` for viewport inspection.
+
+Milestone 5 reconstructs architecture with a hybrid strategy instead of applying
+one global Poisson surface. Iterative robust planes are classified relative to a
+configurable up axis as walls, floors, ceilings, or other large planar surfaces.
+Wall occupancy is meshed in plane coordinates so detected doorways and windows
+remain open; plane intersections produce architectural edges and three-plane
+intersections produce corners. Residual furniture and complex geometry follows
+an alpha-shape reconstruction path. The classified mesh is written to
+`derived/architecture_mesh.ply`, with confidence, architecture class, and source
+surface ID on every vertex. Detection and mesh validation metrics are stored in
+`analysis/architecture_reconstruction.json`. CLI controls include `--up-axis`,
+`--architecture-grid-size`, and `--plane-distance`.
+
+Milestone 6 performs evidence-based gap recovery only after consensus fusion and
+architecture reconstruction. Bounded mesh gaps are classified in this order:
+reuse fused observations when present, infer a continuation only from a closed
+high-confidence planar boundary, conservatively interpolate small closed complex
+surface loops, or leave the gap open for review. Detected doorways and windows
+are protected, and exterior mesh boundaries are never treated as holes. The
+completed mesh is written to `derived/architecture_mesh_repaired.ply`; decisions
+and repair confidence are recorded in `analysis/gap_recovery.json`. A colored
+`analysis/gap_review.ply` marks repaired, unresolved, intentional, and exterior
+regions for manual inspection. Use `--gap-max-planar-area` and
+`--gap-min-confidence` to control inference conservatism.
+
+Milestone 7 validates the repaired LiDAR-derived mesh before appearance work.
+The audit checks holes and boundary loops, non-manifold edges, self-intersections,
+degenerate and excessively stretched triangles, disconnected components, bad
+normals, unexpected surface discontinuities, unresolved gaps, geometric
+confidence, completeness, and consistency with detected architectural planes and
+openings. `analysis/geometry_validation.json` contains defect evidence, review
+locations, normalized completeness/surface/consistency/confidence scores, and an
+explicit appearance-readiness decision. `analysis/geometry_quality.ply` provides
+a red-to-green per-vertex quality overlay, while
+`derived/validated_lidar_surface.ply` preserves the validated geometry and its
+provenance properties. Readiness can be tuned with `--min-geometry-quality`, and
+triangle stretching with `--max-triangle-aspect`.
+
+Milestone 8 registers an existing COLMAP/OpenMVS photogrammetry reconstruction
+to the validated LiDAR surface using a scale-aware coarse-to-fine similarity
+alignment. It validates mutual 3D correspondences, projects mesh faces through
+the registered COLMAP cameras with occlusion checks, measures single-view and
+multi-view surface coverage, and scores each immutable source image for
+sharpness, exposure, contrast, clipping, and resolution. The
+`photogrammetry/` workspace folder contains the similarity transform and source
+hashes, aligned source cloud, camera validation report, red-to-green texture
+coverage mesh, and `texture_preparation.json` readiness summary. Supply a COLMAP
+text model and its image root with `--photogrammetry-model` and `--image-root`;
+an OpenMVS dense PLY can be selected with `--dense-photogrammetry-cloud`.
+
+Milestone 9 projects the registered camera imagery across the validated fused
+surface and produces a confidence-aware texture atlas. Every atlas texel is
+visibility- and occlusion-tested, ranked by camera image quality and viewing
+angle, filtered for color disagreement, then blended from the strongest
+compatible observations. Geometry confidence is propagated into the texture
+confidence map. UVs use deterministic non-overlapping face charts; global
+camera color normalization, compatible-view blending, and transparent chart
+padding reduce seams without inventing appearance for unobserved regions. The
+`texture/` workspace folder contains `textured_environment.obj` and MTL,
+`environment_albedo.png`, `texture_confidence.png`, and an auditable
+`texture_baking.json` camera-selection report. Use `--bake-textures` and
+`--texture-atlas-size` to run the stage from the CLI.
+
+Milestone 10 inspects the baked artifact itself and separates safe repairs from
+ambiguous appearance failures. It detects UV-chart seams, abnormal texel
+density/stretching, missing or black texels, weak discontinuities, poor camera
+selection, suspicious projection, and high-geometry/low-texture confidence
+mismatches. Moderate supported seams and small bounded texel defects can be
+repaired automatically; large, unsupported, or contradictory regions remain
+explicit review items. The `final/` workspace folder contains the polished OBJ
+and MTL, repaired albedo, final confidence and review maps, plus
+`final_asset_validation.json` with before/after issues and geometry, texture,
+coverage, consistency, and overall scores. Use `--finalize-asset` to run baking,
+inspection, and controlled repair as one CLI workflow.
+
+Milestone 11 is the final production quality gate. It aggregates geometry,
+completeness, surface consistency, texture coverage, texture quality, critical
+defects, unresolved reviews, registration state, immutable-source hashes, and
+final artifact integrity under the configurable `virtual-tour-standard`
+profile. A single blocking failure produces `NOT TOUR READY` with the responsible
+stage and artifact; advisory exclusions remain visible without silently
+overriding valid fused evidence. The `quality/` folder contains
+`tour_readiness.json`, a human-readable `tour_readiness.html`, and
+`tour_asset_manifest.json` with SHA-256 hashes for the final handoff files. Run
+the complete finalization and gate with `--tour-readiness`.
+
+The desktop application exposes this pipeline through the viewport-first
+**Deep Mesh Fusion** tab, replacing the former Spatial Texture Engine tab.
+PLY passes load into the resizable viewport immediately; seven dependency-gated
+stages guide preparation, alignment, point fusion, surface validation, cleanup,
+texture, and final quality while detailed metrics remain available in the
+resizable diagnostics console. Existing photogrammetry
+outputs are detected automatically, and **Run Reconstruction** returns users to
+the normal 3D Reconstruction tab when no model exists. See
+[`DEEP_MESH_FUSION_TESTING.md`](DEEP_MESH_FUSION_TESTING.md) for automated,
+desktop, and real-data CLI testing instructions.
+
+### 1. Prerequisites
  * **Python**: Version 3.9 or higher (64-bit recommended).
  * **GPU (Optional but Recommended)**: NVIDIA GPU with CUDA drivers installed for GPU-accelerated mesh refinement and densification.
  

@@ -1,0 +1,38 @@
+{
+  "reference_pass_id": "scan-03",
+  "transform": [
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      1.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      1.0,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "initial_overlap": 1.0,
+  "overlap_ratio": 1.0,
+  "fitness": 1.0,
+  "inlier_rmse": 0.0,
+  "correspondence_count": 386780,
+  "method": "reference",
+  "accepted": true,
+  "requires_manual_alignment": false,
+  "message": "Reference pass defines common environment space"
+}

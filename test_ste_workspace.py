@@ -88,6 +88,17 @@ class TestSTEUnifiedWorkspace(unittest.TestCase):
     def setUp(self):
         self.ws = STEWorkspace()
 
+    def tearDown(self):
+        # The legacy workspace starts its bake worker asynchronously. Ensure it
+        # is not destroyed while still running when this compatibility suite is
+        # executed with an offscreen Qt backend.
+        worker = getattr(self.ws, "_bake_worker", None)
+        if worker is not None and worker.isRunning():
+            worker.wait(30000)
+        self.ws.close()
+        self.ws.deleteLater()
+        app.processEvents()
+
     def test_a_unified_viewport_initialization(self):
         """TEST A: STE creates a single unified shared 3D alignment viewport."""
         self.assertIsInstance(self.ws.viewport, STEUnifiedAlignmentViewport)
@@ -908,5 +919,4 @@ class TestSTEUnifiedWorkspace(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
 

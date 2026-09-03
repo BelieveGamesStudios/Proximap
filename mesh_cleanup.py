@@ -252,6 +252,7 @@ class PyMeshLabDirectBackend(MeshProcessingBackend):
         repair_nonmanifold   = bool(cleanup_params.get("repair_nonmanifold", True))
         close_holes          = bool(cleanup_params.get("close_holes", True))
         max_hole_size        = int(cleanup_params.get("max_hole_size", 30))
+        full_cleanup         = bool(cleanup_params.get("full_cleanup", True))
 
         _log(f"[CLEANUP] Starting Auto Cleanup on: {os.path.basename(input_ply_path)}", log_callback)
         try:
@@ -275,20 +276,16 @@ class PyMeshLabDirectBackend(MeshProcessingBackend):
             if close_holes and max_hole_size > 0:
                 ms.meshing_close_holes(maxholesize=max_hole_size)
 
-            ms.meshing_remove_connected_component_by_face_number(mincomponentsize=25)
-            ms.meshing_re_orient_faces_coherentely()
-            ms.meshing_merge_close_vertices()
+            if full_cleanup:
+                ms.meshing_remove_connected_component_by_face_number(mincomponentsize=25)
+                ms.meshing_re_orient_faces_coherentely()
+                ms.meshing_merge_close_vertices()
 
-            target_perc = max(0.05, min(0.95, (100.0 - target_reduction_pct) / 100.0))
-            _log(f"[CLEANUP] Applying {int(target_reduction_pct)}% Quadric Edge Collapse Decimation...",
-                 log_callback)
-            ms.meshing_decimation_quadric_edge_collapse(
-                targetperc=target_perc,
-                qualitythr=0.3,
-                preserveboundary=True,
-                preservenormal=True,
-                preservetopology=True,
-            )
+            if target_reduction_pct > 0:
+                target_perc = max(0.05, min(0.95, (100.0 - target_reduction_pct) / 100.0))
+                _log(f"[CLEANUP] Applying {int(target_reduction_pct)}% Quadric Edge Collapse Decimation...", log_callback)
+                ms.meshing_decimation_quadric_edge_collapse(targetperc=target_perc, qualitythr=0.3,
+                    preserveboundary=True, preservenormal=True, preservetopology=True)
 
             final_mesh = ms.current_mesh()
             final_v    = final_mesh.vertex_number()
@@ -469,6 +466,7 @@ class PyMeshLabWorkerBackend(MeshProcessingBackend):
             "repair_nonmanifold":   bool(cleanup_params.get("repair_nonmanifold", True)),
             "close_holes":          bool(cleanup_params.get("close_holes", True)),
             "max_hole_size":        int(cleanup_params.get("max_hole_size", 30)),
+            "full_cleanup":         bool(cleanup_params.get("full_cleanup", True)),
         }
         return self._run_worker(worker_params, log_callback)
 
@@ -564,7 +562,7 @@ class Open3DBackend(MeshProcessingBackend):
                 mesh.remove_unreferenced_vertices()
                 mesh.remove_degenerate_triangles()
 
-            if init_f > 0:
+            if init_f > 0 and target_reduction_pct > 0:
                 target_perc      = max(0.05, min(0.95, (100.0 - target_reduction_pct) / 100.0))
                 target_triangles = max(10, int(init_f * target_perc))
                 _log(f"[CLEANUP] Applying {int(target_reduction_pct)}% Quadric Edge Collapse Decimation "

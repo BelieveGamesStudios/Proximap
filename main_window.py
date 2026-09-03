@@ -139,7 +139,9 @@ def is_session_backup_valid() -> bool:
         has_images = False
         candidates = [
             os.path.join(backup_dir, "images"),
+            os.path.join(backup_dir, "colmap", "images"),
             os.path.join(out_dir, "input_images"),
+            os.path.join(out_dir, "colmap", "images"),
             os.path.join(out_dir, "extracted_frames")
         ]
         for cand in candidates:
@@ -2645,6 +2647,8 @@ class SessionRecoveryDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
+    reconstruction_state_changed = Signal()
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Proximap 1.5.0")
@@ -3605,26 +3609,26 @@ class MainWindow(QMainWindow):
         
         self.main_tabs.addTab(self.mesh_editor_placeholder, "Mesh Editor")
 
-        # Register Spatial Texture Engine tab
-        self.ste_tab = None
-        self.ste_placeholder = QWidget(self.main_tabs)
-        ste_placeholder_layout = QVBoxLayout(self.ste_placeholder)
-        ste_placeholder_layout.setContentsMargins(20, 20, 20, 20)
-        
-        ste_loading_container = QWidget(self.ste_placeholder)
-        ste_loading_container.setFixedWidth(360)
-        ste_loading_layout = QVBoxLayout(ste_loading_container)
-        ste_loading_layout.setSpacing(12)
-        ste_loading_layout.setAlignment(Qt.AlignCenter)
-        
-        self.ste_loading_msg_label = QLabel("Opening Spatial Texture Engine...", ste_loading_container)
-        self.ste_loading_msg_label.setStyleSheet("color: #ffffff; font-size: 15px; font-weight: bold;")
-        self.ste_loading_msg_label.setAlignment(Qt.AlignCenter)
-        
-        self.ste_loading_progress = QProgressBar(ste_loading_container)
-        self.ste_loading_progress.setRange(0, 0)  # Indeterminate loading bar
-        self.ste_loading_progress.setTextVisible(False)
-        self.ste_loading_progress.setStyleSheet("""
+        # Deep Mesh Fusion replaces the legacy Spatial Texture Engine workflow.
+        self.deep_mesh_fusion_tab = None
+        self.deep_mesh_fusion_placeholder = QWidget(self.main_tabs)
+        fusion_placeholder_layout = QVBoxLayout(self.deep_mesh_fusion_placeholder)
+        fusion_placeholder_layout.setContentsMargins(20, 20, 20, 20)
+
+        fusion_loading_container = QWidget(self.deep_mesh_fusion_placeholder)
+        fusion_loading_container.setFixedWidth(400)
+        fusion_loading_layout = QVBoxLayout(fusion_loading_container)
+        fusion_loading_layout.setSpacing(12)
+        fusion_loading_layout.setAlignment(Qt.AlignCenter)
+
+        self.fusion_loading_msg_label = QLabel("Opening Deep Mesh Fusion...", fusion_loading_container)
+        self.fusion_loading_msg_label.setStyleSheet("color: #ffffff; font-size: 15px; font-weight: bold;")
+        self.fusion_loading_msg_label.setAlignment(Qt.AlignCenter)
+
+        self.fusion_loading_progress = QProgressBar(fusion_loading_container)
+        self.fusion_loading_progress.setRange(0, 0)  # Indeterminate loading bar
+        self.fusion_loading_progress.setTextVisible(False)
+        self.fusion_loading_progress.setStyleSheet("""
             QProgressBar {
                 border: 1px solid #3A3A3A;
                 background-color: #222222;
@@ -3637,19 +3641,19 @@ class MainWindow(QMainWindow):
             }
         """)
         
-        self.ste_loading_sub_label = QLabel("Initializing CCCoreLib alignment engine and 3D viewport...", ste_loading_container)
-        self.ste_loading_sub_label.setStyleSheet("color: #737373; font-size: 11px;")
-        self.ste_loading_sub_label.setAlignment(Qt.AlignCenter)
+        self.fusion_loading_sub_label = QLabel("Initializing fusion, reconstruction, validation, and tour-quality services...", fusion_loading_container)
+        self.fusion_loading_sub_label.setStyleSheet("color: #737373; font-size: 11px;")
+        self.fusion_loading_sub_label.setAlignment(Qt.AlignCenter)
         
-        ste_loading_layout.addWidget(self.ste_loading_msg_label)
-        ste_loading_layout.addWidget(self.ste_loading_progress)
-        ste_loading_layout.addWidget(self.ste_loading_sub_label)
+        fusion_loading_layout.addWidget(self.fusion_loading_msg_label)
+        fusion_loading_layout.addWidget(self.fusion_loading_progress)
+        fusion_loading_layout.addWidget(self.fusion_loading_sub_label)
         
-        ste_placeholder_layout.addStretch()
-        ste_placeholder_layout.addWidget(ste_loading_container, 0, Qt.AlignCenter)
-        ste_placeholder_layout.addStretch()
+        fusion_placeholder_layout.addStretch()
+        fusion_placeholder_layout.addWidget(fusion_loading_container, 0, Qt.AlignCenter)
+        fusion_placeholder_layout.addStretch()
         
-        self.main_tabs.addTab(self.ste_placeholder, "Spatial Texture Engine")
+        self.main_tabs.addTab(self.deep_mesh_fusion_placeholder, "Deep Mesh Fusion")
 
         self.main_tabs.currentChanged.connect(self._on_tab_changed)
         
@@ -3662,31 +3666,39 @@ class MainWindow(QMainWindow):
                 self._mesh_editor_loading = True
                 QApplication.setOverrideCursor(Qt.WaitCursor)
                 QTimer.singleShot(100, self._load_mesh_editor)
-        elif index == 2 and self.ste_tab is None:
-            if not getattr(self, "_ste_loading", False):
-                self._ste_loading = True
+        elif index == 2 and self.deep_mesh_fusion_tab is None:
+            if not getattr(self, "_deep_mesh_fusion_loading", False):
+                self._deep_mesh_fusion_loading = True
                 QApplication.setOverrideCursor(Qt.WaitCursor)
-                QTimer.singleShot(100, self._load_ste_workspace)
+                QTimer.singleShot(100, self._load_deep_mesh_fusion_workspace)
+        elif index == 2 and self.deep_mesh_fusion_tab is not None:
+            # A photogrammetry run may have completed while the reconstruction
+            # tab was active. Refresh the simple available/not-available card.
+            self.deep_mesh_fusion_tab.refresh_reconstruction_state()
 
-    def _load_ste_workspace(self):
+    def _load_deep_mesh_fusion_workspace(self):
         try:
-            from ste_workspace import STEWorkspace
-            self.ste_tab = STEWorkspace(self)
-            layout = self.ste_placeholder.layout()
+            from deep_mesh_fusion.ui import DeepMeshFusionPanel
+            self.deep_mesh_fusion_tab = DeepMeshFusionPanel(self, reconstruction_root=get_reconstruction_out_dir())
+            self.deep_mesh_fusion_tab.request_reconstruction.connect(
+                lambda: self.main_tabs.setCurrentIndex(0)
+            )
+            self.reconstruction_state_changed.connect(
+                self.deep_mesh_fusion_tab.refresh_reconstruction_state
+            )
+            layout = self.deep_mesh_fusion_placeholder.layout()
             if layout:
                 while layout.count():
                     child = layout.takeAt(0)
                     if child.widget():
                         child.widget().deleteLater()
                 layout.setContentsMargins(0, 0, 0, 0)
-                layout.addWidget(self.ste_tab)
-            # Auto-connect active photogrammetry session if available
-            self.ste_tab._load_active_session_reconstruction()
+                layout.addWidget(self.deep_mesh_fusion_tab)
         except Exception as e:
             import traceback
-            print(f"[ERROR] Failed to load Spatial Texture Engine: {e}\n{traceback.format_exc()}")
+            print(f"[ERROR] Failed to load Deep Mesh Fusion: {e}\n{traceback.format_exc()}")
         finally:
-            self._ste_loading = False
+            self._deep_mesh_fusion_loading = False
             QApplication.restoreOverrideCursor()
 
     def _load_mesh_editor(self):
@@ -4903,7 +4915,9 @@ class MainWindow(QMainWindow):
 
         candidates = [
             os.path.join(backup_dir, "images"),
+            os.path.join(backup_dir, "colmap", "images"),
             os.path.join(out_dir, "input_images"),
+            os.path.join(out_dir, "colmap", "images"),
             os.path.join(out_dir, "extracted_frames")
         ]
         image_exts = ('.jpg', '.jpeg', '.png', '.tif', '.tiff')
@@ -5958,6 +5972,10 @@ class MainWindow(QMainWindow):
 
         self._update_file_menu_states()
         self._check_and_enable_cleanup_btn()
+
+        # Recovery has finished copying the coherent COLMAP/OpenMVS dataset
+        # back into reconstruction_out. Notify any loaded downstream workflow.
+        self.reconstruction_state_changed.emit()
 
         # Prompt user if they want to resume remaining reconstruction steps
         step = meta.get("last_completed_step", "unknown") if meta else "unknown"
