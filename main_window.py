@@ -1208,6 +1208,7 @@ class ViewerWrapperWidget(QFrame):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.main_window = parent
         self.setAcceptDrops(True)
         self.setObjectName("ViewerWrapperWidget")
         self.setStyleSheet("background-color: #1A1A1A; border: 1px solid #2B2B2B; border-radius: 8px;")
@@ -1928,8 +1929,9 @@ class ViewerWrapperWidget(QFrame):
         super().resizeEvent(event)
         self._position_crop_modal()
         self._position_tools_modal()
-        if self.parent() and hasattr(self.parent(), '_position_overlay'):
-            self.parent()._position_overlay()
+        main_win = self._get_main_window()
+        if main_win and hasattr(main_win, '_position_overlay'):
+            main_win._position_overlay()
         w = self.width()
             
         if w < 600:
@@ -1992,15 +1994,26 @@ class ViewerWrapperWidget(QFrame):
     def set_mvs_directory(self, mvs_dir: str):
         self.current_mvs_dir = mvs_dir
 
+    def _get_main_window(self):
+        if hasattr(self, 'main_window') and self.main_window is not None:
+            return self.main_window
+        p = self.parent()
+        while p:
+            if hasattr(p, 'standalone_cloud_path'):
+                return p
+            p = p.parent() if hasattr(p, 'parent') else None
+        return None
+
     def get_selected_file_path(self) -> str:
-        parent = self.parent()
-        if parent and hasattr(parent, 'standalone_cloud_path') and parent.standalone_cloud_path:
+        main_win = self._get_main_window()
+        if main_win and getattr(main_win, 'standalone_cloud_path', None):
+            standalone_path = main_win.standalone_cloud_path
             mvs_dir = self.current_mvs_dir if self.current_mvs_dir else os.path.join(get_reconstruction_out_dir(), "mvs")
             has_reconstruction = os.path.exists(os.path.join(mvs_dir, "scene_dense_mesh_refine.ply")) or \
                                  os.path.exists(os.path.join(mvs_dir, "scene_dense_mesh.ply"))
             index = self.mode_select.currentIndex()
             if index in (0, 1) or not has_reconstruction:
-                return parent.standalone_cloud_path
+                return standalone_path
 
         if not self.current_mvs_dir:
             return None
