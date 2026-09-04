@@ -1,7 +1,6 @@
 # Testing Deep Mesh Fusion
 
-Deep Mesh Fusion is the replacement for the visible Spatial Texture Engine
-workflow. It treats LiDAR as the geometry authority and registered
+Deep Mesh Fusion treats LiDAR as the geometry authority and registered
 photogrammetry cameras as appearance observations.
 
 ## 1. Run the automated test suite

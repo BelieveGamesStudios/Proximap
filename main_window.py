@@ -4,6 +4,8 @@ import subprocess
 import ctypes
 import json
 import time
+import shutil
+from pathlib import Path
 from typing import Optional
 try:
     from PySide6.QtWidgets import (
@@ -3609,7 +3611,7 @@ class MainWindow(QMainWindow):
         
         self.main_tabs.addTab(self.mesh_editor_placeholder, "Mesh Editor")
 
-        # Deep Mesh Fusion replaces the legacy Spatial Texture Engine workflow.
+        # Deep Mesh Fusion workflow.
         self.deep_mesh_fusion_tab = None
         self.deep_mesh_fusion_placeholder = QWidget(self.main_tabs)
         fusion_placeholder_layout = QVBoxLayout(self.deep_mesh_fusion_placeholder)
@@ -3683,6 +3685,7 @@ class MainWindow(QMainWindow):
             self.deep_mesh_fusion_tab.request_reconstruction.connect(
                 lambda: self.main_tabs.setCurrentIndex(0)
             )
+            self.deep_mesh_fusion_tab.new_project_requested.connect(self._new_project)
             self.reconstruction_state_changed.connect(
                 self.deep_mesh_fusion_tab.refresh_reconstruction_state
             )
@@ -6098,18 +6101,51 @@ class MainWindow(QMainWindow):
         self._update_file_menu_states()
 
     def _new_project(self):
-        """Resets the current project session: clears loaded photos, standalone cloud, viewer, and UI state."""
-        has_content = bool(self.image_list or self.standalone_cloud_path or self.viewer_widget.current_mvs_dir)
+        """Clear recoverable state and reset every project workspace in the UI."""
+        fusion_has_content = bool(
+            self.deep_mesh_fusion_tab is not None
+            and self.deep_mesh_fusion_tab.has_project_state()
+        )
+        try:
+            backup_has_content = bool(os.listdir(get_backup_dir()))
+        except OSError:
+            backup_has_content = False
+        has_content = bool(
+            self.image_list or self.standalone_cloud_path or self.viewer_widget.current_mvs_dir
+            or fusion_has_content or backup_has_content
+        )
         if has_content:
             reply = QMessageBox.question(
                 self,
                 "New Project",
-                "Start a new project? This will clear all loaded photos, standalone point clouds, and current 3D viewer content.",
+                "Start a new project? This clears loaded media, current viewer content, "
+                "the Deep Mesh Fusion derived workspace, and all session-recovery backups.\n\n"
+                "Original scan and photo source files will not be deleted.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
+
+        # Remove both automatic recovery stores before resetting the visible UI.
+        # If the fusion tab has not been opened yet, clear its known default
+        # workspace directly so it cannot silently restore later in the session.
+        try:
+            if self.deep_mesh_fusion_tab is not None:
+                self.deep_mesh_fusion_tab.clear_project_state(remove_workspace=True)
+            else:
+                reconstruction_root = Path(get_reconstruction_out_dir()).resolve()
+                fusion_root = reconstruction_root.parent / "deep_mesh_fusion_workspace"
+                if fusion_root.exists():
+                    shutil.rmtree(fusion_root)
+            clear_backup_dir()
+        except Exception as error:
+            QMessageBox.critical(
+                self,
+                "Could Not Create New Project",
+                f"Proximap could not safely clear the recovered project state:\n\n{error}"
+            )
+            return
 
         # 1. Clear standalone point cloud state if active
         if self.standalone_cloud_path:
@@ -6137,7 +6173,7 @@ class MainWindow(QMainWindow):
 
         # 6. Update menu states and log
         self._update_file_menu_states()
-        self.console_text.append("[PROJECT] Created a new project session. Workspace and viewer cleared.")
+        self.console_text.append("[PROJECT] New project created. Fusion workspace and recovery backups cleared.")
 
     def _update_file_menu_states(self):
         # Is reconstruction running?

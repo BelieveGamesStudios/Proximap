@@ -451,6 +451,12 @@ class PyMeshLabWorkerBackend(MeshProcessingBackend):
         except Exception as e:
             _log(f"[WARNING] PyMeshLab worker subprocess launch failed: {e}", log_callback)
             return False
+        finally:
+            if 'proc' in locals():
+                if proc.stdout:
+                    proc.stdout.close()
+                if proc.stderr:
+                    proc.stderr.close()
 
     def cleanup(self, input_ply_path: str, output_ply_path: str,
                 log_callback: Optional[Callable[[str], None]] = None,
@@ -495,6 +501,22 @@ class PyMeshLabWorkerBackend(MeshProcessingBackend):
             "lambda_factor": float(lambda_factor),
             "mu_factor":     float(mu_factor),
             "iterations":    int(iterations),
+        }
+        return self._run_worker(worker_params, log_callback)
+
+    def screened_poisson(self, input_ply_path: str, output_ply_path: str,
+                         depth: int = 8, scale: float = 1.05,
+                         normal_neighbors: int = 30, min_component_faces: int = 25,
+                         log_callback: Optional[Callable[[str], None]] = None) -> bool:
+        """Run Screened Poisson in the ABI-matched PyMeshLab sidecar."""
+        worker_params = {
+            "action": "screened_poisson",
+            "input_ply": input_ply_path,
+            "output_ply": output_ply_path,
+            "poisson_depth": int(depth),
+            "poisson_scale": float(scale),
+            "normal_neighbors": int(normal_neighbors),
+            "min_component_faces": int(min_component_faces),
         }
         return self._run_worker(worker_params, log_callback)
 

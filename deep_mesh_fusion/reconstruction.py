@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from dataclasses import asdict, dataclass
 from itertools import combinations
 from pathlib import Path
@@ -52,9 +53,15 @@ class DeepMeshFusionReconstructionService:
         self.config = config
         self.last_complex_report = {
             "method": self.config.complex_reconstruction_method,
+            "requested_backend": self.config.complex_reconstruction_backend,
+            "backend": None,
+            "fallback_reason": None,
             "input_point_count": 0,
             "cleaned_point_count": 0,
             "rejected_point_count": 0,
+            "point_component_count": 0,
+            "support_trimmed_vertex_count": 0,
+            "removed_mesh_component_count": 0,
             "generated_vertex_count": 0,
             "generated_face_count": 0,
             "watertight": False,
@@ -347,9 +354,15 @@ class DeepMeshFusionReconstructionService:
         input_count = len(points)
         self.last_complex_report = {
             "method": self.config.complex_reconstruction_method,
+            "requested_backend": self.config.complex_reconstruction_backend,
+            "backend": None,
+            "fallback_reason": None,
             "input_point_count": input_count,
             "cleaned_point_count": 0,
             "rejected_point_count": input_count,
+            "point_component_count": 0,
+            "support_trimmed_vertex_count": 0,
+            "removed_mesh_component_count": 0,
             "generated_vertex_count": 0,
             "generated_face_count": 0,
             "watertight": False,
@@ -390,44 +403,97 @@ class DeepMeshFusionReconstructionService:
                 source_indices = source_indices[retained]
                 cloud = cloud.select_by_index(retained.tolist())
 
+        # Treat disconnected residual islands independently. This prevents a
+        # global normal-propagation pass from flipping one object to match an
+        # unrelated surface and drops tiny point islands before Poisson can
+        # inflate them into closed bubbles.
+        component_radius = cell * self.config.complex_component_radius_multiplier
+        labels = np.asarray(cloud.cluster_dbscan(
+            eps=component_radius,
+            min_points=3,
+            print_progress=False,
+        ), dtype=np.int32)
+        component_ids, component_counts = np.unique(labels[labels >= 0], return_counts=True)
+        accepted_components = component_ids[component_counts >= self.config.complex_min_component_points]
+        keep = np.isin(labels, accepted_components)
+        if np.count_nonzero(keep) >= self.config.complex_reconstruction_min_points:
+            retained = np.flatnonzero(keep)
+            source_indices = source_indices[retained]
+            cloud = cloud.select_by_index(retained.tolist())
+            labels = labels[retained]
+        else:
+            labels = np.zeros(len(source_indices), dtype=np.int32)
+        self.last_complex_report["point_component_count"] = int(len(np.unique(labels[labels >= 0])))
+
         cleaned_count = len(source_indices)
         self.last_complex_report["cleaned_point_count"] = cleaned_count
         self.last_complex_report["rejected_point_count"] = input_count - cleaned_count
         if cleaned_count < self.config.complex_reconstruction_min_points:
             return None
 
-        supplied_normals = normals is not None and len(normals) == input_count
-        if supplied_normals:
-            chosen = normals[source_indices]
-            lengths = np.linalg.norm(chosen, axis=1)
-            valid_normals = np.isfinite(chosen).all(axis=1) & (lengths > 1e-8)
-            if np.mean(valid_normals) >= 0.8:
-                chosen = chosen.copy()
-                chosen[valid_normals] /= lengths[valid_normals, None]
-                cloud.normals = o3d.utility.Vector3dVector(chosen)
         radius = cell * self.config.complex_normal_radius_multiplier
-        if not cloud.has_normals() or not np.isfinite(np.asarray(cloud.normals)).all():
-            cloud.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=60))
-        try:
-            cloud.orient_normals_consistent_tangent_plane(min(30, cleaned_count - 1))
-        except RuntimeError:
-            cloud.normalize_normals()
+        supplied = normals[source_indices] if normals is not None and len(normals) == input_count else None
+        self._orient_component_normals(cloud, labels, supplied, radius)
 
-        try:
-            mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-                cloud,
-                depth=self.config.complex_poisson_depth,
-                scale=self.config.complex_poisson_scale,
-                linear_fit=True,
-            )
-        except (RuntimeError, ValueError):
-            return None
+        mesh = None
+        densities = np.empty(0, dtype=float)
+        if self.config.complex_reconstruction_backend == "pymeshlab":
+            mesh = self._pymeshlab_screened_poisson(cloud)
+            if mesh is None:
+                self.last_complex_report["fallback_reason"] = "PyMeshLab worker unavailable or reconstruction failed"
+        if mesh is None:
+            try:
+                mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+                    cloud,
+                    depth=self.config.complex_poisson_depth,
+                    scale=self.config.complex_poisson_scale,
+                    linear_fit=True,
+                )
+                self.last_complex_report["backend"] = "open3d-screened-poisson"
+            except (RuntimeError, ValueError):
+                return None
+        else:
+            self.last_complex_report["backend"] = "pymeshlab-screened-poisson"
         densities = np.asarray(densities, dtype=float)
         quantile = self.config.complex_poisson_density_quantile
         if quantile > 0 and len(densities):
             mesh.remove_vertices_by_mask(densities < np.quantile(densities, quantile))
+
+        # Screened Poisson is implicit and will otherwise close or inflate
+        # unsupported space. Require every generated vertex to remain near a
+        # sufficient number of observed fused points.
+        support_tree = cKDTree(points[source_indices])
+        generated = np.asarray(mesh.vertices)
+        if len(generated):
+            support_radius = cell * self.config.complex_support_distance_multiplier
+            distances, _nearest = support_tree.query(generated, k=1)
+            try:
+                support_counts = support_tree.query_ball_point(generated, support_radius, return_length=True)
+            except TypeError:
+                support_counts = np.asarray([len(item) for item in support_tree.query_ball_point(generated, support_radius)])
+            unsupported = (distances > support_radius) | (np.asarray(support_counts) < self.config.complex_min_support_neighbors)
+            self.last_complex_report["support_trimmed_vertex_count"] = int(np.count_nonzero(unsupported))
+            if np.any(unsupported):
+                mesh.remove_vertices_by_mask(unsupported)
         mesh.remove_degenerate_triangles(); mesh.remove_duplicated_triangles()
         mesh.remove_duplicated_vertices(); mesh.remove_unreferenced_vertices()
+
+        # Keep meaningful objects while discarding small floating shells made
+        # from residual samples. Always preserve the largest component.
+        if len(mesh.triangles):
+            triangle_labels, triangle_counts, _areas = mesh.cluster_connected_triangles()
+            triangle_labels = np.asarray(triangle_labels, dtype=np.int64)
+            triangle_counts = np.asarray(triangle_counts, dtype=np.int64)
+            largest = int(np.argmax(triangle_counts)) if len(triangle_counts) else -1
+            small = np.asarray([
+                label != largest and triangle_counts[label] < self.config.complex_min_component_faces
+                for label in triangle_labels
+            ], dtype=bool)
+            removed_labels = set(triangle_labels[small].tolist())
+            self.last_complex_report["removed_mesh_component_count"] = len(removed_labels)
+            if np.any(small):
+                mesh.remove_triangles_by_mask(small)
+                mesh.remove_unreferenced_vertices()
         vertices = np.asarray(mesh.vertices)
         faces = np.asarray(mesh.triangles)
         if not len(vertices) or not len(faces):
@@ -452,6 +518,78 @@ class DeepMeshFusionReconstructionService:
             "colors": colors[nearest_source],
             "confidence": np.clip(generated_confidence, 0.0, 1.0),
         }
+
+    def _orient_component_normals(self, cloud, labels, supplied_normals, radius):
+        """Estimate and orient normals independently for disconnected surfaces."""
+        import open3d as o3d
+
+        points = np.asarray(cloud.points)
+        oriented = np.zeros_like(points)
+        component_labels = np.unique(labels[labels >= 0]) if len(labels) else np.asarray([0])
+        if not len(component_labels):
+            component_labels = np.asarray([0])
+            labels = np.zeros(len(points), dtype=np.int32)
+        for component in component_labels:
+            indices = np.flatnonzero(labels == component)
+            if len(indices) < 3:
+                continue
+            part = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points[indices]))
+            chosen = supplied_normals[indices] if supplied_normals is not None else None
+            valid = np.zeros(len(indices), dtype=bool)
+            if chosen is not None:
+                chosen = np.asarray(chosen, dtype=float).copy()
+                lengths = np.linalg.norm(chosen, axis=1)
+                valid = np.isfinite(chosen).all(axis=1) & (lengths > 1e-8)
+            if chosen is None or np.mean(valid) < 0.8:
+                part.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(
+                    radius=radius, max_nn=max(10, self.config.complex_normal_neighbors * 2)
+                ))
+            else:
+                chosen[valid] /= lengths[valid, None]
+                part.normals = o3d.utility.Vector3dVector(chosen)
+            try:
+                part.orient_normals_consistent_tangent_plane(
+                    min(self.config.complex_normal_neighbors, len(indices) - 1)
+                )
+            except RuntimeError:
+                part.normalize_normals()
+            oriented[indices] = np.asarray(part.normals)
+        missing = np.linalg.norm(oriented, axis=1) < 1e-8
+        if np.any(missing):
+            fallback = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+            fallback.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=60))
+            oriented[missing] = np.asarray(fallback.normals)[missing]
+        cloud.normals = o3d.utility.Vector3dVector(oriented)
+
+    def _pymeshlab_screened_poisson(self, cloud):
+        """Run the bundled ABI-matched PyMeshLab worker and load its mesh."""
+        import open3d as o3d
+        from mesh_cleanup import PyMeshLabWorkerBackend
+
+        backend = PyMeshLabWorkerBackend()
+        if not backend.is_available():
+            return None
+        try:
+            with tempfile.TemporaryDirectory(prefix="proximap-pymeshlab-") as temporary:
+                input_path = Path(temporary) / "oriented_points.ply"
+                output_path = Path(temporary) / "screened_poisson.ply"
+                if not o3d.io.write_point_cloud(str(input_path), cloud, write_ascii=False):
+                    return None
+                ok = backend.screened_poisson(
+                    str(input_path), str(output_path),
+                    depth=self.config.complex_poisson_depth,
+                    scale=self.config.complex_poisson_scale,
+                    normal_neighbors=self.config.complex_normal_neighbors,
+                    min_component_faces=self.config.complex_min_component_faces,
+                )
+                if not ok or not output_path.is_file():
+                    return None
+                mesh = o3d.io.read_triangle_mesh(str(output_path))
+                if not len(mesh.vertices) or not len(mesh.triangles):
+                    return None
+                return mesh
+        except (OSError, RuntimeError, ValueError):
+            return None
 
     def _architectural_edges(self, planes):
         edges = []

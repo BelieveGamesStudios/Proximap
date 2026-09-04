@@ -104,6 +104,10 @@ class ArchitectureReconstructionTests(unittest.TestCase):
             report = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(report["strategy"], "architecture-aware-planar+screened-poisson")
             self.assertEqual(report["complex_reconstruction"]["method"], "screened-poisson")
+            self.assertEqual(report["complex_reconstruction"]["requested_backend"], "pymeshlab")
+            self.assertIn(report["complex_reconstruction"]["backend"], {
+                "pymeshlab-screened-poisson", "open3d-screened-poisson",
+            })
             self.assertGreater(report["complex_reconstruction"]["cleaned_point_count"], 0)
             self.assertGreater(report["complex_reconstruction"]["generated_face_count"], 0)
             self.assertGreaterEqual(len(report["planes"]), 6)
@@ -133,6 +137,7 @@ class ArchitectureReconstructionTests(unittest.TestCase):
         self.assertIsNotNone(mesh)
         self.assertGreater(len(mesh["faces"]), 100)
         self.assertGreater(service.last_complex_report["rejected_point_count"], 100)
+        self.assertGreaterEqual(service.last_complex_report["point_component_count"], 1)
         self.assertTrue(service.last_complex_report["watertight"])
         self.assertLess(np.max(np.linalg.norm(mesh["vertices"] - [1.0, 1.0, 1.0], axis=1)), 1.5)
         self.assertLessEqual(float(np.max(mesh["confidence"])), .95)

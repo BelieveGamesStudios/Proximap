@@ -9,17 +9,17 @@ from PySide6.QtGui import QPainter, QPen, QColor, QBrush, QPolygonF, QMouseEvent
 class SelectionOverlayWidget(QWidget):
     """
     Transparent overlay widget positioned directly on top of the VisPy OpenGL canvas.
-    Handles mouse drag events for Box and Lasso selection modes when Control (Ctrl) is held,
-    and draws real-time screen-space selection marquee. If Control is not held, mouse events
-    are forwarded directly to the underlying 3D canvas widget for camera orbit, pan, and zoom.
+    Handles mouse drags for Box and Lasso selection and draws a live screen-space marquee.
+    Callers may require Control (Ctrl), or make selection active immediately while the tool is on.
     """
     shape_changed = Signal(object)      # Emits ('box', (x0, y0, x1, y1)) or ('lasso', [[x, y], ...])
     selection_committed = Signal()     # Emits when mouse is released to finalize shape
     selection_cleared = Signal()       # Emits when selection is cleared
 
-    def __init__(self, parent=None, underlying_widget=None):
+    def __init__(self, parent=None, underlying_widget=None, require_ctrl=True):
         super().__init__(parent)
         self._underlying_widget = underlying_widget
+        self._require_ctrl = bool(require_ctrl)
         self.setAttribute(Qt.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
@@ -61,8 +61,9 @@ class SelectionOverlayWidget(QWidget):
             self._forward_event(event)
             return
 
-        # Selection only triggers when Control (Ctrl) is held down
-        if event.button() == Qt.LeftButton and (event.modifiers() & Qt.ControlModifier):
+        # Some callers require Ctrl; dedicated editing stages can activate selection directly.
+        modifier_ok = (event.modifiers() & Qt.ControlModifier) or not self._require_ctrl
+        if event.button() == Qt.LeftButton and modifier_ok:
             self._is_drawing = True
             pos = event.position()
             self._start_pos = pos
@@ -75,7 +76,7 @@ class SelectionOverlayWidget(QWidget):
             self.update()
             event.accept()
         else:
-            # Without Ctrl, forward event to VisPy canvas for camera orbit/pan
+            # When the configured modifier is absent, forward to the 3D viewport.
             self._is_drawing = False
             self._forward_event(event)
 

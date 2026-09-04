@@ -101,17 +101,16 @@ retained when their boundary remains consistent with persistent structure.
 Decisions are written to `analysis/artifact_suppression.json`; rejected points
 are written in red to `analysis/rejected_artifacts.ply` for viewport inspection.
 
-Milestone 5 reconstructs architecture with a hybrid strategy instead of applying
-one global Poisson surface. Iterative robust planes are classified relative to a
-configurable up axis as walls, floors, ceilings, or other large planar surfaces.
-Wall occupancy is meshed in plane coordinates so detected doorways and windows
-remain open; plane intersections produce architectural edges and three-plane
-intersections produce corners. Residual furniture and complex geometry follows
-an alpha-shape reconstruction path. The classified mesh is written to
-`derived/architecture_mesh.ply`, with confidence, architecture class, and source
-surface ID on every vertex. Detection and mesh validation metrics are stored in
-`analysis/architecture_reconstruction.json`. CLI controls include `--up-axis`,
-`--architecture-grid-size`, and `--plane-distance`.
+The application workflow now uses a strict PyMeshLab-only geometry route.
+PyMeshLab performs explicit source-to-reference ICP alignment, merges the
+aligned layers, selects and removes
+point-cloud outliers, merges duplicate/nearby samples, estimates and smooths
+normals, and performs Screened Poisson reconstruction. PyMeshLab then removes
+small components, closes remaining mesh holes, repairs duplicate/null elements,
+reorients faces, and reports topology. A PyMeshLab failure stops the workflow;
+there is no Open3D reconstruction fallback in this UI route. The mesh is written
+to `derived/architecture_mesh.ply`, and PyMeshLab's processing/topology report is
+stored in `analysis/architecture_reconstruction.json`.
 
 Milestone 6 performs evidence-based gap recovery only after consensus fusion and
 architecture reconstruction. Bounded mesh gaps are classified in this order:
@@ -187,10 +186,11 @@ overriding valid fused evidence. The `quality/` folder contains
 the complete finalization and gate with `--tour-readiness`.
 
 The desktop application exposes this pipeline through the viewport-first
-**Deep Mesh Fusion** tab, replacing the former Spatial Texture Engine tab.
-PLY passes load into the resizable viewport immediately; seven dependency-gated
-stages guide preparation, alignment, point fusion, surface validation, cleanup,
-texture, and final quality while detailed metrics remain available in the
+**Deep Mesh Fusion** tab.
+PLY passes load into the resizable viewport immediately; six dependency-gated
+stages guide preparation, alignment, geometry reconstruction, cleanup, texture,
+and final quality. Alignment advances directly to geometry reconstruction while
+the PyMeshLab consolidation required by reconstruction remains internal. Detailed metrics remain available in the
 resizable diagnostics console. Existing photogrammetry
 outputs are detected automatically, and **Run Reconstruction** returns users to
 the normal 3D Reconstruction tab when no model exists. See

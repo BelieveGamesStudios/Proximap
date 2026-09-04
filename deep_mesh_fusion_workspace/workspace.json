@@ -1,8 +1,9 @@
 {
   "schema_version": 11,
-  "updated_at": "2026-09-03T04:28:46.557242+00:00",
+  "updated_at": "2026-09-04T12:37:54.434003+00:00",
   "config": {
-    "voxel_size": 0.03,
+    "voxel_size": 0.5,
+    "pymeshlab_only_pipeline": true,
     "normal_radius_multiplier": 2.5,
     "feature_radius_multiplier": 5.0,
     "coarse_distance_multiplier": 2.5,
@@ -57,13 +58,21 @@
     "doorway_floor_tolerance": 0.2,
     "complex_reconstruction_min_points": 40,
     "complex_reconstruction_method": "screened-poisson",
+    "complex_reconstruction_backend": "pymeshlab",
     "complex_poisson_depth": 8,
     "complex_poisson_scale": 1.05,
+    "complex_poisson_samples_per_node": 3.0,
     "complex_poisson_density_quantile": 0.0,
     "complex_min_confidence": 0.2,
     "complex_outlier_neighbors": 20,
     "complex_outlier_std_ratio": 2.0,
     "complex_normal_radius_multiplier": 3.0,
+    "complex_normal_neighbors": 30,
+    "complex_component_radius_multiplier": 3.0,
+    "complex_min_component_points": 20,
+    "complex_support_distance_multiplier": 2.0,
+    "complex_min_support_neighbors": 2,
+    "complex_min_component_faces": 25,
     "complex_alpha_multiplier": 3.0,
     "mesh_merge_tolerance_multiplier": 0.15,
     "gap_min_boundary_confidence": 0.72,
@@ -124,248 +133,91 @@
     {
       "pass_id": "scan-01",
       "name": "Scan 01",
-      "source_path": "/home/believestudios/Downloads/Pass 3.ply",
-      "source_sha256": "a00989a88cc4d183e43708e055b2d3e4db7e4295413061873e45136f351614a5",
-      "source_size": 4431852,
+      "source_path": "/home/believestudios/Downloads/Scaniverse 2026-09-03 205919.ply",
+      "source_sha256": "00e887e9c6904a94269dedca7a7944b7ff5ec2f5a79742db93e0877552fd77da",
+      "source_size": 9571827,
       "diagnostics": {
-        "point_count": 295441,
+        "point_count": 638106,
         "bounds_min": [
-          -2.2403693199157715,
-          -1.9971349239349365,
-          -0.024522405117750168
+          -3.4601211547851562,
+          -3.022428512573242,
+          -0.03327713534235954
         ],
         "bounds_max": [
-          2.120880603790283,
-          1.973177433013916,
-          3.2201647758483887
+          3.6986289024353027,
+          3.1228837966918945,
+          3.4532852172851562
         ],
         "dimensions": [
-          4.361249923706055,
-          3.9703123569488525,
-          3.244687180966139
+          7.158750057220459,
+          6.145312309265137,
+          3.486562352627516
         ],
         "centroid": [
-          -0.05167734766519232,
-          -0.07527753889909118,
-          1.571657939900767
+          -0.9498927308349646,
+          0.032701072120485064,
+          1.4576704888869
         ],
-        "bbox_diagonal": 6.731409660026109,
-        "density_points_per_volume": 5258.504880892076,
-        "median_neighbor_distance": 0.03313240427392849,
-        "sparse_fraction": 0.0597,
-        "outlier_fraction": 0.01436,
-        "component_count": 2,
-        "largest_component_fraction": 0.9401944704779757,
+        "bbox_diagonal": 10.058264402913608,
+        "density_points_per_volume": 4160.200226348609,
+        "median_neighbor_distance": 0.045360062416593336,
+        "sparse_fraction": 0.04416,
+        "outlier_fraction": 0.02699,
+        "component_count": 1,
+        "largest_component_fraction": 1.0,
         "has_colors": true,
         "has_normals": false,
         "normal_consistency": null,
         "local_surface_variation": null,
         "warnings": []
       },
-      "registration": {
-        "reference_pass_id": "scan-03",
-        "transform": [
-          [
-            -0.46023351117701067,
-            0.8877866420510175,
-            -0.004471396365480127,
-            0.016137069448327747
-          ],
-          [
-            -0.8877935290652693,
-            -0.46024121516164496,
-            -0.0008207413520557173,
-            -0.03817930014810814
-          ],
-          [
-            -0.0027865641056518753,
-            0.0035919440849342572,
-            0.9999896664456972,
-            -0.0026888405465810665
-          ],
-          [
-            0.0,
-            0.0,
-            0.0,
-            1.0
-          ]
-        ],
-        "initial_overlap": 0.9762590277988467,
-        "overlap_ratio": 0.9847866115101894,
-        "fitness": 0.864846622581574,
-        "inlier_rmse": 0.010833178778978414,
-        "correspondence_count": 183229,
-        "method": "fpfh-ransac+point-to-plane-icp",
-        "accepted": true,
-        "requires_manual_alignment": false,
-        "message": "Registration accepted"
-      },
+      "registration": null,
       "enabled": true
     },
     {
       "pass_id": "scan-02",
       "name": "Scan 02",
-      "source_path": "/home/believestudios/Downloads/Pass 2.ply",
-      "source_sha256": "addba32b355d3a7a60cc7c563cb983a06b35a339bc269536a6c1753e21fc4446",
-      "source_size": 5432127,
+      "source_path": "/home/believestudios/Downloads/Scaniverse 2026-09-03 205659.ply",
+      "source_sha256": "727a0701256adf26ea45b11f3d93203414b8e216a8ca4921bae554221eea5403",
+      "source_size": 5981682,
       "diagnostics": {
-        "point_count": 362126,
+        "point_count": 398763,
         "bounds_min": [
-          -2.1918272972106934,
-          -1.992936134338379,
-          -0.03488979861140251
+          -3.5749032497406006,
+          -36.8443489074707,
+          -5.482132911682129
         ],
         "bounds_max": [
-          2.2144222259521484,
-          2.147063732147217,
-          3.1976099014282227
+          26.29722023010254,
+          3.0245256423950195,
+          3.427865982055664
         ],
         "dimensions": [
-          4.406249523162842,
-          4.139999866485596,
-          3.232499700039625
+          29.87212347984314,
+          39.86887454986572,
+          8.909998893737793
         ],
         "centroid": [
-          0.016299639151996396,
-          0.006569893852689447,
-          1.5417169409678084
+          0.06028706462190933,
+          0.09577156807745574,
+          1.5775024305506213
         ],
-        "bbox_diagonal": 6.85592357495544,
-        "density_points_per_volume": 6141.179617049207,
-        "median_neighbor_distance": 0.034432956736699834,
-        "sparse_fraction": 0.1405,
-        "outlier_fraction": 0.02308,
-        "component_count": 1,
-        "largest_component_fraction": 1.0,
+        "bbox_diagonal": 50.60888261317706,
+        "density_points_per_volume": 37.57830028373927,
+        "median_neighbor_distance": 0.050135417662760494,
+        "sparse_fraction": 0.00717,
+        "outlier_fraction": 0.00846,
+        "component_count": 3,
+        "largest_component_fraction": 0.896551724137931,
         "has_colors": true,
         "has_normals": false,
         "normal_consistency": null,
         "local_surface_variation": null,
         "warnings": [
-          "Large sparse-point fraction detected"
+          "Multiple significant disconnected components detected"
         ]
       },
-      "registration": {
-        "reference_pass_id": "scan-03",
-        "transform": [
-          [
-            0.9955494046461117,
-            -0.09416083244640662,
-            -0.003888514082744404,
-            0.047434150968551664
-          ],
-          [
-            0.09415243093226576,
-            0.9955551587878116,
-            -0.002290318868354234,
-            -0.0644114192838592
-          ],
-          [
-            0.0040868885863071976,
-            0.0019140125322350795,
-            0.9999898168970068,
-            -0.0005156323348812479
-          ],
-          [
-            0.0,
-            0.0,
-            0.0,
-            1.0
-          ]
-        ],
-        "initial_overlap": 0.980657839705271,
-        "overlap_ratio": 0.9871951746187974,
-        "fitness": 0.8420064459241692,
-        "inlier_rmse": 0.011700188484458507,
-        "correspondence_count": 221542,
-        "method": "aligned+point-to-plane-icp",
-        "accepted": true,
-        "requires_manual_alignment": false,
-        "message": "Registration accepted"
-      },
-      "enabled": true
-    },
-    {
-      "pass_id": "scan-03",
-      "name": "Scan 03",
-      "source_path": "/home/believestudios/Downloads/Pass 1.ply",
-      "source_sha256": "da8d2a715d1f9771e5ad8599321a28e20b3f33a3e0a79e69886477d803ad5756",
-      "source_size": 5801937,
-      "diagnostics": {
-        "point_count": 386780,
-        "bounds_min": [
-          -2.186528205871582,
-          -2.1083855628967285,
-          -0.09008512645959854
-        ],
-        "bounds_max": [
-          2.2600340843200684,
-          2.090676784515381,
-          3.182727336883545
-        ],
-        "dimensions": [
-          4.44656229019165,
-          4.199062347412109,
-          3.2728124633431435
-        ],
-        "centroid": [
-          0.03771993988018518,
-          0.05993361625770507,
-          1.5254896850664728
-        ],
-        "bbox_diagonal": 6.936522343236755,
-        "density_points_per_volume": 6329.453084223466,
-        "median_neighbor_distance": 0.03509046388560514,
-        "sparse_fraction": 0.10246,
-        "outlier_fraction": 0.02072,
-        "component_count": 1,
-        "largest_component_fraction": 1.0,
-        "has_colors": true,
-        "has_normals": false,
-        "normal_consistency": null,
-        "local_surface_variation": null,
-        "warnings": [
-          "Large sparse-point fraction detected"
-        ]
-      },
-      "registration": {
-        "reference_pass_id": "scan-03",
-        "transform": [
-          [
-            1.0,
-            0.0,
-            0.0,
-            0.0
-          ],
-          [
-            0.0,
-            1.0,
-            0.0,
-            0.0
-          ],
-          [
-            0.0,
-            0.0,
-            1.0,
-            0.0
-          ],
-          [
-            0.0,
-            0.0,
-            0.0,
-            1.0
-          ]
-        ],
-        "initial_overlap": 1.0,
-        "overlap_ratio": 1.0,
-        "fitness": 1.0,
-        "inlier_rmse": 0.0,
-        "correspondence_count": 386780,
-        "method": "reference",
-        "accepted": true,
-        "requires_manual_alignment": false,
-        "message": "Reference pass defines common environment space"
-      },
+      "registration": null,
       "enabled": true
     }
   ],
@@ -380,28 +232,33 @@
   "tour_readiness": null,
   "fused_artifact": null,
   "workflow_state": {
+    "stage_layout_version": 3,
     "current_stage": 1,
-    "unlocked_stage": 2,
+    "unlocked_stage": 1,
     "completed": [
-      "alignment",
       "diagnostics"
     ],
     "cleanup_history": [],
     "parameters": {
-      "voxel_size": 0.03,
+      "voxel_size": 0.5,
       "fusion_preset": "Balanced",
       "fusion_cell": 0.03,
       "min_observations": 2,
       "correspondence_distance": 0.85,
       "artifact_threshold": 0.65,
       "poisson_depth": 8,
+      "normal_neighbors": 10,
+      "poisson_samples": 3.0,
+      "surface_support": 3.0,
+      "reconstruction_backend": "pymeshlab",
       "up_axis": "y",
       "face_reduction": 50,
       "max_hole_size": 30,
       "merge_threshold": 1.0,
       "smooth_factor": 0.5,
       "smooth_iterations": 10,
-      "texture_atlas": 2048
+      "texture_atlas": 2048,
+      "removal_distance": 0.5
     }
   }
 }

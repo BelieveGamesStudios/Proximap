@@ -15,6 +15,7 @@ class DeepMeshFusionConfig:
     """Parameter-driven fusion settings, expressed in scene units."""
 
     voxel_size: float = 0.03
+    pymeshlab_only_pipeline: bool = False
     normal_radius_multiplier: float = 2.5
     feature_radius_multiplier: float = 5.0
     coarse_distance_multiplier: float = 2.5
@@ -69,13 +70,21 @@ class DeepMeshFusionConfig:
     doorway_floor_tolerance: float = 0.20
     complex_reconstruction_min_points: int = 40
     complex_reconstruction_method: str = "screened-poisson"
+    complex_reconstruction_backend: str = "pymeshlab"
     complex_poisson_depth: int = 8
     complex_poisson_scale: float = 1.05
+    complex_poisson_samples_per_node: float = 3.0
     complex_poisson_density_quantile: float = 0.0
     complex_min_confidence: float = 0.20
     complex_outlier_neighbors: int = 20
     complex_outlier_std_ratio: float = 2.0
     complex_normal_radius_multiplier: float = 3.0
+    complex_normal_neighbors: int = 30
+    complex_component_radius_multiplier: float = 3.0
+    complex_min_component_points: int = 20
+    complex_support_distance_multiplier: float = 2.0
+    complex_min_support_neighbors: int = 2
+    complex_min_component_faces: int = 25
     complex_alpha_multiplier: float = 3.0
     mesh_merge_tolerance_multiplier: float = 0.15
     gap_min_boundary_confidence: float = 0.72
@@ -207,7 +216,10 @@ class DeepMeshFusionConfig:
             raise ValueError("complex reconstruction parameters are invalid")
         if self.complex_reconstruction_method not in {"screened-poisson", "none"}:
             raise ValueError("complex_reconstruction_method must be screened-poisson or none")
-        if not 5 <= self.complex_poisson_depth <= 12 or self.complex_poisson_scale <= 1:
+        if self.complex_reconstruction_backend not in {"pymeshlab", "open3d"}:
+            raise ValueError("complex_reconstruction_backend must be pymeshlab or open3d")
+        if (not 5 <= self.complex_poisson_depth <= 12 or self.complex_poisson_scale <= 1
+                or self.complex_poisson_samples_per_node <= 0):
             raise ValueError("complex Poisson depth/scale parameters are invalid")
         if not 0 <= self.complex_poisson_density_quantile < 0.5:
             raise ValueError("complex_poisson_density_quantile must be in [0, 0.5)")
@@ -215,6 +227,12 @@ class DeepMeshFusionConfig:
             raise ValueError("complex_min_confidence must be between 0 and 1")
         if self.complex_outlier_neighbors < 2 or self.complex_outlier_std_ratio <= 0 or self.complex_normal_radius_multiplier <= 0:
             raise ValueError("complex residual cleaning parameters are invalid")
+        if self.complex_normal_neighbors < 3 or self.complex_component_radius_multiplier <= 0:
+            raise ValueError("complex normal/component parameters are invalid")
+        if self.complex_min_component_points < 3 or self.complex_support_distance_multiplier <= 0:
+            raise ValueError("complex component/support parameters are invalid")
+        if self.complex_min_support_neighbors < 1 or self.complex_min_component_faces < 1:
+            raise ValueError("complex support/component limits must be positive")
         if self.mesh_merge_tolerance_multiplier <= 0:
             raise ValueError("mesh_merge_tolerance_multiplier must be greater than zero")
         if not 0 <= self.gap_min_boundary_confidence <= 1 or not 0 <= self.gap_min_plane_confidence <= 1:

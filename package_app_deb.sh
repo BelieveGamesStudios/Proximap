@@ -92,6 +92,14 @@ else
     echo "[2b/7] Standalone Python 3.10 already present at $PY310_BIN — skipping download."
 fi
 
+# PyMeshLab imports NumPy from its ABI-matched sidecar runtime. Installing it
+# here is required even though the main PyInstaller application bundles its own
+# (potentially different-ABI) NumPy build.
+if [ -x "$PY310_BIN" ]; then
+    echo "[2c/7] Installing PyMeshLab sidecar runtime dependencies..."
+    "$PY310_BIN" -m pip install --disable-pip-version-check "numpy==2.2.6"
+fi
+
 # 2. Icon check and setup
 ICON_PATH="public/app_icon.png"
 ICON_FLAG=""

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 from dataclasses import asdict, fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from .fusion import DeepMeshFusionService
 from .gaps import EvidenceBasedGapRepairService, GapRepairOutput
 from .models import ArchitectureReconstructionResult, ArtifactSuppressionResult, CrossPassAnalysisResult, DeepMeshFusionConfig, DeepMeshFusionResult, FinalAssetResult, GapRepairResult, GeometryValidationResult, PassDiagnostics, PhotogrammetryPreparationResult, PointFusionResult, RegistrationMetrics, ScanPass, TextureBakeResult, TourReadinessResult
 from .photogrammetry import PhotogrammetryPreparationService
+from .pymeshlab_pipeline import PyMeshLabPipeline
 from .reconstruction import ArchitectureMeshOutput, DeepMeshFusionReconstructionService
 from .registration import DeepMeshFusionRegistrationService
 from .validation import GeometryValidationService
@@ -44,6 +46,12 @@ class DeepMeshFusionWorkspace:
             if values.get("diagnostics"): values["diagnostics"] = PassDiagnostics(**values["diagnostics"])
             if values.get("registration"): values["registration"] = RegistrationMetrics(**values["registration"])
             workspace.passes.append(ScanPass(**values))
+        if "point_removal" in set((payload.get("workflow_state") or {}).get("completed", [])):
+            removal_dir = root_path / "derived" / "point_removal"
+            workspace._point_removal_paths = {
+                item.pass_id: str((removal_dir / f"{item.pass_id}.ply").resolve())
+                for item in workspace.passes if (removal_dir / f"{item.pass_id}.ply").is_file()
+            }
         return workspace
 
     def save_workflow_state(self, state: dict) -> None:
@@ -68,6 +76,9 @@ class DeepMeshFusionWorkspace:
         self.texture_baking = IntelligentTextureBakingService(self.config)
         self.final_repair = FinalSurfaceTextureRepairService(self.config)
         self.tour_readiness = TourReadinessQualityGate(self.config)
+        self.pymeshlab_pipeline = PyMeshLabPipeline(self.log)
+        self._pymeshlab_aligned_paths: Dict[str, str] = {}
+        self._point_removal_paths: Dict[str, str] = {}
         self._last_texture_output = None
         self._last_geometry_confidence = None
         self._last_fused_output = None
@@ -119,6 +130,8 @@ class DeepMeshFusionWorkspace:
         return self.passes
 
     def register_passes(self, reference_pass_id: Optional[str] = None) -> List[ScanPass]:
+        if self.config.pymeshlab_only_pipeline:
+            return self._register_passes_pymeshlab(reference_pass_id)
         enabled = [item for item in self.passes if item.enabled]
         if not enabled:
             raise ValueError("No enabled scan passes are available")
@@ -175,6 +188,84 @@ class DeepMeshFusionWorkspace:
         self._write_transform(source_pass)
         self._save_manifest(invalidate_derived=True)
         return metrics
+
+    def commit_manual_alignment_batch(
+        self,
+        reference_pass_id: str,
+        registrations: Dict[str, RegistrationMetrics],
+    ) -> List[ScanPass]:
+        """Atomically commit a complete, already quality-gated manual/ICP batch."""
+        enabled = [item for item in self.passes if item.enabled]
+        reference = next((item for item in enabled if item.pass_id == reference_pass_id), None)
+        if reference is None:
+            raise KeyError(f"Unknown or disabled reference scan pass: {reference_pass_id}")
+        required = {item.pass_id for item in enabled if item.pass_id != reference_pass_id}
+        if set(registrations) != required:
+            missing = sorted(required - set(registrations))
+            extra = sorted(set(registrations) - required)
+            raise ValueError(f"Alignment batch must cover every secondary pass (missing={missing}, extra={extra})")
+        for pass_id, metrics in registrations.items():
+            matrix = np.asarray(metrics.transform, dtype=float)
+            if not isinstance(metrics, RegistrationMetrics) or not metrics.accepted:
+                raise ValueError(f"Alignment for {pass_id} has not passed its quality gates")
+            if matrix.shape != (4, 4) or not np.isfinite(matrix).all() or not np.allclose(matrix[3], [0, 0, 0, 1], atol=1e-6):
+                raise ValueError(f"Alignment for {pass_id} does not contain a valid rigid transform")
+        previous = {item.pass_id: item.registration for item in enabled}
+        try:
+            reference.registration = RegistrationMetrics(
+                reference_pass_id=reference.pass_id, initial_overlap=1.0, overlap_ratio=1.0,
+                fitness=1.0, inlier_rmse=0.0,
+                correspondence_count=reference.diagnostics.point_count if reference.diagnostics else 0,
+                method="reference", accepted=True, message="Reference pass defines common environment space",
+            )
+            for scan_pass in enabled:
+                if scan_pass.pass_id != reference_pass_id:
+                    scan_pass.registration = registrations[scan_pass.pass_id]
+            for scan_pass in enabled:
+                self._write_transform(scan_pass)
+            import open3d as o3d
+            aligned_dir = self.root / "registration" / "aligned"; aligned_dir.mkdir(parents=True, exist_ok=True)
+            for index, scan_pass in enumerate([item for item in self.passes if item.enabled]):
+                cloud = o3d.geometry.PointCloud(self._as_open3d(self._cloud(scan_pass)))
+                cloud.transform(np.asarray(scan_pass.registration.transform, dtype=float))
+                path = (aligned_dir / f"aligned_{index + 1:02d}.ply").resolve()
+                if cloud.is_empty() or not o3d.io.write_point_cloud(str(path), cloud, write_ascii=False):
+                    raise ValueError(f"Could not write aligned point cloud for {scan_pass.name}")
+                self._pymeshlab_aligned_paths[scan_pass.pass_id] = str(path)
+            self._point_removal_paths = {}
+            self._save_manifest(invalidate_derived=True)
+        except Exception:
+            for scan_pass in enabled:
+                scan_pass.registration = previous[scan_pass.pass_id]
+            raise
+        return self.passes
+
+    def commit_point_removal(self, clouds: Dict[str, tuple]) -> Dict[str, str]:
+        """Persist edited registered clouds as derived inputs for point fusion."""
+        import open3d as o3d
+
+        enabled_ids = {item.pass_id for item in self.passes if item.enabled and item.registration and item.registration.accepted}
+        if set(clouds) != enabled_ids:
+            raise ValueError("Point-removal output must include every accepted scan pass")
+        output_dir = self.root / "derived" / "point_removal"; output_dir.mkdir(parents=True, exist_ok=True)
+        outputs = {}
+        for pass_id, payload in clouds.items():
+            points, colors = payload
+            points = np.asarray(points, dtype=float)
+            if points.ndim != 2 or points.shape[1] != 3 or not len(points):
+                raise ValueError(f"Point removal produced an empty or invalid cloud for {pass_id}")
+            cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+            if colors is not None and np.asarray(colors).shape == points.shape:
+                normalized = np.asarray(colors, dtype=float)
+                if normalized.size and np.nanmax(normalized) > 1.0: normalized = normalized / 255.0
+                cloud.colors = o3d.utility.Vector3dVector(np.clip(normalized, 0, 1))
+            path = (output_dir / f"{pass_id}.ply").resolve()
+            if not o3d.io.write_point_cloud(str(path), cloud, write_ascii=False):
+                raise ValueError(f"Could not write point-removal output for {pass_id}")
+            outputs[pass_id] = str(path)
+        self._point_removal_paths = outputs
+        self.log(f"[POINT_REMOVAL] Committed {len(outputs)} edited registered point clouds")
+        return dict(outputs)
 
     def analyze_cross_passes(
         self,
@@ -247,6 +338,8 @@ class DeepMeshFusionWorkspace:
         provenance_name: Optional[str] = None,
     ) -> PointFusionResult:
         """Generate the inspectable evidence-supported point cloud without meshing it."""
+        if self.config.pymeshlab_only_pipeline:
+            return self._fuse_points_pymeshlab(output_name, provenance_name)
         accepted = [item for item in self.passes if item.enabled and item.registration and item.registration.accepted]
         if len(accepted) < 2:
             raise ValueError("Consensus fusion requires at least two accepted registered passes")
@@ -306,6 +399,8 @@ class DeepMeshFusionWorkspace:
 
     def reconstruct_fused_surface(self) -> DeepMeshFusionResult:
         """Run hybrid architecture-aware reconstruction, gap recovery, and validation."""
+        if self.config.pymeshlab_only_pipeline:
+            return self._reconstruct_surface_pymeshlab()
         if self._last_fused_output is None or self._last_evidence_map is None or self._last_point_fusion_result is None:
             self.fuse_points_registered()
         fused = self._last_fused_output
@@ -377,6 +472,185 @@ class DeepMeshFusionWorkspace:
             fusion_result=result,
         )
         return result
+
+    def _register_passes_pymeshlab(self, reference_pass_id: Optional[str]) -> List[ScanPass]:
+        enabled = [item for item in self.passes if item.enabled]
+        if len(enabled) < 2:
+            raise ValueError("PyMeshLab alignment requires at least two enabled scan passes")
+        reference = next((item for item in enabled if item.pass_id == reference_pass_id), None)
+        if reference_pass_id is not None and reference is None:
+            raise KeyError(f"Unknown or disabled reference scan pass: {reference_pass_id}")
+        reference = reference or enabled[0]
+        output_dir = self.root / "registration" / "aligned"
+        response = self.pymeshlab_pipeline.align(
+            [item.source_path for item in enabled], output_dir,
+            enabled.index(reference), self.config.voxel_size,
+            self.config.coarse_distance_multiplier,
+        )
+        transforms = response.get("transforms") or []
+        outputs = response.get("outputs") or []
+        quality = response.get("quality") or []
+        if len(transforms) != len(enabled) or len(outputs) != len(enabled):
+            raise RuntimeError("PyMeshLab alignment returned incomplete pass outputs")
+        self._pymeshlab_aligned_paths.clear()
+        for index, scan_pass in enumerate(enabled):
+            transform = np.asarray(transforms[index], dtype=float)
+            if transform.shape != (4, 4) or not np.isfinite(transform).all():
+                raise RuntimeError(f"PyMeshLab returned an invalid transform for {scan_pass.name}")
+            measure = quality[index] if index < len(quality) and isinstance(quality[index], dict) else {}
+            rmse = float(measure.get("RMS", 0.0)) if measure.get("RMS") is not None else None
+            overlap = float(measure.get("overlap_ratio", 1.0 if scan_pass is reference else 0.0) or 0.0)
+            accepted = scan_pass is reference or (
+                rmse is not None and np.isfinite(rmse)
+                and rmse <= self.config.voxel_size * self.config.max_registration_rmse_multiplier
+                and overlap >= self.config.min_overlap_ratio
+            )
+            fitness = 1.0 if scan_pass is reference else (
+                float(overlap * np.exp(-rmse / max(
+                    self.config.voxel_size * self.config.max_registration_rmse_multiplier, 1e-12
+                ))) if accepted else 0.0
+            )
+            self._pymeshlab_aligned_paths[scan_pass.pass_id] = str(Path(outputs[index]).resolve())
+            scan_pass.registration = RegistrationMetrics(
+                reference_pass_id=reference.pass_id,
+                transform=transform.tolist(),
+                initial_overlap=1.0 if scan_pass is reference else overlap,
+                overlap_ratio=1.0 if scan_pass is reference else overlap,
+                fitness=fitness,
+                inlier_rmse=rmse,
+                correspondence_count=int(measure.get("n_samples", scan_pass.diagnostics.point_count if scan_pass.diagnostics else 0)),
+                method="pymeshlab-pairwise-icp",
+                accepted=accepted,
+                requires_manual_alignment=not accepted,
+                message=(
+                    "Aligned exclusively by PyMeshLab"
+                    if accepted else
+                    f"PyMeshLab alignment rejected (RMS={rmse if rmse is not None else float('nan'):.4f}, overlap={overlap:.0%})"
+                ),
+            )
+            self._write_transform(scan_pass)
+        self._write_json(self.root / "analysis" / "pymeshlab_alignment.json", response)
+        self._save_manifest(invalidate_derived=True)
+        return self.passes
+
+    def _aligned_pymeshlab_inputs(self, accepted: List[ScanPass]) -> List[str]:
+        outputs = []
+        for index, scan_pass in enumerate([item for item in self.passes if item.enabled]):
+            path = self._point_removal_paths.get(scan_pass.pass_id) or self._pymeshlab_aligned_paths.get(scan_pass.pass_id)
+            if not path:
+                path = str((self.root / "registration" / "aligned" / f"aligned_{index + 1:02d}.ply").resolve())
+            if scan_pass in accepted and not Path(path).is_file():
+                raise ValueError("PyMeshLab aligned artifacts are missing; rerun scan alignment")
+            if scan_pass in accepted:
+                outputs.append(path)
+        return outputs
+
+    def _fuse_points_pymeshlab(self, output_name: str, provenance_name: Optional[str]) -> PointFusionResult:
+        accepted = [item for item in self.passes if item.enabled and item.registration and item.registration.accepted]
+        if len(accepted) < 2:
+            raise ValueError("PyMeshLab fusion requires at least two aligned scan passes")
+        output_path = (self.root / "derived" / output_name).resolve()
+        rejected_path = (self.root / "analysis" / "rejected_artifacts.ply").resolve()
+        response = self.pymeshlab_pipeline.fuse(
+            self._aligned_pymeshlab_inputs(accepted), output_path,
+            self.config.voxel_size, self.config.complex_normal_neighbors,
+            self.config.complex_outlier_neighbors, rejected_path,
+            [np.asarray(item.registration.transform, dtype=float)[:3, 3].tolist() for item in accepted],
+        )
+        provenance_path = (self.root / "derived" / (provenance_name or f"{Path(output_name).stem}.provenance.json")).resolve()
+        evidence_path = (self.root / "analysis" / "spatial_evidence_map.json").resolve()
+        artifact_path = (self.root / "analysis" / "artifact_suppression.json").resolve()
+        confidence_path = (self.root / "analysis" / "confidence_map.ply").resolve()
+        provenance = {
+            "schema_version": 1,
+            "backend": "pymeshlab-only",
+            "sources": [{"pass_id": item.pass_id, "sha256": item.source_sha256} for item in accepted],
+            "worker": response,
+        }
+        self._write_json(provenance_path, provenance)
+        self._write_json(evidence_path, {"schema_version": 1, "backend": "pymeshlab-only", "worker": response})
+        self._write_json(artifact_path, {"schema_version": 1, "backend": "pymeshlab-only", "worker": response})
+        shutil.copyfile(output_path, confidence_path)
+        fused_count = int(response.get("fused_point_count", 0))
+        result = PointFusionResult(
+            fused_cloud_path=str(output_path), provenance_path=str(provenance_path),
+            evidence_map_path=str(evidence_path), confidence_cloud_path=str(confidence_path),
+            artifact_report_path=str(artifact_path), rejected_geometry_path=str(rejected_path),
+            source_pass_count=len([item for item in self.passes if item.enabled]),
+            registered_pass_count=len(accepted), fused_point_count=fused_count,
+            consensus_point_count=fused_count, mean_confidence=1.0,
+        )
+        analysis_result = CrossPassAnalysisResult(
+            str(evidence_path), str(confidence_path), 0, 0, 0, 1.0
+        )
+        self._last_point_fusion_result = result
+        self._save_manifest(analysis_result=analysis_result, fused_cloud_path=str(output_path), fused_point_count=fused_count)
+        return result
+
+    def _reconstruct_surface_pymeshlab(self) -> DeepMeshFusionResult:
+        fused_path = self.root / "derived" / "fused_point_cloud.ply"
+        # Rebuild fusion for every reconstruction so a rerun cannot reuse a
+        # stale, unoriented cloud from before point removal or normal changes.
+        point_result = self._fuse_points_pymeshlab("fused_point_cloud.ply", None)
+        validated_path = (self.root / "derived" / "validated_lidar_surface.ply").resolve()
+        response = self.pymeshlab_pipeline.reconstruct(
+            fused_path, validated_path, self.config.complex_poisson_depth,
+            self.config.complex_poisson_scale, self.config.complex_normal_neighbors,
+            self.config.complex_min_component_faces,
+            self.config.complex_poisson_samples_per_node,
+            self.config.voxel_size * self.config.complex_support_distance_multiplier,
+        )
+        architecture_path = (self.root / "derived" / "architecture_mesh.ply").resolve()
+        repaired_path = (self.root / "derived" / "architecture_mesh_repaired.ply").resolve()
+        quality_path = (self.root / "analysis" / "geometry_quality.ply").resolve()
+        for destination in (architecture_path, repaired_path, quality_path):
+            shutil.copyfile(validated_path, destination)
+        reconstruction_report = (self.root / "analysis" / "architecture_reconstruction.json").resolve()
+        gap_report = (self.root / "analysis" / "gap_recovery.json").resolve()
+        validation_report = (self.root / "analysis" / "geometry_validation.json").resolve()
+        gap_review = (self.root / "analysis" / "gap_review.ply").resolve()
+        shutil.copyfile(validated_path, gap_review)
+        report = {"schema_version": 1, "strategy": "pymeshlab-only", "worker": response}
+        self._write_json(reconstruction_report, report)
+        self._write_json(gap_report, {"schema_version": 1, "strategy": "pymeshlab-only", "worker": response})
+        self._write_json(validation_report, {"schema_version": 1, "strategy": "pymeshlab-only", "worker": response})
+        vertices = int(response.get("vertex_count", 0)); faces = int(response.get("face_count", 0))
+        topology = response.get("topology") or {}
+        boundary = int(topology.get("boundary_edges", topology.get("boundary_edges_number", 0)) or 0)
+        edges = max(1, int(topology.get("edges_number", 0) or 0))
+        components = max(1, int(topology.get("connected_components_number", 1) or 1))
+        nonmanifold = int(topology.get("non_two_manifold_edges", 0) or 0) + int(topology.get("non_two_manifold_vertices", 0) or 0)
+        quality = float(np.clip(1.0 - 10.0 * boundary / edges - 0.02 * (components - 1) - 0.05 * min(nonmanifold, 4), 0.0, 1.0))
+        review_regions = (1 if boundary else 0) + (1 if nonmanifold else 0) + max(0, components - 1)
+        ready = vertices > 0 and faces > 0 and quality >= 0.70
+        result = DeepMeshFusionResult(
+            fused_cloud_path=point_result.fused_cloud_path, provenance_path=point_result.provenance_path,
+            artifact_report_path=point_result.artifact_report_path, rejected_geometry_path=point_result.rejected_geometry_path,
+            reconstructed_mesh_path=str(architecture_path), reconstruction_report_path=str(reconstruction_report),
+            repaired_mesh_path=str(repaired_path), gap_report_path=str(gap_report), gap_review_path=str(gap_review),
+            validated_mesh_path=str(validated_path), validation_report_path=str(validation_report), quality_map_path=str(quality_path),
+            manifest_path=str(self.root / "workspace.json"), source_pass_count=point_result.source_pass_count,
+            registered_pass_count=point_result.registered_pass_count, fused_point_count=point_result.fused_point_count,
+            consensus_point_count=point_result.fused_point_count, reconstructed_vertex_count=vertices,
+            reconstructed_face_count=faces, unresolved_gap_count=boundary,
+            validation_review_region_count=review_regions, geometry_ready=ready,
+            overall_geometry_quality=quality, mean_confidence=1.0,
+        )
+        self._save_manifest(fusion_result=result)
+        manifest_path = self.root / "workspace.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["architecture_reconstruction"] = {"mesh_path": str(architecture_path), "report_path": str(reconstruction_report), "summary": {"vertex_count": vertices, "face_count": faces}, "derived": True}
+        manifest["gap_recovery"] = {"repaired_mesh_path": str(repaired_path), "report_path": str(gap_report), "review_path": str(gap_review), "summary": {"unresolved_gap_count": boundary}, "derived": True}
+        manifest["geometry_validation"] = {"validated_mesh_path": str(validated_path), "report_path": str(validation_report), "quality_map_path": str(quality_path), "summary": {"vertex_count": vertices, "face_count": faces, "boundary_edge_count": boundary, "review_region_count": boundary, "ready_for_appearance_processing": ready, "scores": {"overall": result.overall_geometry_quality}}, "derived": True}
+        self._write_json(manifest_path, manifest)
+        return result
+
+    @staticmethod
+    def _write_json(path: Path, payload: dict) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")
+        temporary.replace(path)
 
     def validate_cleaned_mesh(self, mesh_path: str) -> GeometryValidationResult:
         """Revalidate a cumulative cleanup result and promote it as canonical geometry."""
