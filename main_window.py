@@ -1372,9 +1372,6 @@ class ViewerWrapperWidget(QFrame):
         self.tools_menu.setStyleSheet(self.file_menu.styleSheet())
         self.tools_menu.aboutToShow.connect(self.update_crop_box_state)
 
-        self.action_tool_transform_cloud = self.tools_menu.addAction("Transform Point Cloud")
-        self.action_tool_transform_cloud.setEnabled(False)
-        self.tools_menu.addSeparator()
         self.action_tool_cleanup = self.tools_menu.addAction("Mesh Cleanup")
         self.action_tool_merge = self.tools_menu.addAction("Merge Vertices")
         self.action_tool_smooth = self.tools_menu.addAction("Smooth Mesh")
@@ -1383,7 +1380,6 @@ class ViewerWrapperWidget(QFrame):
         self.action_tool_smooth.setEnabled(False)
 
         self.tools_menu_btn.setMenu(self.tools_menu)
-        self.action_tool_transform_cloud.triggered.connect(self.transform_cloud_requested.emit)
         self.action_tool_cleanup.triggered.connect(lambda: self.open_tool_requested.emit('cleanup'))
         self.action_tool_merge.triggered.connect(lambda: self.open_tool_requested.emit('merge'))
         self.action_tool_smooth.triggered.connect(lambda: self.open_tool_requested.emit('smooth'))
@@ -2088,8 +2084,6 @@ class ViewerWrapperWidget(QFrame):
         has_points = False
         if main_win:
             has_points = bool(getattr(main_win, '_current_points', None) is not None and len(getattr(main_win, '_current_points', [])) > 0)
-        if hasattr(self, 'action_tool_transform_cloud'):
-            self.action_tool_transform_cloud.setEnabled(has_points or is_point_cloud)
         self.action_select_box.setEnabled(is_textured_mesh)
         self.action_select_lasso.setEnabled(is_textured_mesh)
         self.action_crop_box.setEnabled(is_textured_mesh)
@@ -2943,6 +2937,9 @@ class MainWindow(QMainWindow):
         self.markers_visual = None
         self.mesh_visual = None
         self.cameras_visual = None
+        self.grid_visual = None
+        self.origin_visual = None
+        self.transform_gizmo = None
         self.crop_box = None
         self._last_points = None
         
@@ -2965,6 +2962,10 @@ class MainWindow(QMainWindow):
         self.selection_markers_visual = None
         self.selection_overlay = None
         self.nav_gizmo = None
+        self.floating_toolbox = None
+        self.editor_tool_host = None
+        self.transform_tool_window = None
+        self.mesh_cleanup_tool_window = None
         
         self.last_accessed_dir = os.path.expanduser("~")
         self.viewport_bg_color = '#0C0C0C'
@@ -3724,6 +3725,9 @@ class MainWindow(QMainWindow):
         self.canvas.events.mouse_move.connect(self._on_canvas_mouse_move)
         self.canvas.events.mouse_release.connect(self._on_canvas_mouse_release)
         
+        # Initialize fixed wide ground plane grid at Y=0
+        self._init_fixed_ground_grid()
+        
         # Add native VisPy canvas widget to the layout
         self.viewer_widget.container_area_layout.addWidget(self.canvas.native)
         self.viewer_widget.bg_btn.clicked.connect(self._choose_bg_color)
@@ -3733,18 +3737,6 @@ class MainWindow(QMainWindow):
         self.selection_overlay = SelectionOverlayWidget(self.viewer_widget.container_area, underlying_widget=self.canvas.native)
         self.selection_overlay.shape_changed.connect(self._on_selection_shape_changed)
         self.selection_overlay.setVisible(False)
-
-        # Initialize Point Cloud Transform Floating Card Overlay
-        from point_cloud_transform_card import PointCloudTransformCard
-        self.point_cloud_transform_card = PointCloudTransformCard(
-            self.viewer_widget.container_area,
-            points_provider=lambda: self._current_points
-        )
-        self.point_cloud_transform_card.transform_changed.connect(self._on_cloud_transform_preview)
-        self.point_cloud_transform_card.transform_applied.connect(self._on_cloud_transform_applied)
-        self.point_cloud_transform_card.transform_reset.connect(self._on_cloud_transform_reset)
-        self.point_cloud_transform_card.transform_closed.connect(self._on_cloud_transform_closed)
-        self.point_cloud_transform_card.hide()
 
         # Initialize 3D Navigation Orientation Gizmo for VisPy Viewport (Y-up coordinate system)
         from mesh_editor.nav_gizmo import NavGizmoWidget
@@ -3770,6 +3762,42 @@ class MainWindow(QMainWindow):
         """)
         self.overlay_label.setVisible(False)
         self.viewer_widget.show_controls_cb.stateChanged.connect(self._on_show_controls_changed)
+
+        # Initialize Unity-style EditorWindow host modal and movable floating toolbox
+        from viewport_tool_system import (
+            EditorWindowHostModal, FloatingToolboxWidget,
+            TransformToolWindow, MeshCleanupToolWindow
+        )
+        self.editor_tool_host = EditorWindowHostModal(
+            self.viewer_widget.container_area,
+            default_x=70,
+            default_y=20,
+            data_provider=lambda: bool(self._current_points is not None and len(self._current_points) > 0)
+        )
+        self.floating_toolbox = FloatingToolboxWidget(
+            self.viewer_widget.container_area,
+            host_modal=self.editor_tool_host,
+            initial_x=16,
+            initial_y=20
+        )
+
+        # Initialize interactive 3D Combined Transform Gizmo (Translation & Rotation)
+        from viewport_gizmo import CombinedTransformGizmo
+        self.transform_gizmo = CombinedTransformGizmo(parent_scene=self.view.scene)
+        self.editor_tool_host.gizmo_toggled.connect(self._on_gizmo_toggled)
+
+        self.transform_tool_window = TransformToolWindow()
+        self.transform_tool_window.transform_changed.connect(self._on_cloud_transform_preview)
+        self.transform_tool_window.transform_applied.connect(self._on_cloud_transform_applied)
+        self.transform_tool_window.transform_reset.connect(self._on_cloud_transform_reset)
+
+        self.mesh_cleanup_tool_window = MeshCleanupToolWindow()
+
+        self.floating_toolbox.register_tool(self.transform_tool_window)
+        self.floating_toolbox.register_tool(self.mesh_cleanup_tool_window)
+
+        self.floating_toolbox.show()
+        self.floating_toolbox.raise_()
         
         right_layout.addWidget(self.viewer_widget, stretch=4)
         
@@ -4087,6 +4115,8 @@ class MainWindow(QMainWindow):
                 self._set_cleanup_btn_state("ready")
             else:
                 self._set_cleanup_btn_state("idle")
+        if hasattr(self, 'editor_tool_host') and self.editor_tool_host is not None:
+            self.editor_tool_host.refresh_data_state()
 
     def _set_cleanup_btn_state(self, state: str):
         """
@@ -5430,6 +5460,33 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Images Found", "No images or video frames were found for this reconstruction session. Please import images or videos to proceed.")
             return
 
+        # Check for unapplied point cloud / mesh transform changes
+        if hasattr(self, 'transform_tool_window') and self.transform_tool_window is not None:
+            if self._current_points is not None and len(self._current_points) > 0 and self.transform_tool_window.has_unapplied_changes():
+                msg_box = QMessageBox(self)
+                msg_box.setWindowTitle("Unapplied Transform Detected")
+                msg_box.setIcon(QMessageBox.Question)
+                msg_box.setText("You have modified the point cloud transform (Position / Orientation) without applying it.")
+                msg_box.setInformativeText("Would you like to apply the transformation before starting reconstruction?")
+                
+                apply_btn = msg_box.addButton("Apply Transform", QMessageBox.AcceptRole)
+                discard_btn = msg_box.addButton("Discard Changes", QMessageBox.RejectRole)
+                cancel_btn = msg_box.addButton("Cancel", QMessageBox.ActionRole)
+                
+                msg_box.setDefaultButton(apply_btn)
+                msg_box.exec()
+                
+                clicked = msg_box.clickedButton()
+                if clicked == apply_btn:
+                    self.transform_tool_window.apply_transform()
+                    self.console_text.append("[TOOLS] Applied unapplied transform before starting reconstruction.")
+                elif clicked == cancel_btn:
+                    self.console_text.append("[TOOLS] Reconstruction canceled by user.")
+                    return
+                else:
+                    self.transform_tool_window.reset_all()
+                    self.console_text.append("[TOOLS] Discarded unapplied transform.")
+
         # Pre-flight dynamic memory guard & advisory
         try:
             budget = hardware_profiler.get_memory_budget()
@@ -6534,9 +6591,6 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'cameras_visual') and self.cameras_visual is not None:
             self.cameras_visual.parent = None
             self.cameras_visual = None
-        if hasattr(self, 'grid_visual') and self.grid_visual is not None:
-            self.grid_visual.parent = None
-            self.grid_visual = None
         if hasattr(self, 'selection_markers_visual') and self.selection_markers_visual is not None:
             self.selection_markers_visual.parent = None
             self.selection_markers_visual = None
@@ -6548,60 +6602,79 @@ class MainWindow(QMainWindow):
         self._wireframe_filter = None  # kept for compat
         self._selected_vertex_indices = None
         self._last_points = None
+        if hasattr(self, 'editor_tool_host') and self.editor_tool_host is not None:
+            self.editor_tool_host.refresh_data_state()
+        self._init_fixed_ground_grid()
 
-    def _update_ground_grid(self, points):
+    def _init_fixed_ground_grid(self):
+        """Creates or ensures a wide fixed ground plane grid with origin indicator at (0,0,0) in the 3D viewport."""
         import numpy as np
         from vispy import scene
-        if hasattr(self, 'grid_visual') and self.grid_visual is not None:
-            self.grid_visual.parent = None
-            self.grid_visual = None
-
-        if points is None or len(points) == 0:
+        if not hasattr(self, 'view') or self.view is None or not hasattr(self.view, 'scene'):
             return
 
-        bbox_min = np.min(points, axis=0)
-        bbox_max = np.max(points, axis=0)
-        
-        y_floor = bbox_min[1]
-        
-        x_min, x_max = bbox_min[0], bbox_max[0]
-        z_min, z_max = bbox_min[2], bbox_max[2]
-        
-        x_span = x_max - x_min
-        z_span = z_max - z_min
-        x_center = (x_min + x_max) / 2.0
-        z_center = (z_min + z_max) / 2.0
-        max_span = max(x_span, z_span, 1.0)
-        
-        # 1:1 square grid centered on bounding box center with 25% margin
-        half_side = max_span * 0.625
-        
-        grid_x_min, grid_x_max = x_center - half_side, x_center + half_side
-        grid_z_min, grid_z_max = z_center - half_side, z_center + half_side
-        
-        num_divs = 20
-        x_ticks = np.linspace(grid_x_min, grid_x_max, num_divs + 1)
-        z_ticks = np.linspace(grid_z_min, grid_z_max, num_divs + 1)
-        
-        line_vertices = []
-        for x in x_ticks:
-            line_vertices.append([x, y_floor, grid_z_min])
-            line_vertices.append([x, y_floor, grid_z_max])
+        # 1. Base Ground Grid (Excluding center axes)
+        if not hasattr(self, 'grid_visual') or self.grid_visual is None or self.grid_visual.parent is None:
+            half_side = 25.0
+            num_divs = 50
+            x_ticks = np.linspace(-half_side, half_side, num_divs + 1)
+            z_ticks = np.linspace(-half_side, half_side, num_divs + 1)
             
-        for z in z_ticks:
-            line_vertices.append([grid_x_min, y_floor, z])
-            line_vertices.append([grid_x_max, y_floor, z])
+            line_vertices = []
+            for x in x_ticks:
+                if abs(x) > 1e-4:  # Skip x=0 (highlighted by origin indicator)
+                    line_vertices.append([x, 0.0, -half_side])
+                    line_vertices.append([x, 0.0, half_side])
+                
+            for z in z_ticks:
+                if abs(z) > 1e-4:  # Skip z=0 (highlighted by origin indicator)
+                    line_vertices.append([-half_side, 0.0, z])
+                    line_vertices.append([half_side, 0.0, z])
+                
+            pos = np.array(line_vertices, dtype=np.float32)
+            color = (0.0, 0.45, 0.25, 0.35)
             
-        pos = np.array(line_vertices, dtype=np.float32)
-        color = (0.0, 0.45, 0.25, 0.35)
-        
-        self.grid_visual = scene.visuals.Line(
-            pos=pos,
-            color=color,
-            connect='segments',
-            method='gl',
-            parent=self.view.scene
-        )
+            self.grid_visual = scene.visuals.Line(
+                pos=pos,
+                color=color,
+                connect='segments',
+                method='gl',
+                parent=self.view.scene
+            )
+
+        # 2. Origin Indicator (X: Red, Z: Blue, Y: Green)
+        if not hasattr(self, 'origin_visual') or self.origin_visual is None or self.origin_visual.parent is None:
+            half_side = 25.0
+            axis_vertices = []
+            axis_colors = []
+
+            # Ground X-Axis (Red: #FF5252)
+            axis_vertices.append([-half_side, 0.0, 0.0])
+            axis_vertices.append([half_side, 0.0, 0.0])
+            axis_colors.extend([[1.0, 0.32, 0.32, 0.85], [1.0, 0.32, 0.32, 0.85]])
+
+            # Ground Z-Axis (Blue: #448AFF)
+            axis_vertices.append([0.0, 0.0, -half_side])
+            axis_vertices.append([0.0, 0.0, half_side])
+            axis_colors.extend([[0.27, 0.55, 1.0, 0.85], [0.27, 0.55, 1.0, 0.85]])
+
+            # Vertical Y-Axis Stem at Origin (Green: #00E676)
+            axis_vertices.append([0.0, 0.0, 0.0])
+            axis_vertices.append([0.0, 2.0, 0.0])
+            axis_colors.extend([[0.0, 0.9, 0.46, 0.95], [0.0, 0.9, 0.46, 0.95]])
+
+            self.origin_visual = scene.visuals.Line(
+                pos=np.array(axis_vertices, dtype=np.float32),
+                color=np.array(axis_colors, dtype=np.float32),
+                connect='segments',
+                width=2.0,
+                method='gl',
+                parent=self.view.scene
+            )
+
+    def _update_ground_grid(self, points=None):
+        """Ensures the fixed ground plane is active. Does not resize or move with loaded geometry."""
+        self._init_fixed_ground_grid()
 
     def _read_points3d_binary(self, path_to_model_file):
         import struct
@@ -7116,6 +7189,8 @@ class MainWindow(QMainWindow):
         self._update_ground_grid(points)
 
         self.canvas.update()
+        if hasattr(self, 'editor_tool_host') and self.editor_tool_host is not None:
+            self.editor_tool_host.refresh_data_state()
 
     def _on_selection_mode_changed(self, mode_name: str):
         """Triggered when user selects a mode from the Select dropdown in the 3D Reconstruction window."""
@@ -7428,8 +7503,43 @@ class MainWindow(QMainWindow):
         except Exception as err:
             self.console_text.append(f"[ERROR] Failed to save geometry to disk: {err}")
 
+    def _on_gizmo_toggled(self, checked: bool):
+        """Enables/disables the 3D combined transform gizmo in the viewport."""
+        if not hasattr(self, 'transform_gizmo') or self.transform_gizmo is None:
+            return
+        if checked:
+            import numpy as np
+            if self._current_points is not None and len(self._current_points) > 0:
+                pivot = np.mean(self._current_points, axis=0)
+            else:
+                pivot = np.zeros(3, dtype=np.float32)
+            self.transform_gizmo.set_pivot(pivot)
+            if hasattr(self, 'transform_tool_window') and self.transform_tool_window is not None:
+                if self.transform_tool_window.position_row and self.transform_tool_window.rotation_row:
+                    tx, ty, tz = self.transform_tool_window.position_row.get_values()
+                    rx, ry, rz = self.transform_tool_window.rotation_row.get_values()
+                    self.transform_gizmo.set_transform(position=(tx, ty, tz), rotation=(rx, ry, rz))
+            self.transform_gizmo.set_visible(True)
+        else:
+            self.transform_gizmo.set_visible(False)
+        self.canvas.update()
+
     def _on_canvas_mouse_press(self, event):
-        """Detect handle clicks on the 3D Crop Box and lock camera rotation during drag."""
+        """Detect handle clicks on the Combined Transform Gizmo or 3D Crop Box."""
+        # 1. Test 3D Combined Transform Gizmo handles (Translation & Rotation)
+        if event.button == 1 and hasattr(self, 'transform_gizmo') and self.transform_gizmo is not None and self.transform_gizmo.visible:
+            try:
+                if self.transform_gizmo.trans_lines is not None:
+                    tr = self.transform_gizmo.trans_lines.transforms.get_transform('visual', 'canvas')
+                    hit = self.transform_gizmo.hit_test(event.pos, tr)
+                    if hit:
+                        self.transform_gizmo.start_drag(hit, event.pos)
+                        self.view.camera.interactive = False
+                        return
+            except Exception:
+                pass
+
+        # 2. Test 3D Crop Box handles
         if event.button != 1 or self.crop_box is None or not self.crop_box.visible:
             return
         if self.crop_box.handle_markers is None:
@@ -7456,7 +7566,21 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_canvas_mouse_move(self, event):
-        """Update 3D crop box bounds as user drags handle along screen projection."""
+        """Update 3D transform gizmo or crop box bounds during mouse drag."""
+        # 1. Combined Transform Gizmo drag
+        if hasattr(self, 'transform_gizmo') and self.transform_gizmo is not None and self.transform_gizmo.is_dragging:
+            try:
+                if self.transform_gizmo.trans_lines is not None:
+                    tr = self.transform_gizmo.trans_lines.transforms.get_transform('visual', 'canvas')
+                    new_pos, new_rot = self.transform_gizmo.update_drag(event.pos, tr, camera=self.view.camera)
+                    if new_pos is not None and hasattr(self, 'transform_tool_window') and self.transform_tool_window is not None:
+                        self.transform_tool_window.set_transform_values(pos=new_pos, rot=new_rot)
+                    self.canvas.update()
+                    return
+            except Exception:
+                pass
+
+        # 2. Crop Box drag
         if self.crop_box is None or not self.crop_box.is_dragging or self.crop_box.active_handle_idx is None:
             return
 
@@ -7519,6 +7643,10 @@ class MainWindow(QMainWindow):
 
     def _on_canvas_mouse_release(self, event):
         """Release handle drag and unlock camera rotation."""
+        if hasattr(self, 'transform_gizmo') and self.transform_gizmo is not None and self.transform_gizmo.is_dragging:
+            self.transform_gizmo.end_drag()
+            self.view.camera.interactive = True
+
         if self.crop_box is not None and self.crop_box.is_dragging:
             self.crop_box.is_dragging = False
             self.crop_box.active_handle_idx = None
@@ -7655,18 +7783,10 @@ class MainWindow(QMainWindow):
                 f.write(f"3 {face[0]} {face[1]} {face[2]}\n")
 
     def _open_point_cloud_transform_tool(self):
-        """Opens the floating Point Cloud Transform Card in the 3D Viewport."""
-        if self._current_points is None or len(self._current_points) == 0:
-            QMessageBox.warning(self, "No Point Cloud", "Please load a point cloud before transforming.")
-            return
-        
-        self.point_cloud_transform_card.adjustSize()
-        hint = self.point_cloud_transform_card.sizeHint()
-        self.point_cloud_transform_card.resize(290, hint.height())
-        self.point_cloud_transform_card.move(15, 15)
-        self.point_cloud_transform_card.show()
-        self.point_cloud_transform_card.raise_()
-        self.console_text.append("[TOOLS] Opened Point Cloud Transform toolbox.")
+        """Opens the Unity-style Transform tool in the attached floating toolbox."""
+        if hasattr(self, 'editor_tool_host') and hasattr(self, 'transform_tool_window'):
+            self.editor_tool_host.open_tool(self.transform_tool_window)
+            self.console_text.append("[TOOLS] Opened Transform tool window.")
 
     def _get_point_cloud_marker_colors(self):
         """Returns RGBA float32 array normalized to [0, 1] for VisPy marker coloring."""
@@ -7680,7 +7800,7 @@ class MainWindow(QMainWindow):
         return 'white'
 
     def _on_cloud_transform_preview(self, T_mat: np.ndarray):
-        """Live updates VisPy point cloud visualization based on transform matrix."""
+        """Live updates VisPy point cloud or mesh visualization based on transform matrix."""
         if self._current_points is None or len(self._current_points) == 0:
             return
         
@@ -7695,12 +7815,34 @@ class MainWindow(QMainWindow):
                 size=2,
                 edge_width=0
             )
+
+        if hasattr(self, 'mesh_visual') and self.mesh_visual is not None and self._current_faces is not None:
+            mesh_colors = None
+            if self._current_colors is not None and len(self._current_colors) > 0:
+                mc = self._current_colors.astype(np.float32)
+                if mc.max() > 1.0:
+                    mc = mc / 255.0
+                mesh_colors = mc
+            self.mesh_visual.set_data(
+                vertices=transformed_pts.astype(np.float32),
+                faces=self._current_faces.astype(np.uint32),
+                vertex_colors=mesh_colors,
+                color='white'
+            )
             
+        # Keep gizmo visual transform in sync if visible and not dragging
+        if hasattr(self, 'transform_gizmo') and self.transform_gizmo is not None and self.transform_gizmo.visible:
+            if not self.transform_gizmo.is_dragging and hasattr(self, 'transform_tool_window') and self.transform_tool_window is not None:
+                if self.transform_tool_window.position_row and self.transform_tool_window.rotation_row:
+                    pos = self.transform_tool_window.position_row.get_values()
+                    rot = self.transform_tool_window.rotation_row.get_values()
+                    self.transform_gizmo.set_transform(position=pos, rotation=rot)
+
         self._update_ground_grid(transformed_pts)
         self.canvas.update()
 
     def _on_cloud_transform_reset(self):
-        """Reverts point cloud viewport display back to original untransformed coordinates."""
+        """Reverts point cloud or mesh viewport display back to original untransformed coordinates."""
         if self._current_points is None or len(self._current_points) == 0:
             return
             
@@ -7711,7 +7853,24 @@ class MainWindow(QMainWindow):
                 size=2,
                 edge_width=0
             )
+
+        if hasattr(self, 'mesh_visual') and self.mesh_visual is not None and self._current_faces is not None:
+            mesh_colors = None
+            if self._current_colors is not None and len(self._current_colors) > 0:
+                mc = self._current_colors.astype(np.float32)
+                if mc.max() > 1.0:
+                    mc = mc / 255.0
+                mesh_colors = mc
+            self.mesh_visual.set_data(
+                vertices=self._current_points.astype(np.float32),
+                faces=self._current_faces.astype(np.uint32),
+                vertex_colors=mesh_colors,
+                color='white'
+            )
             
+        if hasattr(self, 'transform_gizmo') and self.transform_gizmo is not None:
+            self.transform_gizmo.set_transform(position=(0.0, 0.0, 0.0), rotation=(0.0, 0.0, 0.0))
+
         self._update_ground_grid(self._current_points)
         self.canvas.update()
 
@@ -7719,7 +7878,7 @@ class MainWindow(QMainWindow):
         self._on_cloud_transform_reset()
 
     def _on_cloud_transform_applied(self, T_mat: np.ndarray):
-        """Bakes the transformation into active point cloud data in memory and writes to PLY file."""
+        """Bakes the transformation into active scene data (points/mesh) in memory and writes to PLY files."""
         if self._current_points is None or len(self._current_points) == 0:
             return
             
@@ -7739,6 +7898,26 @@ class MainWindow(QMainWindow):
                 size=2,
                 edge_width=0
             )
+
+        if hasattr(self, 'mesh_visual') and self.mesh_visual is not None and self._current_faces is not None:
+            mesh_colors = None
+            if self._current_colors is not None and len(self._current_colors) > 0:
+                mc = self._current_colors.astype(np.float32)
+                if mc.max() > 1.0:
+                    mc = mc / 255.0
+                mesh_colors = mc
+            self.mesh_visual.set_data(
+                vertices=self._current_points.astype(np.float32),
+                faces=self._current_faces.astype(np.uint32),
+                vertex_colors=mesh_colors,
+                color='white'
+            )
+            
+        if hasattr(self, 'transform_gizmo') and self.transform_gizmo is not None:
+            import numpy as np
+            pivot = np.mean(self._current_points, axis=0) if self._current_points is not None and len(self._current_points) > 0 else np.zeros(3)
+            self.transform_gizmo.set_pivot(pivot)
+            self.transform_gizmo.set_transform(position=(0.0, 0.0, 0.0), rotation=(0.0, 0.0, 0.0))
             
         self._update_ground_grid(self._current_points)
         self.canvas.update()
@@ -7756,10 +7935,10 @@ class MainWindow(QMainWindow):
                 saved_target = "scene_dense.ply"
                 
         if saved_target:
-            self.console_text.append(f"[SUCCESS] Point cloud transformed and saved to '{saved_target}'.")
+            self.console_text.append(f"[SUCCESS] Model transformed and saved to '{saved_target}'.")
             self.status_label.setText(f"Transformed & saved to {saved_target}")
         else:
-            self.console_text.append("[SUCCESS] Point cloud transformation applied in viewport.")
+            self.console_text.append("[SUCCESS] Model transformation applied in viewport.")
 
     def _open_mesh_tool(self, tool_id: str):
         """Opens the floating tool modal for Mesh Cleanup, Merge Vertices, or Taubin Smooth Mesh."""
@@ -8318,6 +8497,18 @@ class MainWindow(QMainWindow):
             gy = margin
             self.nav_gizmo.move(max(margin, gx), gy)
             self.nav_gizmo.raise_()
+        if hasattr(self, 'floating_toolbox') and self.floating_toolbox is not None:
+            if self.floating_toolbox.isVisible():
+                max_x = max(0, container_w - self.floating_toolbox.width())
+                max_y = max(0, container_h - self.floating_toolbox.height())
+                cur_x = min(self.floating_toolbox.x(), max_x)
+                cur_y = min(self.floating_toolbox.y(), max_y)
+                self.floating_toolbox.move(cur_x, cur_y)
+                self.floating_toolbox.raise_()
+        if hasattr(self, 'editor_tool_host') and self.editor_tool_host is not None:
+            if self.editor_tool_host.isVisible():
+                self.editor_tool_host.reposition()
+                self.editor_tool_host.raise_()
         if hasattr(self, 'overlay_label') and self.overlay_label.isVisible():
             label_w = self.overlay_label.width()
             label_h = self.overlay_label.height()
