@@ -4,7 +4,7 @@ import time
 import numpy as np
 import pyrr
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtCore import Qt, Signal, QPoint, QRectF
+from PySide6.QtCore import Qt, Signal, QPoint, QRectF, QTimer
 from PySide6.QtGui import QMouseEvent, QKeyEvent, QWheelEvent, QAction, QDragEnterEvent, QDragLeaveEvent, QDragMoveEvent, QDropEvent
 
 import OpenGL.GL as gl
@@ -74,6 +74,16 @@ class MeshEditorViewport(QOpenGLWidget):
         self.is_panning = False
         self.is_zooming = False
         
+        # Unity-style Flythrough & Arrow Navigation states
+        self.is_fly_navigating = False
+        self._active_nav_keys = set()
+        self.fly_base_speed = 8.0   # units / sec
+        self.fly_sprint_mult = 3.0  # Shift sprint speed multiplier
+        self._last_nav_time = time.time()
+        self._nav_timer = QTimer(self)
+        self._nav_timer.setInterval(16)  # ~60 FPS
+        self._nav_timer.timeout.connect(self._on_nav_timer_tick)
+        
         # GPU buffers & shader programs
         self.object_program = None
         self.grid_program = None
@@ -131,6 +141,63 @@ class MeshEditorViewport(QOpenGLWidget):
         if hasattr(self, 'nav_gizmo') and self.nav_gizmo:
             self.nav_gizmo.update_orientation(self.camera.yaw, self.camera.pitch)
         self.camera_changed.emit(self.camera)
+
+    def _on_nav_timer_tick(self):
+        now = time.time()
+        dt = min(now - self._last_nav_time, 0.1)
+        self._last_nav_time = now
+        
+        # If no keys are held and not currently holding RMB, stop timer
+        if not self._active_nav_keys:
+            if not self.is_fly_navigating:
+                self._nav_timer.stop()
+            return
+            
+        speed_mult = self.fly_sprint_mult if (Qt.Key.Key_Shift in self._active_nav_keys) else 1.0
+        
+        move_vec = np.zeros(3, dtype=np.float32)
+        fwd = self.camera.get_forward_vector()
+        right = self.camera.get_right_vector()
+        up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        
+        # Arrow keys navigation (Always active)
+        if Qt.Key.Key_Up in self._active_nav_keys:
+            move_vec += fwd
+        if Qt.Key.Key_Down in self._active_nav_keys:
+            move_vec -= fwd
+        if Qt.Key.Key_Right in self._active_nav_keys:
+            move_vec += right
+        if Qt.Key.Key_Left in self._active_nav_keys:
+            move_vec -= right
+            
+        # WASD / QE navigation (Active during RMB Fly Navigation)
+        if self.is_fly_navigating:
+            if Qt.Key.Key_W in self._active_nav_keys:
+                move_vec += fwd
+            if Qt.Key.Key_S in self._active_nav_keys:
+                move_vec -= fwd
+            if Qt.Key.Key_D in self._active_nav_keys:
+                move_vec += right
+            if Qt.Key.Key_A in self._active_nav_keys:
+                move_vec -= right
+            if Qt.Key.Key_E in self._active_nav_keys or Qt.Key.Key_PageUp in self._active_nav_keys:
+                move_vec += up
+            if Qt.Key.Key_Q in self._active_nav_keys or Qt.Key.Key_PageDown in self._active_nav_keys:
+                move_vec -= up
+                
+        if np.linalg.norm(move_vec) > 1e-5:
+            move_dir = move_vec / np.linalg.norm(move_vec)
+            displacement = move_dir * (self.fly_base_speed * speed_mult * dt)
+            self.camera.move(displacement)
+            self.notify_camera_changed()
+            self.update()
+
+    def focusOutEvent(self, event):
+        self._active_nav_keys.clear()
+        self.is_fly_navigating = False
+        if hasattr(self, '_nav_timer') and self._nav_timer.isActive():
+            self._nav_timer.stop()
+        super().focusOutEvent(event)
 
     def initializeGL(self):
         # Initialize OpenGL context
@@ -654,7 +721,18 @@ void main() { fragColor = pickColor; }
                     if self.gizmo.hovered_handle != old_hover:
                         self.update()
                     
-            if self.is_orbiting:
+            if self.is_fly_navigating:
+                # Unity-style Flythrough mouse look (FPS Look)
+                try:
+                    from preferences_dialog import load_preferences
+                    invert = load_preferences().get("invert_mouse_rotation", True)
+                except Exception:
+                    invert = True
+                pitch_mult = 0.003 if invert else -0.003
+                self.camera.fps_look(-dx * 0.003, dy * pitch_mult)
+                self.notify_camera_changed()
+                self.update()
+            elif self.is_orbiting:
                 # Orbiting navigation (Middle click drag or Alt + LMB drag)
                 try:
                     from preferences_dialog import load_preferences
@@ -716,7 +794,16 @@ void main() { fragColor = pickColor; }
                     super().mousePressEvent(event)
                     return
         
-        # 2. Handle viewport cameras or selection if not captured
+        # 2. Handle Right-Click Flythrough Navigation
+        if event.button() == Qt.MouseButton.RightButton:
+            self.is_fly_navigating = True
+            self._last_nav_time = time.time()
+            if not self._nav_timer.isActive():
+                self._nav_timer.start()
+            super().mousePressEvent(event)
+            return
+
+        # 3. Handle viewport cameras or selection if not captured
         # Check for Alt modifier for trackpad navigation fallbacks
         if event.modifiers() & Qt.KeyboardModifier.AltModifier and event.button() == Qt.MouseButton.LeftButton:
             if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -750,6 +837,13 @@ void main() { fragColor = pickColor; }
         super().mousePressEvent(event)
  
     def mouseReleaseEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.RightButton:
+            self.is_fly_navigating = False
+            _FLY_KEYS = {Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D, Qt.Key.Key_Q, Qt.Key.Key_E}
+            self._active_nav_keys.difference_update(_FLY_KEYS)
+            if not self._active_nav_keys:
+                self._nav_timer.stop()
+
         if self._gizmo_dragging:
             self.gizmo.end_drag()
             self._gizmo_dragging = False
@@ -801,6 +895,13 @@ void main() { fragColor = pickColor; }
 
     def wheelEvent(self, event: QWheelEvent):
         delta_y = event.angleDelta().y() / 120.0
+        if self.is_fly_navigating:
+            # Adjust fly speed when holding RMB
+            self.fly_base_speed = float(np.clip(self.fly_base_speed * (1.2 ** delta_y), 0.5, 100.0))
+            self.update()
+            event.accept()
+            return
+            
         # Scale zoom speed based on distance
         zoom_speed = self.camera.distance * 0.1 if self.camera.is_perspective else self.camera.ortho_scale * 0.1
         self.camera.zoom(delta_y * zoom_speed)
@@ -812,6 +913,24 @@ void main() { fragColor = pickColor; }
         key = event.key()
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         
+        # Track continuous navigation keys
+        _NAV_KEYS = {
+            Qt.Key.Key_Up, Qt.Key.Key_Down, Qt.Key.Key_Left, Qt.Key.Key_Right,
+            Qt.Key.Key_Shift, Qt.Key.Key_PageUp, Qt.Key.Key_PageDown
+        }
+        _FLY_KEYS = {
+            Qt.Key.Key_W, Qt.Key.Key_A, Qt.Key.Key_S, Qt.Key.Key_D,
+            Qt.Key.Key_Q, Qt.Key.Key_E
+        }
+        
+        if key in _NAV_KEYS or (self.is_fly_navigating and key in _FLY_KEYS):
+            self._active_nav_keys.add(key)
+            if not self._nav_timer.isActive():
+                self._last_nav_time = time.time()
+                self._nav_timer.start()
+            event.accept()
+            return
+
         if ctrl and key == Qt.Key.Key_Z:
             if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
                 self.redo_requested.emit()
@@ -897,6 +1016,13 @@ void main() { fragColor = pickColor; }
         super().keyPressEvent(event)
 
     def keyReleaseEvent(self, event: QKeyEvent):
+        key = event.key()
+        if key in self._active_nav_keys:
+            self._active_nav_keys.discard(key)
+            if not self._active_nav_keys and not self.is_fly_navigating:
+                self._nav_timer.stop()
+            event.accept()
+            return
         super().keyReleaseEvent(event)
 
     # Shaders compile/link helper

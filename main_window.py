@@ -919,10 +919,10 @@ class MeshToolModal(QFrame):
 
         self.merge_thresh_spin = QDoubleSpinBox(self.merge_panel)
         self.merge_thresh_spin.setRange(0.001, 50.0)
-        self.merge_thresh_spin.setSingleStep(0.1)
+        self.merge_thresh_spin.setSingleStep(0.05)
         self.merge_thresh_spin.setDecimals(3)
         self.merge_thresh_spin.setSuffix("%")
-        self.merge_thresh_spin.setValue(1.0)
+        self.merge_thresh_spin.setValue(0.2)
         self.merge_thresh_spin.valueChanged.connect(self._on_merge_value_changed)
         self.merge_stepper = SpinBoxStepper(self.merge_thresh_spin, self.merge_panel)
 
@@ -1074,7 +1074,24 @@ class MeshToolModal(QFrame):
             self.cleanup_panel.setVisible(False)
             self.merge_panel.setVisible(True)
             self.smooth_panel.setVisible(False)
-            self._set_merge_unit(self.unit_mode)
+            self.merge_thresh_spin.blockSignals(True)
+            if self.unit_mode == "pct":
+                self.merge_thresh_spin.setRange(0.001, 50.0)
+                self.merge_thresh_spin.setSingleStep(0.05)
+                self.merge_thresh_spin.setDecimals(3)
+                self.merge_thresh_spin.setSuffix("%")
+                self.merge_thresh_spin.setValue(0.2)
+                self.btn_unit_pct.setChecked(True)
+                self.btn_unit_abs.setChecked(False)
+            else:
+                self.merge_thresh_spin.setRange(0.000001, 10000.0)
+                self.merge_thresh_spin.setSingleStep(0.001)
+                self.merge_thresh_spin.setDecimals(5)
+                self.merge_thresh_spin.setSuffix(" units")
+                self.merge_thresh_spin.setValue(0.006)
+                self.btn_unit_pct.setChecked(False)
+                self.btn_unit_abs.setChecked(True)
+            self.merge_thresh_spin.blockSignals(False)
             self._on_merge_value_changed()
         elif tool_id == "smooth":
             self.title_label.setText("Smooth Mesh")
@@ -1087,27 +1104,32 @@ class MeshToolModal(QFrame):
         self.adjustSize()
 
     def _set_merge_unit(self, unit: str):
+        if self.unit_mode == unit:
+            return
         self.unit_mode = unit
         self.merge_thresh_spin.blockSignals(True)
         if unit == "pct":
             self.btn_unit_pct.setChecked(True)
             self.btn_unit_abs.setChecked(False)
             curr_abs = self.merge_thresh_spin.value()
-            pct_val = (curr_abs / self.bbox_diagonal * 100.0) if self.bbox_diagonal > 0 else 1.0
+            pct_val = (curr_abs / self.bbox_diagonal * 100.0) if self.bbox_diagonal > 0 else 0.2
             pct_val = max(0.001, min(50.0, pct_val))
             self.merge_thresh_spin.setRange(0.001, 50.0)
-            self.merge_thresh_spin.setSingleStep(0.1)
+            self.merge_thresh_spin.setSingleStep(0.05)
             self.merge_thresh_spin.setDecimals(3)
             self.merge_thresh_spin.setSuffix("%")
             self.merge_thresh_spin.setValue(pct_val)
         else:
             self.btn_unit_pct.setChecked(False)
             self.btn_unit_abs.setChecked(True)
+            curr_pct = self.merge_thresh_spin.value()
+            abs_val = (curr_pct / 100.0 * self.bbox_diagonal) if self.bbox_diagonal > 0 else 0.006
+            abs_val = max(0.000001, min(10000.0, abs_val))
             self.merge_thresh_spin.setRange(0.000001, 10000.0)
             self.merge_thresh_spin.setSingleStep(0.001)
             self.merge_thresh_spin.setDecimals(5)
             self.merge_thresh_spin.setSuffix(" units")
-            self.merge_thresh_spin.setValue(0.01)
+            self.merge_thresh_spin.setValue(abs_val)
         self.merge_thresh_spin.blockSignals(False)
         self._on_merge_value_changed()
 
@@ -1204,6 +1226,7 @@ class ViewerWrapperWidget(QFrame):
     revert_mesh_tool_requested = Signal()
     retexture_mesh_tool_requested = Signal()
     mesh_tool_closed = Signal()
+    transform_cloud_requested = Signal()
     shading_mode_changed = Signal(str)  # Emits 'wireframe' or 'solid'
 
     def __init__(self, parent=None):
@@ -1348,6 +1371,9 @@ class ViewerWrapperWidget(QFrame):
         self.tools_menu.setStyleSheet(self.file_menu.styleSheet())
         self.tools_menu.aboutToShow.connect(self.update_crop_box_state)
 
+        self.action_tool_transform_cloud = self.tools_menu.addAction("Transform Point Cloud")
+        self.action_tool_transform_cloud.setEnabled(False)
+        self.tools_menu.addSeparator()
         self.action_tool_cleanup = self.tools_menu.addAction("Mesh Cleanup")
         self.action_tool_merge = self.tools_menu.addAction("Merge Vertices")
         self.action_tool_smooth = self.tools_menu.addAction("Smooth Mesh")
@@ -1356,6 +1382,7 @@ class ViewerWrapperWidget(QFrame):
         self.action_tool_smooth.setEnabled(False)
 
         self.tools_menu_btn.setMenu(self.tools_menu)
+        self.action_tool_transform_cloud.triggered.connect(self.transform_cloud_requested.emit)
         self.action_tool_cleanup.triggered.connect(lambda: self.open_tool_requested.emit('cleanup'))
         self.action_tool_merge.triggered.connect(lambda: self.open_tool_requested.emit('merge'))
         self.action_tool_smooth.triggered.connect(lambda: self.open_tool_requested.emit('smooth'))
@@ -2055,6 +2082,13 @@ class ViewerWrapperWidget(QFrame):
 
     def update_crop_box_state(self):
         is_textured_mesh = (self.mode_select.currentIndex() == 2)
+        is_point_cloud = (self.mode_select.currentIndex() in (0, 1))
+        main_win = self._get_main_window()
+        has_points = False
+        if main_win:
+            has_points = bool(getattr(main_win, '_current_points', None) is not None and len(getattr(main_win, '_current_points', [])) > 0)
+        if hasattr(self, 'action_tool_transform_cloud'):
+            self.action_tool_transform_cloud.setEnabled(has_points or is_point_cloud)
         self.action_select_box.setEnabled(is_textured_mesh)
         self.action_select_lasso.setEnabled(is_textured_mesh)
         self.action_crop_box.setEnabled(is_textured_mesh)
@@ -3668,6 +3702,7 @@ class MainWindow(QMainWindow):
         self.viewer_widget.revert_mesh_tool_requested.connect(self._on_revert_mesh_tool)
         self.viewer_widget.retexture_mesh_tool_requested.connect(self._on_retexture_mesh_tool)
         self.viewer_widget.mesh_tool_closed.connect(self._on_mesh_tool_closed)
+        self.viewer_widget.transform_cloud_requested.connect(self._open_point_cloud_transform_tool)
         self.viewer_widget.shading_mode_changed.connect(self._on_shading_mode_changed)
 
         self._current_shading_mode = "solid"
@@ -3696,6 +3731,18 @@ class MainWindow(QMainWindow):
         self.selection_overlay = SelectionOverlayWidget(self.viewer_widget.container_area, underlying_widget=self.canvas.native)
         self.selection_overlay.shape_changed.connect(self._on_selection_shape_changed)
         self.selection_overlay.setVisible(False)
+
+        # Initialize Point Cloud Transform Floating Card Overlay
+        from point_cloud_transform_card import PointCloudTransformCard
+        self.point_cloud_transform_card = PointCloudTransformCard(
+            self.viewer_widget.container_area,
+            points_provider=lambda: self._current_points
+        )
+        self.point_cloud_transform_card.transform_changed.connect(self._on_cloud_transform_preview)
+        self.point_cloud_transform_card.transform_applied.connect(self._on_cloud_transform_applied)
+        self.point_cloud_transform_card.transform_reset.connect(self._on_cloud_transform_reset)
+        self.point_cloud_transform_card.transform_closed.connect(self._on_cloud_transform_closed)
+        self.point_cloud_transform_card.hide()
 
         # Initialize 3D Navigation Orientation Gizmo for VisPy Viewport (Y-up coordinate system)
         from mesh_editor.nav_gizmo import NavGizmoWidget
@@ -7604,6 +7651,84 @@ class MainWindow(QMainWindow):
                     f.write(f"{v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
             for face in valid_faces:
                 f.write(f"3 {face[0]} {face[1]} {face[2]}\n")
+
+    def _open_point_cloud_transform_tool(self):
+        """Opens the floating Point Cloud Transform Card in the 3D Viewport."""
+        if self._current_points is None or len(self._current_points) == 0:
+            QMessageBox.warning(self, "No Point Cloud", "Please load a point cloud before transforming.")
+            return
+        
+        self.point_cloud_transform_card.move(15, 45)
+        self.point_cloud_transform_card.show()
+        self.point_cloud_transform_card.raise_()
+        self.console_text.append("[TOOLS] Opened Point Cloud Transform toolbox.")
+
+    def _on_cloud_transform_preview(self, T_mat: np.ndarray):
+        """Live updates VisPy point cloud visualization based on transform matrix."""
+        if self._current_points is None or len(self._current_points) == 0:
+            return
+        
+        R = T_mat[:3, :3]
+        t = T_mat[:3, 3]
+        transformed_pts = (self._current_points @ R.T) + t
+        
+        if hasattr(self, 'markers_visual') and self.markers_visual is not None:
+            self.markers_visual.set_data(pos=transformed_pts.astype(np.float32))
+            
+        self._update_ground_grid(transformed_pts)
+        self.canvas.update()
+
+    def _on_cloud_transform_reset(self):
+        """Reverts point cloud viewport display back to original untransformed coordinates."""
+        if self._current_points is None or len(self._current_points) == 0:
+            return
+            
+        if hasattr(self, 'markers_visual') and self.markers_visual is not None:
+            self.markers_visual.set_data(pos=self._current_points.astype(np.float32))
+            
+        self._update_ground_grid(self._current_points)
+        self.canvas.update()
+
+    def _on_cloud_transform_closed(self):
+        self._on_cloud_transform_reset()
+
+    def _on_cloud_transform_applied(self, T_mat: np.ndarray):
+        """Bakes the transformation into active point cloud data in memory and writes to PLY file."""
+        if self._current_points is None or len(self._current_points) == 0:
+            return
+            
+        R = T_mat[:3, :3]
+        t = T_mat[:3, 3]
+        
+        # Bake transformation
+        self._current_points = (self._current_points @ R.T) + t
+        self._last_points = self._current_points
+        if self._raw_points is not None:
+            self._raw_points = (self._raw_points @ R.T) + t
+            
+        if hasattr(self, 'markers_visual') and self.markers_visual is not None:
+            self.markers_visual.set_data(pos=self._current_points.astype(np.float32))
+            
+        self._update_ground_grid(self._current_points)
+        self.canvas.update()
+        
+        # Save to disk
+        from point_cloud_io import save_transformed_point_cloud
+        saved_target = None
+        if hasattr(self, 'standalone_cloud_path') and self.standalone_cloud_path and os.path.isfile(self.standalone_cloud_path):
+            save_transformed_point_cloud(self.standalone_cloud_path, self._current_points, colors=self._current_colors)
+            saved_target = os.path.basename(self.standalone_cloud_path)
+        elif hasattr(self, 'viewer_widget') and self.viewer_widget.current_mvs_dir:
+            dense_path = os.path.join(self.viewer_widget.current_mvs_dir, "scene_dense.ply")
+            if os.path.exists(dense_path):
+                save_transformed_point_cloud(dense_path, self._current_points, colors=self._current_colors)
+                saved_target = "scene_dense.ply"
+                
+        if saved_target:
+            self.console_text.append(f"[SUCCESS] Point cloud transformed and saved to '{saved_target}'.")
+            self.status_label.setText(f"Transformed & saved to {saved_target}")
+        else:
+            self.console_text.append("[SUCCESS] Point cloud transformation applied in viewport.")
 
     def _open_mesh_tool(self, tool_id: str):
         """Opens the floating tool modal for Mesh Cleanup, Merge Vertices, or Taubin Smooth Mesh."""

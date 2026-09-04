@@ -334,6 +334,65 @@ def _read_ply_pure_numpy(path: str):
     return points, colors, None
 
 
+def write_ply_binary(file_path: str, points: np.ndarray, colors: Optional[np.ndarray] = None, normals: Optional[np.ndarray] = None) -> bool:
+    """Writes a point cloud to binary PLY format (fast and compact)."""
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+        pts = np.asarray(points, dtype=np.float32)
+        num_verts = len(pts)
+        has_colors = colors is not None and len(colors) == num_verts
+        has_normals = normals is not None and len(normals) == num_verts
+        
+        header = ["ply", "format binary_little_endian 1.0", f"element vertex {num_verts}"]
+        header.extend(["property float x", "property float y", "property float z"])
+        if has_normals:
+            header.extend(["property float nx", "property float ny", "property float nz"])
+        if has_colors:
+            header.extend(["property uchar red", "property uchar green", "property uchar blue"])
+        header.append("end_header\n")
+        header_bytes = "\n".join(header).encode("ascii")
+        
+        dtype_fields = [("x", "<f4"), ("y", "<f4"), ("z", "<f4")]
+        if has_normals:
+            dtype_fields.extend([("nx", "<f4"), ("ny", "<f4"), ("nz", "<f4")])
+        if has_colors:
+            dtype_fields.extend([("red", "u1"), ("green", "u1"), ("blue", "u1")])
+        
+        structured_arr = np.empty(num_verts, dtype=dtype_fields)
+        structured_arr["x"] = pts[:, 0]
+        structured_arr["y"] = pts[:, 1]
+        structured_arr["z"] = pts[:, 2]
+        if has_normals:
+            nrm = np.asarray(normals, dtype=np.float32)
+            structured_arr["nx"] = nrm[:, 0]
+            structured_arr["ny"] = nrm[:, 1]
+            structured_arr["nz"] = nrm[:, 2]
+        if has_colors:
+            cols = np.asarray(colors)
+            if cols.dtype != np.uint8:
+                cols = (np.clip(cols, 0.0, 1.0) * 255.0).astype(np.uint8)
+            structured_arr["red"] = cols[:, 0]
+            structured_arr["green"] = cols[:, 1]
+            structured_arr["blue"] = cols[:, 2]
+            
+        with open(file_path, "wb") as f:
+            f.write(header_bytes)
+            structured_arr.tofile(f)
+        return True
+    except Exception as e:
+        print(f"[ERROR] write_ply_binary failed: {e}")
+        return False
+
+
+def save_transformed_point_cloud(file_path: str, viewport_points: np.ndarray, colors: Optional[np.ndarray] = None, normals: Optional[np.ndarray] = None) -> bool:
+    """
+    Saves viewport point cloud to PLY file, applying photogrammetry coordinate conversion
+    so that reloading or running reconstruction uses the exact oriented coordinates.
+    """
+    pts_file, nrm_file, _, _ = apply_photogrammetry_coordinate_flip(points=viewport_points, normals=normals)
+    return write_ply_binary(file_path, pts_file, colors=colors, normals=nrm_file)
+
+
 def save_point_cloud(cloud, file_path: str) -> bool:
     """Saves a PointCloud object to disk."""
     os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
@@ -347,17 +406,6 @@ def save_point_cloud(cloud, file_path: str) -> bool:
     if hasattr(cloud, 'points'):
         pts = np.asarray(cloud.points)
         cols = np.asarray(cloud.colors) if hasattr(cloud, 'colors') and cloud.colors is not None else None
-        with open(file_path, 'w') as f:
-            f.write("ply\nformat ascii 1.0\n")
-            f.write(f"element vertex {len(pts)}\n")
-            f.write("property float x\nproperty float y\nproperty float z\n")
-            if cols is not None and len(cols) == len(pts):
-                f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
-            f.write("end_header\n")
-            for i in range(len(pts)):
-                if cols is not None and len(cols) == len(pts):
-                    f.write(f"{pts[i][0]:.6f} {pts[i][1]:.6f} {pts[i][2]:.6f} {int(cols[i][0])} {int(cols[i][1])} {int(cols[i][2])}\n")
-                else:
-                    f.write(f"{pts[i][0]:.6f} {pts[i][1]:.6f} {pts[i][2]:.6f}\n")
-        return True
+        nrms = np.asarray(cloud.normals) if hasattr(cloud, 'normals') and cloud.normals is not None else None
+        return write_ply_binary(file_path, pts, colors=cols, normals=nrms)
     return False

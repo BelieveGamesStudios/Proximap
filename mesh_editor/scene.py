@@ -104,6 +104,55 @@ class Camera:
             
         self.target += right * (-delta_x * scale) + up * (delta_y * scale)
 
+    def get_forward_vector(self):
+        """Returns normalized 3D forward direction vector in world coordinates (Z-up)."""
+        cos_pitch = np.cos(self.pitch)
+        fwd = np.array([
+            -cos_pitch * np.sin(self.yaw),
+            cos_pitch * np.cos(self.yaw),
+            -np.sin(self.pitch)
+        ], dtype=np.float32)
+        norm = np.linalg.norm(fwd)
+        return fwd / norm if norm > 1e-6 else np.array([0.0, 1.0, 0.0], dtype=np.float32)
+
+    def get_right_vector(self):
+        """Returns normalized 3D right direction vector in world coordinates (Z-up)."""
+        fwd = self.get_forward_vector()
+        world_up = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+        if np.abs(np.dot(fwd, world_up)) > 0.99:
+            world_up = np.array([0.0, 1.0, 0.0], dtype=np.float32)
+        right = np.cross(fwd, world_up)
+        norm = np.linalg.norm(right)
+        return right / norm if norm > 1e-6 else np.array([1.0, 0.0, 0.0], dtype=np.float32)
+
+    def get_up_vector(self):
+        """Returns normalized 3D up direction vector in camera space."""
+        fwd = self.get_forward_vector()
+        right = self.get_right_vector()
+        up = np.cross(right, fwd)
+        norm = np.linalg.norm(up)
+        return up / norm if norm > 1e-6 else np.array([0.0, 0.0, 1.0], dtype=np.float32)
+
+    def move(self, delta_vector):
+        """Translates the camera target (and eye) by a delta displacement in world coordinates."""
+        self.target = self.target + np.array(delta_vector, dtype=np.float32)
+
+    def fps_look(self, delta_yaw, delta_pitch):
+        """Rotates camera orientation around the camera's eye position in place (Unity Fly-Look)."""
+        current_eye = self.get_position()
+        self.yaw += delta_yaw
+        max_pitch = np.radians(89.0)
+        self.pitch = np.clip(self.pitch + delta_pitch, -max_pitch, max_pitch)
+        
+        # Keep eye position fixed, update target based on new yaw/pitch
+        cos_pitch = np.cos(self.pitch)
+        offset = np.array([
+            self.distance * cos_pitch * np.sin(self.yaw),
+            -self.distance * cos_pitch * np.cos(self.yaw),
+            self.distance * np.sin(self.pitch)
+        ], dtype=np.float32)
+        self.target = current_eye - offset
+
     def zoom(self, factor):
         if self.is_perspective:
             self.distance = max(self.distance - factor, 0.5)
