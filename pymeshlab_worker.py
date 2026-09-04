@@ -237,16 +237,26 @@ def handle_smooth_taubin(ms, pymeshlab, params, input_ply, output_ply):
     ))
 
     taubin_fn = _get_taubin_filter(ms, pymeshlab)
-    try:
-        taubin_fn(lambda_val=lambda_factor, mu_val=mu_factor, steps=iterations)
-    except TypeError:
+    applied = False
+    for kwargs in [
+        {"lambda_": lambda_factor, "mu": mu_factor, "stepsmoothnum": iterations},
+        {"lambda_": lambda_factor, "stepsmoothnum": iterations},
+        {"lambda_val": lambda_factor, "mu_val": mu_factor, "steps": iterations},
+        {"lambda_val": lambda_factor, "steps": iterations},
+        {"lambda_filter": lambda_factor, "iterations": iterations},
+    ]:
         try:
-            taubin_fn(lambda_val=lambda_factor, steps=iterations)
-        except TypeError:
-            try:
-                taubin_fn(lambda_filter=lambda_factor, iterations=iterations)
-            except TypeError:
-                taubin_fn()
+            taubin_fn(**kwargs)
+            applied = True
+            break
+        except Exception:
+            pass
+
+    if not applied:
+        try:
+            taubin_fn()
+        except Exception as e:
+            _log("[WARNING] Taubin smoothing fallback error: " + str(e))
 
     os.makedirs(os.path.dirname(os.path.abspath(output_ply)), exist_ok=True)
     ms.save_current_mesh(output_ply)

@@ -581,13 +581,26 @@ class PyMeshLabDirectBackend(MeshProcessingBackend):
                 raise RuntimeError("PyMeshLab Taubin smoothing filter (apply_coord_taubin_smoothing) not available in this PyMeshLab version.")
 
             _log(f"[SMOOTH] PyMeshLab Direct Taubin Smooth: lambda={lambda_factor}, mu={mu_factor}, steps={iterations}", log_callback)
-            try:
-                taubin_fn(lambda_val=lambda_factor, mu_val=mu_factor, steps=iterations)
-            except TypeError:
+            applied = False
+            for kwargs in [
+                {"lambda_": lambda_factor, "mu": mu_factor, "stepsmoothnum": iterations},
+                {"lambda_": lambda_factor, "stepsmoothnum": iterations},
+                {"lambda_val": lambda_factor, "mu_val": mu_factor, "steps": iterations},
+                {"lambda_val": lambda_factor, "steps": iterations},
+                {"lambda_filter": lambda_factor, "iterations": iterations},
+            ]:
                 try:
-                    taubin_fn(lambda_val=lambda_factor, steps=iterations)
-                except TypeError:
+                    taubin_fn(**kwargs)
+                    applied = True
+                    break
+                except Exception:
+                    pass
+
+            if not applied:
+                try:
                     taubin_fn()
+                except Exception as e:
+                    _log(f"[WARNING] Taubin smoothing fallback error: {e}", log_callback)
 
             os.makedirs(os.path.dirname(os.path.abspath(output_ply_path)), exist_ok=True)
             ms.save_current_mesh(output_ply_path)

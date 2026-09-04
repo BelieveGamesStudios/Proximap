@@ -5,6 +5,7 @@ import ctypes
 import json
 import time
 from typing import Optional
+import numpy as np
 try:
     from PySide6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -3203,6 +3204,7 @@ class MainWindow(QMainWindow):
 
         self.manhattan_align_checkbox = QCheckBox("Manhattan Alignment (Auto-Level)", step2_box)
         self.manhattan_align_checkbox.setChecked(True)
+        self.manhattan_align_checkbox.setVisible(False)
         self.manhattan_align_checkbox.setToolTip(
             "Automatically levels the 3D model and aligns ground/walls to the coordinate grid using COLMAP Manhattan-World vanishing point analysis.\n"
             "Default: On."
@@ -5086,7 +5088,7 @@ class MainWindow(QMainWindow):
         else:
             self.auto_cleanup_checkbox.setVisible(True)
         if hasattr(self, 'manhattan_align_checkbox'):
-            self.manhattan_align_checkbox.setVisible(True)
+            self.manhattan_align_checkbox.setVisible(False)
         self.advanced_toggle_btn.setVisible(False)
         if hasattr(self, 'step3_box'):
             self.step3_box.setVisible(True)
@@ -7658,10 +7660,24 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "No Point Cloud", "Please load a point cloud before transforming.")
             return
         
-        self.point_cloud_transform_card.move(15, 45)
+        self.point_cloud_transform_card.adjustSize()
+        hint = self.point_cloud_transform_card.sizeHint()
+        self.point_cloud_transform_card.resize(290, hint.height())
+        self.point_cloud_transform_card.move(15, 15)
         self.point_cloud_transform_card.show()
         self.point_cloud_transform_card.raise_()
         self.console_text.append("[TOOLS] Opened Point Cloud Transform toolbox.")
+
+    def _get_point_cloud_marker_colors(self):
+        """Returns RGBA float32 array normalized to [0, 1] for VisPy marker coloring."""
+        if self._current_colors is not None and len(self._current_colors) > 0:
+            mc = self._current_colors.astype(np.float32)
+            if mc.max() > 1.0:
+                mc = mc / 255.0
+            if mc.shape[1] == 3:
+                mc = np.hstack([mc, np.ones((mc.shape[0], 1), dtype=np.float32)])
+            return mc
+        return 'white'
 
     def _on_cloud_transform_preview(self, T_mat: np.ndarray):
         """Live updates VisPy point cloud visualization based on transform matrix."""
@@ -7673,7 +7689,12 @@ class MainWindow(QMainWindow):
         transformed_pts = (self._current_points @ R.T) + t
         
         if hasattr(self, 'markers_visual') and self.markers_visual is not None:
-            self.markers_visual.set_data(pos=transformed_pts.astype(np.float32))
+            self.markers_visual.set_data(
+                pos=transformed_pts.astype(np.float32),
+                face_color=self._get_point_cloud_marker_colors(),
+                size=2,
+                edge_width=0
+            )
             
         self._update_ground_grid(transformed_pts)
         self.canvas.update()
@@ -7684,7 +7705,12 @@ class MainWindow(QMainWindow):
             return
             
         if hasattr(self, 'markers_visual') and self.markers_visual is not None:
-            self.markers_visual.set_data(pos=self._current_points.astype(np.float32))
+            self.markers_visual.set_data(
+                pos=self._current_points.astype(np.float32),
+                face_color=self._get_point_cloud_marker_colors(),
+                size=2,
+                edge_width=0
+            )
             
         self._update_ground_grid(self._current_points)
         self.canvas.update()
@@ -7707,7 +7733,12 @@ class MainWindow(QMainWindow):
             self._raw_points = (self._raw_points @ R.T) + t
             
         if hasattr(self, 'markers_visual') and self.markers_visual is not None:
-            self.markers_visual.set_data(pos=self._current_points.astype(np.float32))
+            self.markers_visual.set_data(
+                pos=self._current_points.astype(np.float32),
+                face_color=self._get_point_cloud_marker_colors(),
+                size=2,
+                edge_width=0
+            )
             
         self._update_ground_grid(self._current_points)
         self.canvas.update()

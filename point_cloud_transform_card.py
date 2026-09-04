@@ -119,6 +119,11 @@ class PointCloudTransformCard(QFrame):
         """)
 
         self._build_ui()
+        self.adjustSize()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.adjustSize()
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
