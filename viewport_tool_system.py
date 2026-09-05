@@ -20,7 +20,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QSizePolicy, QGridLayout, QDoubleSpinBox, QSpinBox,
-    QCheckBox, QGroupBox, QStackedWidget
+    QCheckBox, QGroupBox, QStackedWidget, QAbstractSpinBox
 )
 
 
@@ -29,8 +29,11 @@ def get_base_dir() -> str:
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def load_tinted_svg_icon(svg_path: str, color_hex: str = "#E0E0E0", size: int = 24) -> QIcon:
+def load_tinted_svg_icon(svg_path: Optional[str], color_hex: str = "#E0E0E0", size: int = 24) -> QIcon:
     """Renders and tints an SVG file into a crisp QIcon."""
+    if not svg_path:
+        return QIcon()
+
     if not os.path.isabs(svg_path):
         svg_path = os.path.join(get_base_dir(), svg_path)
 
@@ -51,6 +54,93 @@ def load_tinted_svg_icon(svg_path: str, color_hex: str = "#E0E0E0", size: int = 
     painter.end()
 
     return QIcon(pixmap)
+
+
+# ---------------------------------------------------------------------------
+# Stepper Widget: Wraps a SpinBox with dedicated '-' and '+' buttons
+# ---------------------------------------------------------------------------
+class SpinBoxStepper(QWidget):
+    """
+    Wraps a QSpinBox or QDoubleSpinBox with dedicated '-' and '+' push buttons.
+    Hides native arrow buttons to provide reliable, touch/click-friendly targets.
+    """
+    def __init__(self, spinbox, parent=None):
+        super().__init__(parent)
+        self.spin = spinbox
+        self.spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.spin.setAlignment(Qt.AlignCenter)
+        self.spin.setStyleSheet("""
+            QSpinBox, QDoubleSpinBox {
+                background-color: #1E1E1E;
+                color: #ffffff;
+                border: 1px solid #333333;
+                border-radius: 3px;
+                padding: 2px 4px;
+                font-size: 11px;
+                min-height: 20px;
+                max-width: 90px;
+            }
+        """)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        btn_style = """
+            QPushButton {
+                background-color: #2D2D2D;
+                color: #00E676;
+                font-weight: bold;
+                font-size: 13px;
+                border: 1px solid #444444;
+                border-radius: 3px;
+                min-width: 22px;
+                max-width: 22px;
+                min-height: 22px;
+                max-height: 22px;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #383838;
+                border-color: #00E676;
+                color: #ffffff;
+            }
+            QPushButton:pressed {
+                background-color: #00E676;
+                color: #121212;
+            }
+            QPushButton:disabled {
+                background-color: #1C1C1C;
+                color: #555555;
+                border-color: #2A2A2A;
+            }
+        """
+
+        self.btn_minus = QPushButton("-", self)
+        self.btn_minus.setCursor(Qt.PointingHandCursor)
+        self.btn_minus.setStyleSheet(btn_style)
+        self.btn_minus.clicked.connect(self._step_down)
+
+        self.btn_plus = QPushButton("+", self)
+        self.btn_plus.setCursor(Qt.PointingHandCursor)
+        self.btn_plus.setStyleSheet(btn_style)
+        self.btn_plus.clicked.connect(self._step_up)
+
+        layout.addWidget(self.btn_minus)
+        layout.addWidget(self.spin, stretch=1)
+        layout.addWidget(self.btn_plus)
+
+    def _step_down(self):
+        self.spin.stepBy(-1)
+
+    def _step_up(self):
+        self.spin.stepBy(1)
+
+    def setEnabled(self, enabled: bool):
+        super().setEnabled(enabled)
+        self.spin.setEnabled(enabled)
+        self.btn_minus.setEnabled(enabled)
+        self.btn_plus.setEnabled(enabled)
 
 
 # ===========================================================================
@@ -468,8 +558,12 @@ class EditorWindowHostModal(QFrame):
             tool_id = self.current_tool.tool_id
             self.current_tool.on_disable()
             self.current_tool = None
+            if hasattr(self, 'gizmo_toggle') and self.gizmo_toggle.isChecked():
+                self.gizmo_toggle.setChecked(False)
             self.hide()
             self.tool_closed.emit(tool_id)
+        else:
+            self.hide()
 
     def toggle_tool(self, tool: BaseEditorTool, context: Optional[Dict[str, Any]] = None):
         """Toggles a tool on/off."""
@@ -1071,9 +1165,20 @@ class TransformToolWindow(BaseEditorTool):
 
 class MeshCleanupToolWindow(BaseEditorTool):
     """
-    Concrete Tool: Mesh Cleanup & Repair.
-    Inherits from BaseEditorTool and provides face reduction, hole filling, and manifold repair.
+    Concrete Tool: Mesh Cleanup & Optimization.
+    Provides Face Reduction with a scrollable container, precision stepper, and background decimation.
     """
+
+    apply_reduction_requested = Signal(float)
+    revert_reduction_requested = Signal()
+    apply_close_holes_requested = Signal(int)
+    revert_close_holes_requested = Signal()
+    apply_repair_nonmanifold_requested = Signal()
+    revert_repair_nonmanifold_requested = Signal()
+    apply_remove_duplicates_requested = Signal()
+    revert_remove_duplicates_requested = Signal()
+    revert_requested = Signal()
+    retexture_requested = Signal()
 
     def __init__(self):
         icon_path = os.path.join("interface element", "clean up.svg")
@@ -1081,71 +1186,320 @@ class MeshCleanupToolWindow(BaseEditorTool):
             tool_id="cleanup",
             title="Mesh Cleanup",
             icon_path=icon_path,
-            tooltip="Clean & Repair 3D Mesh (Decimation, Holes, Duplicates)"
+            tooltip="Clean & Optimize 3D Mesh (Face Reduction, Holes, Non-Manifold, Duplicates)"
         )
+        self.spin_reduction = None
+        self.stepper_reduction = None
+        self.apply_btn = None
+        self.revert_btn = None
+        self.spin_hole = None
+        self.stepper_hole = None
+        self.apply_hole_btn = None
+        self.revert_hole_btn = None
+        self.apply_nonmanifold_btn = None
+        self.revert_nonmanifold_btn = None
+        self.apply_duplicates_btn = None
+        self.revert_duplicates_btn = None
+        self.btn_retexture = None
+        self.initial_hole_size = 30
 
     def on_enable(self, context: Optional[Dict[str, Any]] = None):
         super().on_enable(context)
 
     def on_gui(self, layout: QVBoxLayout, parent: QWidget):
-        """Constructs the scaffolded Mesh Cleanup UI controls."""
-        # Decimation & Holes Group
-        dec_group = QGroupBox("Mesh Optimization", parent)
-        dec_layout = QGridLayout(dec_group)
-        dec_layout.setContentsMargins(8, 8, 8, 8)
-        dec_layout.setSpacing(6)
+        """Constructs the scrollable Mesh Cleanup UI controls."""
+        # Scroll Area to ensure the tool window is scrollable
+        scroll = QScrollArea(parent)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setMinimumHeight(240)
+        scroll.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background: transparent;
+            }
+            QScrollBar:vertical {
+                background: #181818;
+                width: 6px;
+                margin: 0px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical {
+                background: #444444;
+                min-height: 20px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #00E676;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+        """)
 
-        lbl_reduc = QLabel("Face Reduction:", dec_group)
-        spin_reduc = QSpinBox(dec_group)
-        spin_reduc.setRange(0, 95)
-        spin_reduc.setValue(50)
-        spin_reduc.setSuffix(" %")
-        dec_layout.addWidget(lbl_reduc, 0, 0)
-        dec_layout.addWidget(spin_reduc, 0, 1)
+        container = QWidget()
+        container.setStyleSheet("background: transparent; border: none;")
+        content_layout = QVBoxLayout(container)
+        content_layout.setContentsMargins(0, 0, 4, 0)
+        content_layout.setSpacing(10)
 
-        lbl_hole = QLabel("Max Hole Size:", dec_group)
-        spin_hole = QSpinBox(dec_group)
-        spin_hole.setRange(0, 1000)
-        spin_hole.setValue(30)
-        spin_hole.setSuffix(" faces")
-        dec_layout.addWidget(lbl_hole, 1, 0)
-        dec_layout.addWidget(spin_hole, 1, 1)
+        # ---------------- Section 1: Face Reduction ----------------
+        section_lbl = QLabel("Face Reduction", container)
+        section_lbl.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold; background: transparent; border: none;")
+        content_layout.addWidget(section_lbl)
 
-        layout.addWidget(dec_group)
+        # Input field row: Label + Stepper with percentage value
+        input_container = QWidget(container)
+        input_container.setStyleSheet("background: transparent; border: none;")
+        input_layout = QHBoxLayout(input_container)
+        input_layout.setContentsMargins(0, 0, 0, 0)
+        input_layout.setSpacing(8)
 
-        # Repair Options Group
-        repair_group = QGroupBox("Repair Options", parent)
-        repair_layout = QVBoxLayout(repair_group)
-        repair_layout.setContentsMargins(8, 8, 8, 8)
-        repair_layout.setSpacing(6)
+        lbl_reduc = QLabel("Face Reduction:", input_container)
+        lbl_reduc.setStyleSheet("color: #e0e0e0; font-size: 11px; background: transparent; border: none;")
 
-        chk_dups = QCheckBox("Remove Duplicate Faces / Vertices", repair_group)
-        chk_dups.setChecked(True)
-        repair_layout.addWidget(chk_dups)
+        self.spin_reduction = QSpinBox(input_container)
+        self.spin_reduction.setRange(1, 99)
+        self.spin_reduction.setValue(50)
+        self.spin_reduction.setSuffix(" %")
+        self.spin_reduction.setSingleStep(5)
+        self.spin_reduction.setStyleSheet("""
+            QSpinBox {
+                background-color: #161616;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 3px 6px;
+                font-size: 11px;
+            }
+            QSpinBox:focus {
+                border-color: #00E676;
+            }
+        """)
 
-        chk_nm = QCheckBox("Repair Non-Manifold Edges", repair_group)
-        chk_nm.setChecked(True)
-        repair_layout.addWidget(chk_nm)
+        self.stepper_reduction = SpinBoxStepper(self.spin_reduction, input_container)
 
-        chk_holes = QCheckBox("Close Mesh Holes", repair_group)
-        chk_holes.setChecked(True)
-        repair_layout.addWidget(chk_holes)
+        input_layout.addWidget(lbl_reduc)
+        input_layout.addWidget(self.stepper_reduction)
+        content_layout.addWidget(input_container)
 
-        layout.addWidget(repair_group)
-
-        # Actions Row
+        # Action Buttons Row: Revert and Apply for Face Reduction
         action_row = QHBoxLayout()
         action_row.setSpacing(8)
 
-        revert_btn = QPushButton("Revert", parent)
-        revert_btn.setProperty("class", "action-btn")
+        self.revert_btn = QPushButton("Revert", container)
+        self.revert_btn.setProperty("class", "action-btn")
+        self.revert_btn.setEnabled(False)
+        self.revert_btn.setCursor(Qt.PointingHandCursor)
+        self.revert_btn.clicked.connect(self._on_revert_clicked)
 
-        apply_btn = QPushButton("Apply Cleanup", parent)
-        apply_btn.setProperty("class", "primary-btn")
+        self.apply_btn = QPushButton("Apply", container)
+        self.apply_btn.setProperty("class", "primary-btn")
+        self.apply_btn.setCursor(Qt.PointingHandCursor)
+        self.apply_btn.clicked.connect(self._on_apply_clicked)
 
-        action_row.addWidget(revert_btn)
-        action_row.addWidget(apply_btn)
-        layout.addLayout(action_row)
+        action_row.addWidget(self.revert_btn)
+        action_row.addWidget(self.apply_btn)
+        content_layout.addLayout(action_row)
+
+        # ---------------- Section 2: Close Holes ----------------
+        section2_lbl = QLabel("Close Holes", container)
+        section2_lbl.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold; background: transparent; border: none; margin-top: 6px;")
+        content_layout.addWidget(section2_lbl)
+
+        # Input field row: Label + Stepper with max hole size (faces)
+        hole_input_container = QWidget(container)
+        hole_input_container.setStyleSheet("background: transparent; border: none;")
+        hole_input_layout = QHBoxLayout(hole_input_container)
+        hole_input_layout.setContentsMargins(0, 0, 0, 0)
+        hole_input_layout.setSpacing(8)
+
+        lbl_hole = QLabel("Max Hole Size (faces):", hole_input_container)
+        lbl_hole.setStyleSheet("color: #e0e0e0; font-size: 11px; background: transparent; border: none;")
+
+        self.spin_hole = QSpinBox(hole_input_container)
+        self.spin_hole.setRange(5, 5000)
+        self.spin_hole.setValue(getattr(self, 'initial_hole_size', 30))
+        self.spin_hole.setSingleStep(10)
+        self.spin_hole.setStyleSheet("""
+            QSpinBox {
+                background-color: #161616;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 3px 6px;
+                font-size: 11px;
+            }
+            QSpinBox:focus {
+                border-color: #00E676;
+            }
+        """)
+
+        self.stepper_hole = SpinBoxStepper(self.spin_hole, hole_input_container)
+
+        hole_input_layout.addWidget(lbl_hole)
+        hole_input_layout.addWidget(self.stepper_hole)
+        content_layout.addWidget(hole_input_container)
+
+        # Action Buttons Row: Revert and Apply for Close Holes
+        hole_action_row = QHBoxLayout()
+        hole_action_row.setSpacing(8)
+
+        self.revert_hole_btn = QPushButton("Revert", container)
+        self.revert_hole_btn.setProperty("class", "action-btn")
+        self.revert_hole_btn.setEnabled(False)
+        self.revert_hole_btn.setCursor(Qt.PointingHandCursor)
+        self.revert_hole_btn.clicked.connect(self._on_revert_hole_clicked)
+
+        self.apply_hole_btn = QPushButton("Apply", container)
+        self.apply_hole_btn.setProperty("class", "primary-btn")
+        self.apply_hole_btn.setCursor(Qt.PointingHandCursor)
+        self.apply_hole_btn.clicked.connect(self._on_apply_hole_clicked)
+
+        hole_action_row.addWidget(self.revert_hole_btn)
+        hole_action_row.addWidget(self.apply_hole_btn)
+        content_layout.addLayout(hole_action_row)
+
+        # ---------------- Section 3: Repair Non-Manifold ----------------
+        section3_lbl = QLabel("Repair Non-Manifold", container)
+        section3_lbl.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold; background: transparent; border: none; margin-top: 6px;")
+        content_layout.addWidget(section3_lbl)
+
+        # Action Buttons Row: Revert and Apply for Repair Non-Manifold
+        nm_action_row = QHBoxLayout()
+        nm_action_row.setSpacing(8)
+
+        self.revert_nonmanifold_btn = QPushButton("Revert", container)
+        self.revert_nonmanifold_btn.setProperty("class", "action-btn")
+        self.revert_nonmanifold_btn.setEnabled(False)
+        self.revert_nonmanifold_btn.setCursor(Qt.PointingHandCursor)
+        self.revert_nonmanifold_btn.clicked.connect(self._on_revert_nonmanifold_clicked)
+
+        self.apply_nonmanifold_btn = QPushButton("Apply", container)
+        self.apply_nonmanifold_btn.setProperty("class", "primary-btn")
+        self.apply_nonmanifold_btn.setCursor(Qt.PointingHandCursor)
+        self.apply_nonmanifold_btn.clicked.connect(self._on_apply_nonmanifold_clicked)
+
+        nm_action_row.addWidget(self.revert_nonmanifold_btn)
+        nm_action_row.addWidget(self.apply_nonmanifold_btn)
+        content_layout.addLayout(nm_action_row)
+
+        # ---------------- Section 4: Remove Duplicates ----------------
+        section4_lbl = QLabel("Remove Duplicate Faces / Vertices", container)
+        section4_lbl.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold; background: transparent; border: none; margin-top: 6px;")
+        content_layout.addWidget(section4_lbl)
+
+        # Action Buttons Row: Revert and Apply for Remove Duplicates
+        dup_action_row = QHBoxLayout()
+        dup_action_row.setSpacing(8)
+
+        self.revert_duplicates_btn = QPushButton("Revert", container)
+        self.revert_duplicates_btn.setProperty("class", "action-btn")
+        self.revert_duplicates_btn.setEnabled(False)
+        self.revert_duplicates_btn.setCursor(Qt.PointingHandCursor)
+        self.revert_duplicates_btn.clicked.connect(self._on_revert_duplicates_clicked)
+
+        self.apply_duplicates_btn = QPushButton("Apply", container)
+        self.apply_duplicates_btn.setProperty("class", "primary-btn")
+        self.apply_duplicates_btn.setCursor(Qt.PointingHandCursor)
+        self.apply_duplicates_btn.clicked.connect(self._on_apply_duplicates_clicked)
+
+        dup_action_row.addWidget(self.revert_duplicates_btn)
+        dup_action_row.addWidget(self.apply_duplicates_btn)
+        content_layout.addLayout(dup_action_row)
+
+        content_layout.addStretch()
+
+        scroll.setWidget(container)
+        layout.addWidget(scroll)
+
+        # ---------------- Retexture Button (Fixed at Bottom) ----------------
+        self.btn_retexture = QPushButton("Retexture", parent)
+        self.btn_retexture.setToolTip("Reruns OpenMVS texture projection on the modified mesh geometry.")
+        self.btn_retexture.setCursor(Qt.PointingHandCursor)
+        self.btn_retexture.setStyleSheet("""
+            QPushButton {
+                font-size: 11px; padding: 7px 14px; font-weight: bold;
+                background-color: #00C853; color: #121212;
+                border: 1px solid #00C853; border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #00E676; }
+            QPushButton:disabled { background-color: #2D2D2D; color: #666666; border-color: #444444; }
+        """)
+        self.btn_retexture.clicked.connect(self._on_retexture_clicked)
+        layout.addWidget(self.btn_retexture)
+
+    def _on_apply_clicked(self):
+        if self.spin_reduction:
+            val = float(self.spin_reduction.value())
+            self.apply_reduction_requested.emit(val)
+
+    def _on_revert_clicked(self):
+        self.revert_reduction_requested.emit()
+        self.revert_requested.emit()
+
+    def _on_apply_hole_clicked(self):
+        if self.spin_hole:
+            val = int(self.spin_hole.value())
+            self.apply_close_holes_requested.emit(val)
+
+    def _on_revert_hole_clicked(self):
+        self.revert_close_holes_requested.emit()
+
+    def _on_apply_nonmanifold_clicked(self):
+        self.apply_repair_nonmanifold_requested.emit()
+
+    def _on_revert_nonmanifold_clicked(self):
+        self.revert_repair_nonmanifold_requested.emit()
+
+    def _on_apply_duplicates_clicked(self):
+        self.apply_remove_duplicates_requested.emit()
+
+    def _on_revert_duplicates_clicked(self):
+        self.revert_remove_duplicates_requested.emit()
+
+    def _on_retexture_clicked(self):
+        self.retexture_requested.emit()
+
+    def set_revert_enabled(self, enabled: bool):
+        if self.revert_btn:
+            self.revert_btn.setEnabled(enabled)
+
+    def set_holes_revert_enabled(self, enabled: bool):
+        if self.revert_hole_btn:
+            self.revert_hole_btn.setEnabled(enabled)
+
+    def set_nonmanifold_revert_enabled(self, enabled: bool):
+        if self.revert_nonmanifold_btn:
+            self.revert_nonmanifold_btn.setEnabled(enabled)
+
+    def set_duplicates_revert_enabled(self, enabled: bool):
+        if self.revert_duplicates_btn:
+            self.revert_duplicates_btn.setEnabled(enabled)
+
+    def set_busy(self, is_busy: bool):
+        if is_busy:
+            # All cleanup actions share one backup: only the latest completed
+            # action may enable Revert, and no revert may run during a worker.
+            self.set_revert_enabled(False)
+            self.set_holes_revert_enabled(False)
+            self.set_nonmanifold_revert_enabled(False)
+            self.set_duplicates_revert_enabled(False)
+        if self.apply_btn:
+            self.apply_btn.setEnabled(not is_busy)
+        if self.stepper_reduction:
+            self.stepper_reduction.setEnabled(not is_busy)
+        if self.apply_hole_btn:
+            self.apply_hole_btn.setEnabled(not is_busy)
+        if self.stepper_hole:
+            self.stepper_hole.setEnabled(not is_busy)
+        if self.apply_nonmanifold_btn:
+            self.apply_nonmanifold_btn.setEnabled(not is_busy)
+        if self.apply_duplicates_btn:
+            self.apply_duplicates_btn.setEnabled(not is_busy)
+        if self.btn_retexture:
+            self.btn_retexture.setEnabled(not is_busy)
 
     def on_disable(self):
         super().on_disable()

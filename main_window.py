@@ -2140,24 +2140,236 @@ class ProjectProgressDialog(QDialog):
         layout.addWidget(self.progress)
 
 
+class SaveProjectDialog(QDialog):
+    """
+    Dialog for saving a Proximap project (.pxm).
+    Offers target path selection and an 'Include Images' toggle with dynamic warning.
+    """
+    def __init__(self, default_path: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Save Project (.pxm)")
+        self.setMinimumWidth(480)
+        self.setModal(True)
+        self.selected_file_path = default_path
+        
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #1a1a1a;
+                color: #ffffff;
+            }
+            QLabel {
+                color: #e0e0e0;
+                font-size: 11px;
+            }
+            QLineEdit {
+                background-color: #121212;
+                border: 1px solid #333333;
+                border-radius: 4px;
+                color: #ffffff;
+                padding: 6px 10px;
+                font-size: 11px;
+            }
+            QLineEdit:focus {
+                border-color: #00E676;
+            }
+            QPushButton {
+                background-color: #2a2a2a;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 6px 14px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #383838;
+                border-color: #555555;
+            }
+            QPushButton#primaryBtn {
+                background-color: #00C853;
+                color: #121212;
+                border: 1px solid #00C853;
+            }
+            QPushButton#primaryBtn:hover {
+                background-color: #00E676;
+            }
+            QCheckBox {
+                color: #e0e0e0;
+                font-size: 11px;
+                font-weight: 500;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                background-color: #161616;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #00E676;
+                border-color: #00E676;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        # Title
+        title_lbl = QLabel("Save Proximap Project Archive", self)
+        title_lbl.setStyleSheet("font-size: 13px; font-weight: bold; color: #ffffff;")
+        layout.addWidget(title_lbl)
+
+        # Destination path row
+        path_label = QLabel("Project File Destination:", self)
+        layout.addWidget(path_label)
+
+        path_row = QHBoxLayout()
+        path_row.setSpacing(8)
+
+        self.path_edit = QLineEdit(self)
+        self.path_edit.setText(default_path)
+        path_row.addWidget(self.path_edit, stretch=1)
+
+        self.browse_btn = QPushButton("Browse...", self)
+        self.browse_btn.setCursor(Qt.PointingHandCursor)
+        self.browse_btn.clicked.connect(self._on_browse_clicked)
+        path_row.addWidget(self.browse_btn)
+
+        layout.addLayout(path_row)
+
+        # Include images checkbox
+        self.include_images_check = QCheckBox("Include reconstruction images in project file", self)
+        self.include_images_check.setChecked(False)
+        self.include_images_check.setCursor(Qt.PointingHandCursor)
+        self.include_images_check.toggled.connect(self._on_include_images_toggled)
+        layout.addWidget(self.include_images_check)
+
+        # Warning banner widget (Amber/Orange accent callout)
+        self.warning_banner = QWidget(self)
+        self.warning_banner.setStyleSheet("""
+            QWidget {
+                background-color: rgba(255, 171, 0, 0.12);
+                border: 1px solid #FFAB00;
+                border-radius: 5px;
+            }
+        """)
+        wb_layout = QHBoxLayout(self.warning_banner)
+        wb_layout.setContentsMargins(12, 8, 12, 8)
+        wb_layout.setSpacing(8)
+
+        self.warning_text = QLabel(
+            "⚠️ Note: Including images will significantly increase the .pxm file size and consume more disk space.",
+            self.warning_banner
+        )
+        self.warning_text.setWordWrap(True)
+        self.warning_text.setStyleSheet("color: #FFD54F; font-size: 11px; font-weight: 500; border: none; background: transparent;")
+        wb_layout.addWidget(self.warning_text)
+
+        self.warning_banner.setVisible(False)
+        layout.addWidget(self.warning_banner)
+
+        layout.addSpacing(6)
+
+        # Buttons row
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        self.cancel_btn = QPushButton("Cancel", self)
+        self.cancel_btn.setCursor(Qt.PointingHandCursor)
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(self.cancel_btn)
+
+        self.save_btn = QPushButton("Save Project", self)
+        self.save_btn.setObjectName("primaryBtn")
+        self.save_btn.setCursor(Qt.PointingHandCursor)
+        self.save_btn.clicked.connect(self._on_save_clicked)
+        btn_row.addWidget(self.save_btn)
+
+        layout.addLayout(btn_row)
+
+    def _on_include_images_toggled(self, checked: bool):
+        self.warning_banner.setVisible(checked)
+        self.adjustSize()
+
+    def _on_browse_clicked(self):
+        cur_path = self.path_edit.text().strip()
+        init_dir = os.path.dirname(cur_path) if cur_path else ""
+        chosen, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Proximap Project",
+            cur_path or init_dir,
+            "Proximap Project (*.pxm)"
+        )
+        if chosen:
+            if not chosen.lower().endswith(".pxm"):
+                chosen += ".pxm"
+            self.path_edit.setText(chosen)
+
+    def _on_save_clicked(self):
+        path = self.path_edit.text().strip()
+        if not path:
+            QMessageBox.warning(self, "Invalid Destination", "Please specify a destination file path.")
+            return
+        if not path.lower().endswith(".pxm"):
+            path += ".pxm"
+        self.selected_file_path = path
+        self.accept()
+
+    def get_result(self):
+        return self.selected_file_path, self.include_images_check.isChecked()
+
+
 class SaveWorker(QThread):
     finished = Signal(bool, str) # Emits (success, message)
     
-    def __init__(self, mvs_dir, file_path):
+    def __init__(self, mvs_dir, file_path, include_images=False, colmap_images_dir=None, image_list=None):
         super().__init__()
         self.mvs_dir = mvs_dir
         self.file_path = file_path
+        self.include_images = include_images
+        self.colmap_images_dir = colmap_images_dir
+        self.image_list = image_list or []
         
     def run(self):
         import zipfile
         try:
             with zipfile.ZipFile(self.file_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-                for root, _, files in os.walk(self.mvs_dir):
-                    for file in files:
-                        full_path = os.path.join(root, file)
-                        rel_path = os.path.relpath(full_path, self.mvs_dir)
-                        zipf.write(full_path, rel_path)
-            self.finished.emit(True, "Project saved successfully.")
+                if self.include_images:
+                    # Write reconstruction assets under mvs/
+                    for root, _, files in os.walk(self.mvs_dir):
+                        for file in files:
+                            full_path = os.path.join(root, file)
+                            rel_path = os.path.relpath(full_path, self.mvs_dir)
+                            zip_path = os.path.join("mvs", rel_path)
+                            zipf.write(full_path, zip_path)
+                            
+                    # Write calibrated images under colmap/images/
+                    packed_images = 0
+                    if self.colmap_images_dir and os.path.isdir(self.colmap_images_dir):
+                        for root, _, files in os.walk(self.colmap_images_dir):
+                            for file in files:
+                                full_path = os.path.join(root, file)
+                                rel_path = os.path.relpath(full_path, self.colmap_images_dir)
+                                zip_path = os.path.join("colmap", "images", rel_path)
+                                zipf.write(full_path, zip_path)
+                                packed_images += 1
+                    elif self.image_list:
+                        for img_path in self.image_list:
+                            if os.path.isfile(img_path):
+                                fname = os.path.basename(img_path)
+                                zip_path = os.path.join("colmap", "images", fname)
+                                zipf.write(img_path, zip_path)
+                                packed_images += 1
+                    self.finished.emit(True, f"Project saved successfully with {packed_images} images included.")
+                else:
+                    for root, _, files in os.walk(self.mvs_dir):
+                        for file in files:
+                            full_path = os.path.join(root, file)
+                            rel_path = os.path.relpath(full_path, self.mvs_dir)
+                            zipf.write(full_path, rel_path)
+                    self.finished.emit(True, "Project saved successfully.")
         except Exception as e:
             self.finished.emit(False, str(e))
 
@@ -2174,19 +2386,33 @@ class LoadWorker(QThread):
         import zipfile
         import uuid
         try:
-            mvs_dir = os.path.join(self.temp_root, f"proximap_project_{uuid.uuid4()}")
-            os.makedirs(mvs_dir, exist_ok=True)
+            extract_dir = os.path.join(self.temp_root, f"proximap_project_{uuid.uuid4()}")
+            os.makedirs(extract_dir, exist_ok=True)
             
             with zipfile.ZipFile(self.file_path, 'r') as zipf:
-                zipf.extractall(mvs_dir)
+                zipf.extractall(extract_dir)
                 
-            # Verify if it extracted any valid reconstruction assets (scene.mvs, .ply, .obj, .glb, .gltf)
+            # Locate mvs assets
+            mvs_candidate = os.path.join(extract_dir, "mvs")
+            if os.path.isdir(mvs_candidate):
+                mvs_dir = mvs_candidate
+            else:
+                mvs_dir = extract_dir
+                
             found_asset = False
             for root, _, files in os.walk(mvs_dir):
                 if any(f.endswith((".mvs", ".ply", ".obj", ".glb", ".gltf")) for f in files):
                     found_asset = True
                     mvs_dir = root
                     break
+                    
+            if not found_asset:
+                for root, _, files in os.walk(extract_dir):
+                    if any(f.endswith((".mvs", ".ply", ".obj", ".glb", ".gltf")) for f in files):
+                        found_asset = True
+                        mvs_dir = root
+                        break
+                        
             if not found_asset:
                 self.finished.emit(False, "", "Invalid project file: No 3D model or reconstruction assets found in archive.")
                 return
@@ -2519,7 +2745,21 @@ class PhotosTabWidget(QWidget):
         # Toolbar
         self.toolbar = QFrame(self)
         self.toolbar.setFixedHeight(38)
-        self.toolbar.setStyleSheet("background-color: #1A1A1A; border-bottom: 1px solid #2B2B2B;")
+        self.toolbar.setStyleSheet("""
+            QFrame {
+                background-color: #1A1A1A;
+                border-bottom: 1px solid #2B2B2B;
+            }
+            QToolTip {
+                background-color: #242424;
+                color: #FFFFFF;
+                border: 1px solid #4D4D4D;
+                border-radius: 4px;
+                padding: 5px 8px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+        """)
         toolbar_layout = QHBoxLayout(self.toolbar)
         toolbar_layout.setContentsMargins(10, 4, 10, 4)
         toolbar_layout.setSpacing(6)
@@ -2527,25 +2767,55 @@ class PhotosTabWidget(QWidget):
         # Buttons matching reference UI functionality
         public_dir = os.path.join(get_base_dir(), "public")
         
-        self.btn_select_all = QPushButton("", self.toolbar)
-        self.btn_select_all.setIcon(QIcon(os.path.join(public_dir, "all.png")))
-        self.btn_select_all.setToolTip("Select All")
-        self.btn_select_all.setStyleSheet("QPushButton { padding: 4px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
-        
-        self.btn_deselect_all = QPushButton("", self.toolbar)
-        self.btn_deselect_all.setIcon(QIcon(os.path.join(public_dir, "none.png")))
-        self.btn_deselect_all.setToolTip("Deselect All")
-        self.btn_deselect_all.setStyleSheet("QPushButton { padding: 4px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
+        self.btn_select_all = QPushButton("Select All", self.toolbar)
+        self.btn_select_all.setToolTip("Select All Photos")
+        self.btn_select_all.setStyleSheet("""
+            QPushButton {
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: 500;
+                background-color: #242424;
+                color: #e0e0e0;
+                border: 1px solid #3A3A3A;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #333333;
+                border-color: #00E676;
+                color: #ffffff;
+            }
+        """)
+
+        self.btn_deselect_all = QPushButton("Deselect All", self.toolbar)
+        self.btn_deselect_all.setToolTip("Deselect All Photos")
+        self.btn_deselect_all.setStyleSheet("""
+            QPushButton {
+                padding: 4px 10px;
+                font-size: 11px;
+                font-weight: 500;
+                background-color: #242424;
+                color: #e0e0e0;
+                border: 1px solid #3A3A3A;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #333333;
+                border-color: #00E676;
+                color: #ffffff;
+            }
+        """)
         
         self.btn_remove_selected = QPushButton("", self.toolbar)
         self.btn_remove_selected.setIcon(QIcon(os.path.join(public_dir, "trash.png")))
         self.btn_remove_selected.setToolTip("Remove Selected")
         self.btn_remove_selected.setStyleSheet("QPushButton { padding: 4px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
         
+        add_photos_icon_path = os.path.join(get_base_dir(), "interface element", "add photos.svg")
         self.btn_add_photos = QPushButton("", self.toolbar)
-        self.btn_add_photos.setIcon(QIcon(os.path.join(public_dir, "folder.png")))
+        self.btn_add_photos.setIcon(QIcon(add_photos_icon_path))
+        self.btn_add_photos.setIconSize(QSize(20, 20))
         self.btn_add_photos.setToolTip("Add Files to Dataset (Images, Videos, Point Cloud)")
-        self.btn_add_photos.setStyleSheet("QPushButton { padding: 4px 8px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
+        self.btn_add_photos.setStyleSheet("QPushButton { padding: 4px; font-size: 12px; background-color: transparent; border: none; } QPushButton:hover { background-color: #333333; border-radius: 4px; }")
         
         self.btn_bg_remove = QPushButton("Remove BG", self.toolbar)
         self.btn_bg_remove.setToolTip("Remove image backgrounds offline model")
@@ -2628,12 +2898,30 @@ class PhotosTabWidget(QWidget):
         self.btn_deselect_all.clicked.connect(self.deselect_all)
         self.size_slider.valueChanged.connect(self.change_thumbnail_size)
         
+    def set_dataset_controls_enabled(self, enabled: bool):
+        """Enables or disables dataset modifying buttons (Delete, Add Photos, Remove BG)."""
+        self._dataset_controls_locked = not enabled
+        if hasattr(self, 'btn_remove_selected'):
+            self.btn_remove_selected.setEnabled(enabled)
+        if hasattr(self, 'btn_add_photos'):
+            self.btn_add_photos.setEnabled(enabled)
+        if hasattr(self, 'btn_bg_remove'):
+            if enabled:
+                image_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
+                has_2d = any(isinstance(p, str) and p.lower().endswith(image_exts) for p in (self.image_list or []))
+                self.btn_bg_remove.setEnabled(bool(self.image_list) and has_2d)
+            else:
+                self.btn_bg_remove.setEnabled(False)
+
     def set_images(self, image_paths):
         self.image_list = image_paths
         if hasattr(self, 'btn_bg_remove'):
-            image_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
-            has_2d_images = any(isinstance(p, str) and p.lower().endswith(image_exts) for p in (image_paths or []))
-            self.btn_bg_remove.setEnabled(bool(image_paths) and has_2d_images)
+            if not getattr(self, '_dataset_controls_locked', False):
+                image_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
+                has_2d_images = any(isinstance(p, str) and p.lower().endswith(image_exts) for p in (image_paths or []))
+                self.btn_bg_remove.setEnabled(bool(image_paths) and has_2d_images)
+            else:
+                self.btn_bg_remove.setEnabled(False)
         
         # 1. Stop any current loader thread
         if self.loader_thread and self.loader_thread.isRunning():
@@ -2966,6 +3254,7 @@ class MainWindow(QMainWindow):
         self.editor_tool_host = None
         self.transform_tool_window = None
         self.mesh_cleanup_tool_window = None
+        self._cumulative_mesh_transform = np.eye(4, dtype=np.float32)
         
         self.last_accessed_dir = os.path.expanduser("~")
         self.viewport_bg_color = '#0C0C0C'
@@ -3468,8 +3757,8 @@ class MainWindow(QMainWindow):
         self.custom_refine_scales_spin.setRange(1, 5)
         self.custom_refine_scales_spin.setValue(2)
         self.custom_refine_scales_stepper = SpinBoxStepper(self.custom_refine_scales_spin, self.custom_settings_container)
-        custom_grid.addWidget(lbl_refine_scales, 11, 0)
-        custom_grid.addWidget(self.custom_refine_scales_stepper, 11, 1)
+        custom_grid.addWidget(lbl_refine_scales, 12, 0)
+        custom_grid.addWidget(self.custom_refine_scales_stepper, 12, 1)
 
         # Texturing Resolution
         lbl_texture_res = QLabel("Texturing Res:", self.custom_settings_container)
@@ -3483,8 +3772,8 @@ class MainWindow(QMainWindow):
         ])
         self.custom_texture_res_combo.setCurrentIndex(1)
         self.custom_texture_res_combo.setStyleSheet("background-color: #1E1E1E; color: #ffffff; border: 1px solid #333333; border-radius: 3px; padding: 2px;")
-        custom_grid.addWidget(lbl_texture_res, 12, 0)
-        custom_grid.addWidget(self.custom_texture_res_combo, 12, 1)
+        custom_grid.addWidget(lbl_texture_res, 13, 0)
+        custom_grid.addWidget(self.custom_texture_res_combo, 13, 1)
         
         advanced_layout.addWidget(self.img_max_res_label)
         advanced_layout.addWidget(self.img_max_res_combo)
@@ -3616,7 +3905,7 @@ class MainWindow(QMainWindow):
         step2_layout.addWidget(self.advanced_panel)
         step2_layout.addWidget(self.standalone_panel)
 
-        self.process_btn = QPushButton("▶  Start Reconstruction", step2_box)
+        self.process_btn = QPushButton("Start Reconstruction", step2_box)
         self.process_btn.setObjectName("ProcessBtn")
         self.process_btn.setEnabled(False)
         self.process_btn.clicked.connect(self._start_processing)
@@ -3792,6 +4081,17 @@ class MainWindow(QMainWindow):
         self.transform_tool_window.transform_reset.connect(self._on_cloud_transform_reset)
 
         self.mesh_cleanup_tool_window = MeshCleanupToolWindow()
+        self.mesh_cleanup_tool_window.apply_reduction_requested.connect(self._on_mesh_face_reduction_apply)
+        self.mesh_cleanup_tool_window.revert_requested.connect(self._on_mesh_face_reduction_revert)
+        self.mesh_cleanup_tool_window.apply_close_holes_requested.connect(self._on_mesh_close_holes_apply)
+        self.mesh_cleanup_tool_window.revert_close_holes_requested.connect(self._on_mesh_close_holes_revert)
+        self.mesh_cleanup_tool_window.apply_repair_nonmanifold_requested.connect(self._on_mesh_repair_nonmanifold_apply)
+        self.mesh_cleanup_tool_window.revert_repair_nonmanifold_requested.connect(self._on_mesh_repair_nonmanifold_revert)
+        self.mesh_cleanup_tool_window.apply_remove_duplicates_requested.connect(self._on_mesh_remove_duplicates_apply)
+        self.mesh_cleanup_tool_window.revert_remove_duplicates_requested.connect(self._on_mesh_remove_duplicates_revert)
+        self.mesh_cleanup_tool_window.retexture_requested.connect(self._on_retexture_mesh_tool)
+        if hasattr(self, 'mc_max_hole_spin') and self.mc_max_hole_spin:
+            self.mesh_cleanup_tool_window.initial_hole_size = self.mc_max_hole_spin.value()
 
         self.floating_toolbox.register_tool(self.transform_tool_window)
         self.floating_toolbox.register_tool(self.mesh_cleanup_tool_window)
@@ -4208,6 +4508,11 @@ class MainWindow(QMainWindow):
         self.console_text.append("[START] Starting fresh reconstruction from beginning...")
         self._start_processing(resume_from_step=None)
 
+    def _set_dataset_modification_controls_enabled(self, enabled: bool):
+        """Enables or disables dataset modifying buttons (Delete, Add Photos, Remove BG) during reconstruction."""
+        if hasattr(self, 'photos_tab') and self.photos_tab is not None:
+            self.photos_tab.set_dataset_controls_enabled(enabled)
+
     def _set_process_btn_state(self, state: str):
         """
         Dynamically updates process button colors, text, and enabled state.
@@ -4217,8 +4522,13 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             pass
 
+        if state == "progress":
+            self._set_dataset_modification_controls_enabled(False)
+        else:
+            self._set_dataset_modification_controls_enabled(True)
+
         if state == "idle":
-            self.process_btn.setText("▶  Start Reconstruction")
+            self.process_btn.setText("Start Reconstruction")
             self.process_btn.setEnabled(False)
             self.process_btn.clicked.connect(self._start_processing)
             if hasattr(self, 'resume_hint_label'):
@@ -4233,7 +4543,7 @@ class MainWindow(QMainWindow):
                 }
             """)
         elif state == "ready":
-            self.process_btn.setText("▶  Start Reconstruction")
+            self.process_btn.setText("Start Reconstruction")
             self.process_btn.setEnabled(True)
             self.process_btn.clicked.connect(self._start_processing)
             if hasattr(self, 'resume_hint_label'):
@@ -4551,8 +4861,29 @@ class MainWindow(QMainWindow):
                 width: 14px;
                 height: 14px;
             }
+            QToolTip {
+                background-color: #242424;
+                color: #FFFFFF;
+                border: 1px solid #4D4D4D;
+                border-radius: 4px;
+                padding: 5px 8px;
+                font-size: 11px;
+                font-weight: 500;
+            }
         """
         self.setStyleSheet(qss)
+        if QApplication.instance():
+            QApplication.instance().setStyleSheet("""
+                QToolTip {
+                    background-color: #242424;
+                    color: #FFFFFF;
+                    border: 1px solid #4D4D4D;
+                    border-radius: 4px;
+                    padding: 5px 8px;
+                    font-size: 11px;
+                    font-weight: 500;
+                }
+            """)
 
     def _detect_and_update_camera_info(self, image_list: list = None, video_list: list = None) -> str:
         """Scans image EXIF to extract camera make & model. Video files remain Undetected."""
@@ -4748,7 +5079,7 @@ class MainWindow(QMainWindow):
             self.photos_tab.setEnabled(False)
         
         self.progress_bar.setValue(0)
-        self.status_label.setText("Starting background removal (silueta.onnx)...")
+        self.status_label.setText("Initializing background removal...")
         
         out_dir = os.path.join(get_reconstruction_out_dir(), "bg_removed_images")
         
@@ -4759,7 +5090,7 @@ class MainWindow(QMainWindow):
         self.bg_worker.log_message.connect(self._append_log)
         self.bg_worker.finished.connect(self._on_bg_removal_finished)
         
-        self.console_text.append(f"[START] Initializing background removal worker thread (silueta.onnx)...")
+        self.console_text.append("[START] Initializing background removal worker thread...")
         self.bg_worker.start()
 
     def _on_bg_removal_finished(self, success: bool, updated_list: list, message: str):
@@ -4993,6 +5324,7 @@ class MainWindow(QMainWindow):
             return
 
         self.last_accessed_dir = os.path.dirname(file_path)
+        self._cumulative_mesh_transform = np.eye(4, dtype=np.float32)
 
         # Standalone point clouds are not photogrammetry datasets; clear any existing session backups
         clear_backup_dir()
@@ -5518,6 +5850,7 @@ class MainWindow(QMainWindow):
             
         # Terminate any active viewer to prevent lock conflict on MVS files during reconstruction
         self._terminate_viewer()
+        self._cumulative_mesh_transform = np.eye(4, dtype=np.float32)
 
         
         self._set_process_btn_state("progress")
@@ -5526,6 +5859,7 @@ class MainWindow(QMainWindow):
         self.browse_files_btn.setEnabled(False)
         self.browse_btn.setEnabled(False)
         self.mobile_import_btn.setEnabled(False)
+        self._set_dataset_modification_controls_enabled(False)
         self._set_export_actions_enabled(False)
         # self.ref_cloud_btn.setEnabled(False)
         # self.ref_cloud_clear_btn.setEnabled(False)
@@ -5745,6 +6079,7 @@ class MainWindow(QMainWindow):
         self.browse_files_btn.setEnabled(True)
         self.browse_btn.setEnabled(True)
         self.mobile_import_btn.setEnabled(True)
+        self._set_dataset_modification_controls_enabled(True)
         self.gpu_combo.setEnabled(True)
         if hasattr(self, 'recon_mode_combo'):
             self.recon_mode_combo.setEnabled(True)
@@ -5891,6 +6226,7 @@ class MainWindow(QMainWindow):
         self.browse_files_btn.setEnabled(True)
         self.browse_btn.setEnabled(True)
         self.mobile_import_btn.setEnabled(True)
+        self._set_dataset_modification_controls_enabled(True)
         self.gpu_combo.setEnabled(True)
         self.auto_cleanup_checkbox.setEnabled(True)
         if hasattr(self, 'manhattan_align_checkbox'):
@@ -6285,6 +6621,14 @@ class MainWindow(QMainWindow):
                     if "close_holes" in clean_p and hasattr(self, 'mc_close_holes_check'):
                         self.mc_close_holes_check.setChecked(bool(clean_p["close_holes"]))
 
+            if "cumulative_mesh_transform" in meta:
+                try:
+                    self._cumulative_mesh_transform = np.array(meta["cumulative_mesh_transform"], dtype=np.float32)
+                except Exception:
+                    self._cumulative_mesh_transform = np.eye(4, dtype=np.float32)
+            else:
+                self._cumulative_mesh_transform = np.eye(4, dtype=np.float32)
+
         # Enable view scene button and set mode
         mvs_dir = os.path.join(out_dir, "mvs")
         self.viewer_widget.set_mvs_directory(mvs_dir)
@@ -6340,12 +6684,12 @@ class MainWindow(QMainWindow):
             self.console_text.append("[ERROR] No active 3D reconstruction session to save.")
             return
             
-        file_path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save Project File",
-            self.last_accessed_dir,
-            "Proximap Project (*.pxm)"
-        )
+        default_file = os.path.join(self.last_accessed_dir or os.path.expanduser("~"), "project.pxm")
+        save_dlg = SaveProjectDialog(default_file, self)
+        if save_dlg.exec_() != QDialog.Accepted:
+            return
+            
+        file_path, include_images = save_dlg.get_result()
         if not file_path:
             return
             
@@ -6353,12 +6697,30 @@ class MainWindow(QMainWindow):
             file_path += ".pxm"
             
         self.last_accessed_dir = os.path.dirname(file_path)
-        self.console_text.append(f"[SAVE] Packing reconstruction assets from {mvs_dir} to {file_path}...")
         
-        self.save_dialog = ProjectProgressDialog("Saving Project", "Compressing assets and saving project file...", self)
+        # Locate colmap/images directory
+        colmap_images_dir = os.path.join(os.path.dirname(mvs_dir), "colmap", "images")
+        if not os.path.isdir(colmap_images_dir):
+            rec_out = get_reconstruction_out_dir()
+            candidate = os.path.join(rec_out, "colmap", "images")
+            if os.path.isdir(candidate):
+                colmap_images_dir = candidate
+            else:
+                colmap_images_dir = None
+                
+        status_msg = "Compressing assets and images into project file..." if include_images else "Compressing assets and saving project file..."
+        self.console_text.append(f"[SAVE] Packing reconstruction assets (images={'ON' if include_images else 'OFF'}) from {mvs_dir} to {file_path}...")
+        
+        self.save_dialog = ProjectProgressDialog("Saving Project", status_msg, self)
         self.save_dialog.show()
         
-        self.save_worker = SaveWorker(mvs_dir, file_path)
+        self.save_worker = SaveWorker(
+            mvs_dir=mvs_dir,
+            file_path=file_path,
+            include_images=include_images,
+            colmap_images_dir=colmap_images_dir,
+            image_list=getattr(self, 'image_list', [])
+        )
         self.save_worker.finished.connect(self._on_save_finished)
         self.save_worker.start()
 
@@ -6433,6 +6795,30 @@ class MainWindow(QMainWindow):
         if path:
             self._reload_viewer(path)
             
+        # Check if project included unpacked images
+        parent_dir = os.path.dirname(mvs_dir)
+        possible_img_dirs = [
+            os.path.join(parent_dir, "colmap", "images"),
+            os.path.join(mvs_dir, "colmap", "images"),
+            os.path.join(mvs_dir, "images")
+        ]
+        found_imgs = []
+        image_exts = ('.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp')
+        for d in possible_img_dirs:
+            if os.path.isdir(d):
+                imgs = [os.path.join(d, f) for f in sorted(os.listdir(d)) if f.lower().endswith(image_exts)]
+                if imgs:
+                    found_imgs = imgs
+                    break
+        if found_imgs:
+            self.image_list = found_imgs
+            self.img_count_label.setText(f"Images Loaded: {len(self.image_list)}")
+            if hasattr(self, 'photos_tab'):
+                self.photos_tab.set_images(self.image_list)
+            self._detect_and_update_camera_info(self.image_list)
+            self._set_process_btn_state("ready")
+            self.console_text.append(f"[LOAD] Loaded {len(found_imgs)} reconstruction photos into project.")
+
         self._update_file_menu_states()
 
     def _new_project(self):
@@ -7191,6 +7577,7 @@ class MainWindow(QMainWindow):
         self.canvas.update()
         if hasattr(self, 'editor_tool_host') and self.editor_tool_host is not None:
             self.editor_tool_host.refresh_data_state()
+        self._sync_active_transform_to_viewport()
 
     def _on_selection_mode_changed(self, mode_name: str):
         """Triggered when user selects a mode from the Select dropdown in the 3D Reconstruction window."""
@@ -7533,8 +7920,9 @@ class MainWindow(QMainWindow):
                     tr = self.transform_gizmo.trans_lines.transforms.get_transform('visual', 'canvas')
                     hit = self.transform_gizmo.hit_test(event.pos, tr)
                     if hit:
-                        self.transform_gizmo.start_drag(hit, event.pos)
+                        self.transform_gizmo.start_drag(hit, event.pos, tr)
                         self.view.camera.interactive = False
+                        self.canvas.update()
                         return
             except Exception:
                 pass
@@ -7567,16 +7955,20 @@ class MainWindow(QMainWindow):
 
     def _on_canvas_mouse_move(self, event):
         """Update 3D transform gizmo or crop box bounds during mouse drag."""
-        # 1. Combined Transform Gizmo drag
-        if hasattr(self, 'transform_gizmo') and self.transform_gizmo is not None and self.transform_gizmo.is_dragging:
+        # 1. Combined Transform Gizmo drag & hover
+        if hasattr(self, 'transform_gizmo') and self.transform_gizmo is not None and self.transform_gizmo.visible:
             try:
                 if self.transform_gizmo.trans_lines is not None:
                     tr = self.transform_gizmo.trans_lines.transforms.get_transform('visual', 'canvas')
-                    new_pos, new_rot = self.transform_gizmo.update_drag(event.pos, tr, camera=self.view.camera)
-                    if new_pos is not None and hasattr(self, 'transform_tool_window') and self.transform_tool_window is not None:
-                        self.transform_tool_window.set_transform_values(pos=new_pos, rot=new_rot)
-                    self.canvas.update()
-                    return
+                    if self.transform_gizmo.is_dragging:
+                        new_pos, new_rot = self.transform_gizmo.update_drag(event.pos, tr, camera=self.view.camera)
+                        if new_pos is not None and hasattr(self, 'transform_tool_window') and self.transform_tool_window is not None:
+                            self.transform_tool_window.set_transform_values(pos=new_pos, rot=new_rot)
+                        self.canvas.update()
+                        return
+                    else:
+                        hovered = self.transform_gizmo.hit_test(event.pos, tr)
+                        self.transform_gizmo.set_hover(hovered)
             except Exception:
                 pass
 
@@ -7786,6 +8178,7 @@ class MainWindow(QMainWindow):
         """Opens the Unity-style Transform tool in the attached floating toolbox."""
         if hasattr(self, 'editor_tool_host') and hasattr(self, 'transform_tool_window'):
             self.editor_tool_host.open_tool(self.transform_tool_window)
+            self._sync_active_transform_to_viewport()
             self.console_text.append("[TOOLS] Opened Transform tool window.")
 
     def _get_point_cloud_marker_colors(self):
@@ -7809,10 +8202,12 @@ class MainWindow(QMainWindow):
         transformed_pts = (self._current_points @ R.T) + t
         
         if hasattr(self, 'markers_visual') and self.markers_visual is not None:
+            mode = self.viewer_widget.mode_select.currentIndex() if hasattr(self, 'viewer_widget') else 1
+            point_size = 4 if mode == 0 else 2
             self.markers_visual.set_data(
                 pos=transformed_pts.astype(np.float32),
                 face_color=self._get_point_cloud_marker_colors(),
-                size=2,
+                size=point_size,
                 edge_width=0
             )
 
@@ -7829,6 +8224,8 @@ class MainWindow(QMainWindow):
                 vertex_colors=mesh_colors,
                 color='white'
             )
+            self._last_wf_vertices = transformed_pts.astype(np.float32)
+            self._apply_shading_mode_to_mesh()
             
         # Keep gizmo visual transform in sync if visible and not dragging
         if hasattr(self, 'transform_gizmo') and self.transform_gizmo is not None and self.transform_gizmo.visible:
@@ -7840,6 +8237,18 @@ class MainWindow(QMainWindow):
 
         self._update_ground_grid(transformed_pts)
         self.canvas.update()
+
+    def _sync_active_transform_to_viewport(self):
+        """Immediately syncs the active Transform tool values (position/rotation) to the current viewport visual."""
+        if self._current_points is not None and len(self._current_points) > 0:
+            pivot = np.mean(self._current_points, axis=0)
+            if hasattr(self, 'transform_gizmo') and self.transform_gizmo is not None:
+                self.transform_gizmo.set_pivot(pivot)
+
+            if hasattr(self, 'transform_tool_window') and self.transform_tool_window is not None:
+                if self.transform_tool_window.has_unapplied_changes():
+                    T_mat = self.transform_tool_window.get_transform_matrix()
+                    self._on_cloud_transform_preview(T_mat)
 
     def _on_cloud_transform_reset(self):
         """Reverts point cloud or mesh viewport display back to original untransformed coordinates."""
@@ -7884,6 +8293,11 @@ class MainWindow(QMainWindow):
             
         R = T_mat[:3, :3]
         t = T_mat[:3, 3]
+
+        # Track cumulative transformation relative to reconstruction camera coordinates
+        if not hasattr(self, '_cumulative_mesh_transform') or self._cumulative_mesh_transform is None:
+            self._cumulative_mesh_transform = np.eye(4, dtype=np.float32)
+        self._cumulative_mesh_transform = T_mat @ self._cumulative_mesh_transform
         
         # Bake transformation
         self._current_points = (self._current_points @ R.T) + t
@@ -7892,10 +8306,12 @@ class MainWindow(QMainWindow):
             self._raw_points = (self._raw_points @ R.T) + t
             
         if hasattr(self, 'markers_visual') and self.markers_visual is not None:
+            mode = self.viewer_widget.mode_select.currentIndex() if hasattr(self, 'viewer_widget') else 1
+            point_size = 4 if mode == 0 else 2
             self.markers_visual.set_data(
                 pos=self._current_points.astype(np.float32),
                 face_color=self._get_point_cloud_marker_colors(),
-                size=2,
+                size=point_size,
                 edge_width=0
             )
 
@@ -7912,9 +8328,10 @@ class MainWindow(QMainWindow):
                 vertex_colors=mesh_colors,
                 color='white'
             )
+            self._last_wf_vertices = self._current_points.astype(np.float32)
+            self._apply_shading_mode_to_mesh()
             
         if hasattr(self, 'transform_gizmo') and self.transform_gizmo is not None:
-            import numpy as np
             pivot = np.mean(self._current_points, axis=0) if self._current_points is not None and len(self._current_points) > 0 else np.zeros(3)
             self.transform_gizmo.set_pivot(pivot)
             self.transform_gizmo.set_transform(position=(0.0, 0.0, 0.0), rotation=(0.0, 0.0, 0.0))
@@ -7925,20 +8342,617 @@ class MainWindow(QMainWindow):
         # Save to disk
         from point_cloud_io import save_transformed_point_cloud
         saved_target = None
+        mvs_dir = self.viewer_widget.current_mvs_dir if hasattr(self, 'viewer_widget') else None
+        if not mvs_dir:
+            mvs_dir = self._get_active_mvs_dir()
+
         if hasattr(self, 'standalone_cloud_path') and self.standalone_cloud_path and os.path.isfile(self.standalone_cloud_path):
             save_transformed_point_cloud(self.standalone_cloud_path, self._current_points, colors=self._current_colors)
             saved_target = os.path.basename(self.standalone_cloud_path)
-        elif hasattr(self, 'viewer_widget') and self.viewer_widget.current_mvs_dir:
-            dense_path = os.path.join(self.viewer_widget.current_mvs_dir, "scene_dense.ply")
+        elif mvs_dir and os.path.isdir(mvs_dir):
+            dense_path = os.path.join(mvs_dir, "scene_dense.ply")
             if os.path.exists(dense_path):
                 save_transformed_point_cloud(dense_path, self._current_points, colors=self._current_colors)
                 saved_target = "scene_dense.ply"
-                
+
+            # Transform active textured mesh files on disk in-place so disk models match the viewport
+            obj_path = os.path.join(mvs_dir, "scene_dense_mesh_texture.obj")
+            if os.path.exists(obj_path):
+                self._apply_transform_to_obj_file(obj_path, T_mat)
+            ply_tex_path = os.path.join(mvs_dir, "scene_dense_mesh_texture.ply")
+            if os.path.exists(ply_tex_path):
+                self._apply_transform_to_ply_file(ply_tex_path, T_mat)
+
+            # Invalidate stale GLB cache so next export re-converts the transformed OBJ
+            glb_path = os.path.join(mvs_dir, "scene_dense_mesh_texture.glb")
+            if os.path.exists(glb_path):
+                try:
+                    os.remove(glb_path)
+                except Exception:
+                    pass
+
+        # Update cleanup backup data and file on disk so future Revert actions respect the new position
+        if mvs_dir and os.path.isdir(mvs_dir):
+            backup_ply = os.path.join(mvs_dir, "scene_dense_mesh_cleanup_backup.ply")
+            if hasattr(self, '_cleanup_backup_points') and self._cleanup_backup_points is not None:
+                self._cleanup_backup_points = (self._cleanup_backup_points @ R.T) + t
+                if os.path.exists(backup_ply):
+                    try:
+                        self._export_temp_mesh_ply(
+                            self._cleanup_backup_points,
+                            self._cleanup_backup_faces,
+                            self._cleanup_backup_colors,
+                            backup_ply
+                        )
+                    except Exception as bkp_err:
+                        self.console_text.append(f"[WARNING] Could not update backup PLY coordinates: {bkp_err}")
+            elif os.path.exists(backup_ply) and self._current_points is not None and self._current_faces is not None:
+                try:
+                    self._export_temp_mesh_ply(
+                        self._current_points,
+                        self._current_faces,
+                        self._current_colors,
+                        backup_ply
+                    )
+                except Exception:
+                    pass
+
+            # Also update legacy preop backup if present
+            preop_backup = os.path.join(mvs_dir, "scene_dense_mesh_preop_backup.ply")
+            if os.path.exists(preop_backup) and self._current_points is not None and self._current_faces is not None:
+                try:
+                    self._export_temp_mesh_ply(
+                        self._current_points,
+                        self._current_faces,
+                        self._current_colors,
+                        preop_backup
+                    )
+                except Exception:
+                    pass
+
+            # Update session recovery backup if working in the active reconstruction session
+            try:
+                import shutil
+                active_rec_mvs = os.path.normpath(os.path.join(get_reconstruction_out_dir(), "mvs"))
+                if os.path.normpath(mvs_dir) == active_rec_mvs:
+                    backup_mvs = os.path.join(get_backup_dir(), "mvs")
+                    if os.path.isdir(backup_mvs):
+                        dense_src = os.path.join(mvs_dir, "scene_dense.ply")
+                        if os.path.isfile(dense_src):
+                            shutil.copy2(dense_src, os.path.join(backup_mvs, "scene_dense.ply"))
+                        obj_src = os.path.join(mvs_dir, "scene_dense_mesh_texture.obj")
+                        if os.path.isfile(obj_src):
+                            shutil.copy2(obj_src, os.path.join(backup_mvs, "scene_dense_mesh_texture.obj"))
+                        ply_tex_src = os.path.join(mvs_dir, "scene_dense_mesh_texture.ply")
+                        if os.path.isfile(ply_tex_src):
+                            shutil.copy2(ply_tex_src, os.path.join(backup_mvs, "scene_dense_mesh_texture.ply"))
+                        backup_glb = os.path.join(backup_mvs, "scene_dense_mesh_texture.glb")
+                        if os.path.exists(backup_glb):
+                            try:
+                                os.remove(backup_glb)
+                            except Exception:
+                                pass
+
+                        meta = load_session_metadata() or {}
+                        meta["cumulative_mesh_transform"] = self._cumulative_mesh_transform.tolist()
+                        save_session_metadata(meta)
+                        self.console_text.append("[BACKUP] Synced transformed model to session recovery backup.")
+            except Exception as e:
+                self.console_text.append(f"[WARNING] Could not sync transform to session backup: {e}")
+
         if saved_target:
             self.console_text.append(f"[SUCCESS] Model transformed and saved to '{saved_target}'.")
             self.status_label.setText(f"Transformed & saved to {saved_target}")
         else:
             self.console_text.append("[SUCCESS] Model transformation applied in viewport.")
+
+        # Close the transform tool window once transform is baked
+        if hasattr(self, 'editor_tool_host') and self.editor_tool_host is not None:
+            self.editor_tool_host.close_tool()
+
+    def _on_mesh_face_reduction_apply(self, reduction_pct: float):
+        """Executes Face Reduction via PyMeshLab (with Open3D fallback) and updates the active mesh in VisPy."""
+        if self._current_points is None or len(self._current_points) == 0 or self._current_faces is None or len(self._current_faces) == 0:
+            QMessageBox.warning(self, "No Mesh Available", "Please load or reconstruct a 3D textured mesh before applying Face Reduction.")
+            return
+
+        mvs_dir = self.viewer_widget.current_mvs_dir or os.path.join(get_reconstruction_out_dir(), "mvs")
+        os.makedirs(mvs_dir, exist_ok=True)
+
+        tool_in_ply = os.path.join(mvs_dir, "scene_dense_mesh_cleanup_in.ply")
+        tool_out_ply = os.path.join(mvs_dir, "scene_dense_mesh_cleanup_out.ply")
+        backup_ply = os.path.join(mvs_dir, "scene_dense_mesh_cleanup_backup.ply")
+
+        # Create pre-operation backup for instant revert
+        self._export_temp_mesh_ply(self._current_points, self._current_faces, self._current_colors, backup_ply)
+        self._cleanup_backup_points = np.copy(self._current_points) if self._current_points is not None else None
+        self._cleanup_backup_faces = np.copy(self._current_faces) if self._current_faces is not None else None
+        self._cleanup_backup_colors = np.copy(self._current_colors) if self._current_colors is not None else None
+        self._cleanup_backup_texcoords = np.copy(self._current_texcoords) if self._current_texcoords is not None else None
+        self._cleanup_backup_texture_path = self._current_texture_path
+
+        # Export working mesh to in_ply
+        self._export_temp_mesh_ply(self._current_points, self._current_faces, self._current_colors, tool_in_ply)
+
+        # Show non-blocking progress dialog
+        self._cleanup_progress_dialog = ProjectProgressDialog(
+            "Mesh Face Reduction",
+            f"Reducing mesh faces by {int(reduction_pct)}%...\nPlease wait.",
+            self
+        )
+        self._cleanup_progress_dialog.show()
+
+        if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+            self.mesh_cleanup_tool_window.set_busy(True)
+
+        cleanup_params = {
+            "enable_reduction": True,
+            "target_reduction_pct": reduction_pct,
+            "remove_duplicates": False,
+            "repair_nonmanifold": False,
+            "close_holes": False
+        }
+
+        from pipeline_manager import MeshOperationWorker
+        self._cleanup_decimation_worker = MeshOperationWorker("cleanup", tool_in_ply, tool_out_ply, cleanup_params, parent=self)
+        self._cleanup_decimation_worker.log_message.connect(self._append_log)
+        self._cleanup_decimation_worker.finished.connect(
+            lambda ok, out_path, msg: self._on_mesh_face_reduction_finished(ok, out_path, msg, reduction_pct)
+        )
+        self._cleanup_decimation_worker.start()
+
+    def _on_mesh_face_reduction_finished(self, success: bool, output_ply: str, msg: str, reduction_pct: float):
+        """Called when Mesh Face Reduction worker completes."""
+        if hasattr(self, '_cleanup_progress_dialog') and self._cleanup_progress_dialog:
+            self._cleanup_progress_dialog.accept()
+            self._cleanup_progress_dialog = None
+
+        if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+            self.mesh_cleanup_tool_window.set_busy(False)
+
+        if success and output_ply and os.path.isfile(output_ply):
+            pts, cls, fcs = _read_ply_static(output_ply)
+            if pts is not None and len(pts) > 0 and fcs is not None and len(fcs) > 0:
+                init_faces = len(self._current_faces) if self._current_faces is not None else 0
+                new_faces = len(fcs)
+                init_verts = len(self._current_points) if self._current_points is not None else 0
+                new_verts = len(pts)
+
+                self._current_points = pts
+                self._current_faces = fcs
+                self._current_colors = cls
+                self._last_points = pts
+
+                # Re-render in VisPy without resetting camera position
+                self._render_in_vispy_from_data(
+                    pts, cls, fcs,
+                    self._current_texcoords, self._current_texture_path,
+                    mode=2, reset_camera=False
+                )
+                self._sync_active_transform_to_viewport()
+
+                if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+                    self.mesh_cleanup_tool_window.set_revert_enabled(True)
+
+                pct_achieved = ((init_faces - new_faces) / init_faces * 100.0) if init_faces > 0 else reduction_pct
+                status_msg = f"[CLEANUP] Face Reduction complete: {init_faces:,} → {new_faces:,} faces ({pct_achieved:.1f}% reduction, {new_verts:,} vertices)."
+                self.console_text.append(status_msg)
+                self.status_label.setText(f"Face Reduction: {new_faces:,} faces ({pct_achieved:.1f}% reduced)")
+            else:
+                self.console_text.append("[ERROR] Face reduction produced empty geometry.")
+                QMessageBox.warning(self, "Face Reduction Failed", "Mesh decimation did not produce valid geometry.")
+        else:
+            self.console_text.append(f"[ERROR] Face reduction failed: {msg}")
+            QMessageBox.warning(self, "Face Reduction Failed", f"Decimation failed:\n{msg}")
+
+    def _on_mesh_face_reduction_revert(self):
+        """Restores original pre-reduction mesh geometry."""
+        if hasattr(self, '_cleanup_backup_points') and self._cleanup_backup_points is not None:
+            self._current_points = np.copy(self._cleanup_backup_points)
+            self._current_faces = np.copy(self._cleanup_backup_faces) if self._cleanup_backup_faces is not None else None
+            self._current_colors = np.copy(self._cleanup_backup_colors) if self._cleanup_backup_colors is not None else None
+            self._current_texcoords = np.copy(self._cleanup_backup_texcoords) if self._cleanup_backup_texcoords is not None else None
+            self._current_texture_path = self._cleanup_backup_texture_path
+            self._last_points = self._current_points
+
+            self._render_in_vispy_from_data(
+                self._current_points, self._current_colors, self._current_faces,
+                self._current_texcoords, self._current_texture_path,
+                mode=2, reset_camera=False
+            )
+            self._sync_active_transform_to_viewport()
+
+            if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+                self.mesh_cleanup_tool_window.set_revert_enabled(False)
+
+            num_f = len(self._current_faces) if self._current_faces is not None else 0
+            num_v = len(self._current_points) if self._current_points is not None else 0
+            self.console_text.append("[CLEANUP] Reverted mesh to original geometry ({num_v:,} vertices, {num_f:,} faces).")
+            self.status_label.setText("Mesh restored to original state.")
+        else:
+            self.console_text.append("[WARNING] No previous mesh backup found to revert.")
+
+    def _on_mesh_close_holes_apply(self, max_hole_size: int):
+        """Executes Close Mesh Holes via PyMeshLab and updates the active mesh in VisPy."""
+        if self._current_points is None or len(self._current_points) == 0 or self._current_faces is None or len(self._current_faces) == 0:
+            QMessageBox.warning(self, "No Mesh Available", "Please load or reconstruct a 3D textured mesh before applying Close Holes.")
+            return
+
+        mvs_dir = self.viewer_widget.current_mvs_dir or os.path.join(get_reconstruction_out_dir(), "mvs")
+        os.makedirs(mvs_dir, exist_ok=True)
+
+        tool_in_ply = os.path.join(mvs_dir, "scene_dense_mesh_cleanup_in.ply")
+        tool_out_ply = os.path.join(mvs_dir, "scene_dense_mesh_cleanup_out.ply")
+        backup_ply = os.path.join(mvs_dir, "scene_dense_mesh_cleanup_backup.ply")
+
+        # Create pre-operation backup for instant revert
+        self._export_temp_mesh_ply(self._current_points, self._current_faces, self._current_colors, backup_ply)
+        self._cleanup_backup_points = np.copy(self._current_points) if self._current_points is not None else None
+        self._cleanup_backup_faces = np.copy(self._current_faces) if self._current_faces is not None else None
+        self._cleanup_backup_colors = np.copy(self._current_colors) if self._current_colors is not None else None
+        self._cleanup_backup_texcoords = np.copy(self._current_texcoords) if self._current_texcoords is not None else None
+        self._cleanup_backup_texture_path = self._current_texture_path
+
+        # Export working mesh to in_ply
+        self._export_temp_mesh_ply(self._current_points, self._current_faces, self._current_colors, tool_in_ply)
+
+        # Show non-blocking progress dialog
+        self._cleanup_progress_dialog = ProjectProgressDialog(
+            "Close Mesh Holes",
+            f"Closing mesh holes up to {int(max_hole_size)} faces...\nPlease wait.",
+            self
+        )
+        self._cleanup_progress_dialog.show()
+
+        if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+            self.mesh_cleanup_tool_window.set_busy(True)
+
+        cleanup_params = {
+            "enable_reduction": False,
+            "target_reduction_pct": 0,
+            "remove_duplicates": False,
+            "repair_nonmanifold": False,
+            "close_holes": True,
+            "max_hole_size": int(max_hole_size)
+        }
+
+        # Keep tool menu spin box in sync if it exists
+        if hasattr(self, 'mc_max_hole_spin') and self.mc_max_hole_spin:
+            self.mc_max_hole_spin.blockSignals(True)
+            self.mc_max_hole_spin.setValue(int(max_hole_size))
+            self.mc_max_hole_spin.blockSignals(False)
+
+        from pipeline_manager import MeshOperationWorker
+        self._cleanup_holes_worker = MeshOperationWorker("cleanup", tool_in_ply, tool_out_ply, cleanup_params, parent=self)
+        self._cleanup_holes_worker.log_message.connect(self._append_log)
+        self._cleanup_holes_worker.finished.connect(
+            lambda ok, out_path, msg: self._on_mesh_close_holes_finished(ok, out_path, msg, max_hole_size)
+        )
+        self._cleanup_holes_worker.start()
+
+    def _on_mesh_close_holes_finished(self, success: bool, output_ply: str, msg: str, max_hole_size: int):
+        """Called when Close Mesh Holes worker completes."""
+        if hasattr(self, '_cleanup_progress_dialog') and self._cleanup_progress_dialog:
+            self._cleanup_progress_dialog.accept()
+            self._cleanup_progress_dialog = None
+
+        if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+            self.mesh_cleanup_tool_window.set_busy(False)
+
+        if success and output_ply and os.path.isfile(output_ply):
+            pts, cls, fcs = _read_ply_static(output_ply)
+            if pts is not None and len(pts) > 0 and fcs is not None and len(fcs) > 0:
+                init_faces = len(self._current_faces) if self._current_faces is not None else 0
+                new_faces = len(fcs)
+                init_verts = len(self._current_points) if self._current_points is not None else 0
+                new_verts = len(pts)
+
+                self._current_points = pts
+                self._current_faces = fcs
+                self._current_colors = cls
+                self._last_points = pts
+
+                # Re-render in VisPy without resetting camera position
+                self._render_in_vispy_from_data(
+                    pts, cls, fcs,
+                    self._current_texcoords, self._current_texture_path,
+                    mode=2, reset_camera=False
+                )
+                self._sync_active_transform_to_viewport()
+
+                if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+                    self.mesh_cleanup_tool_window.set_holes_revert_enabled(True)
+
+                faces_diff = new_faces - init_faces
+                diff_str = f"+{faces_diff:,} faces added" if faces_diff >= 0 else f"{faces_diff:,} faces"
+                status_msg = f"[CLEANUP] Close Holes complete: {init_faces:,} → {new_faces:,} faces ({diff_str}, {new_verts:,} vertices). Click 'Retexture' to project textures or 'Revert' to undo."
+                self.console_text.append(status_msg)
+                self.status_label.setText(f"Close Holes: {new_faces:,} faces ({diff_str})")
+            else:
+                self.console_text.append("[ERROR] Close holes produced empty geometry.")
+                QMessageBox.warning(self, "Close Holes Failed", "Mesh hole closing did not produce valid geometry.")
+        else:
+            self.console_text.append(f"[ERROR] Close holes failed: {msg}")
+            QMessageBox.warning(self, "Close Holes Failed", f"Close holes failed:\n{msg}")
+
+    def _on_mesh_close_holes_revert(self):
+        """Restores original pre-hole-closing mesh geometry."""
+        if hasattr(self, '_cleanup_backup_points') and self._cleanup_backup_points is not None:
+            self._current_points = np.copy(self._cleanup_backup_points)
+            self._current_faces = np.copy(self._cleanup_backup_faces) if self._cleanup_backup_faces is not None else None
+            self._current_colors = np.copy(self._cleanup_backup_colors) if self._cleanup_backup_colors is not None else None
+            self._current_texcoords = np.copy(self._cleanup_backup_texcoords) if self._cleanup_backup_texcoords is not None else None
+            self._current_texture_path = self._cleanup_backup_texture_path
+            self._last_points = self._current_points
+
+            self._render_in_vispy_from_data(
+                self._current_points, self._current_colors, self._current_faces,
+                self._current_texcoords, self._current_texture_path,
+                mode=2, reset_camera=False
+            )
+            self._sync_active_transform_to_viewport()
+
+            if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+                self.mesh_cleanup_tool_window.set_holes_revert_enabled(False)
+
+            num_f = len(self._current_faces) if self._current_faces is not None else 0
+            num_v = len(self._current_points) if self._current_points is not None else 0
+            self.console_text.append(f"[CLEANUP] Reverted mesh to previous geometry ({num_v:,} vertices, {num_f:,} faces).")
+            self.status_label.setText("Mesh restored to previous state.")
+        else:
+            self.console_text.append("[WARNING] No previous mesh backup found to revert.")
+
+    def _on_mesh_repair_nonmanifold_apply(self):
+        """Executes Non-Manifold repair via PyMeshLab and updates the active mesh in VisPy."""
+        if self._current_points is None or len(self._current_points) == 0 or self._current_faces is None or len(self._current_faces) == 0:
+            QMessageBox.warning(self, "No Mesh Available", "Please load or reconstruct a 3D textured mesh before repairing non-manifold topology.")
+            return
+
+        mvs_dir = self.viewer_widget.current_mvs_dir or os.path.join(get_reconstruction_out_dir(), "mvs")
+        os.makedirs(mvs_dir, exist_ok=True)
+
+        tool_in_ply = os.path.join(mvs_dir, "scene_dense_mesh_cleanup_in.ply")
+        tool_out_ply = os.path.join(mvs_dir, "scene_dense_mesh_cleanup_out.ply")
+        backup_ply = os.path.join(mvs_dir, "scene_dense_mesh_cleanup_backup.ply")
+
+        # Create pre-operation backup for instant revert
+        self._export_temp_mesh_ply(self._current_points, self._current_faces, self._current_colors, backup_ply)
+        self._cleanup_backup_points = np.copy(self._current_points) if self._current_points is not None else None
+        self._cleanup_backup_faces = np.copy(self._current_faces) if self._current_faces is not None else None
+        self._cleanup_backup_colors = np.copy(self._current_colors) if self._current_colors is not None else None
+        self._cleanup_backup_texcoords = np.copy(self._current_texcoords) if self._current_texcoords is not None else None
+        self._cleanup_backup_texture_path = self._current_texture_path
+
+        # Export working mesh to in_ply
+        self._export_temp_mesh_ply(self._current_points, self._current_faces, self._current_colors, tool_in_ply)
+
+        # Show non-blocking progress dialog
+        self._cleanup_progress_dialog = ProjectProgressDialog(
+            "Repair Non-Manifold",
+            "Repairing non-manifold edges and vertices...\nPlease wait.",
+            self
+        )
+        self._cleanup_progress_dialog.show()
+
+        if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+            self.mesh_cleanup_tool_window.set_busy(True)
+
+        cleanup_params = {
+            "enable_reduction": False,
+            "target_reduction_pct": 0,
+            "remove_duplicates": False,
+            "repair_nonmanifold": True,
+            "close_holes": False
+        }
+
+        from pipeline_manager import MeshOperationWorker
+        self._cleanup_nm_worker = MeshOperationWorker("cleanup", tool_in_ply, tool_out_ply, cleanup_params, parent=self)
+        self._cleanup_nm_worker.log_message.connect(self._append_log)
+        self._cleanup_nm_worker.finished.connect(
+            lambda ok, out_path, msg: self._on_mesh_repair_nonmanifold_finished(ok, out_path, msg)
+        )
+        self._cleanup_nm_worker.start()
+
+    def _on_mesh_repair_nonmanifold_finished(self, success: bool, output_ply: str, msg: str):
+        """Called when Repair Non-Manifold worker completes."""
+        if hasattr(self, '_cleanup_progress_dialog') and self._cleanup_progress_dialog:
+            self._cleanup_progress_dialog.accept()
+            self._cleanup_progress_dialog = None
+
+        if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+            self.mesh_cleanup_tool_window.set_busy(False)
+
+        if success and output_ply and os.path.isfile(output_ply):
+            pts, cls, fcs = _read_ply_static(output_ply)
+            if pts is not None and len(pts) > 0 and fcs is not None and len(fcs) > 0:
+                init_faces = len(self._current_faces) if self._current_faces is not None else 0
+                new_faces = len(fcs)
+                init_verts = len(self._current_points) if self._current_points is not None else 0
+                new_verts = len(pts)
+
+                self._current_points = pts
+                self._current_faces = fcs
+                self._current_colors = cls
+                self._last_points = pts
+
+                # Cleanup changes vertex/face indexing; the PLY has no remapped UVs.
+                self._current_texcoords = None
+                self._current_texture_path = None
+
+                # Re-render in VisPy without resetting camera position
+                self._render_in_vispy_from_data(
+                    pts, cls, fcs,
+                    self._current_texcoords, self._current_texture_path,
+                    mode=2, reset_camera=False
+                )
+                self._sync_active_transform_to_viewport()
+
+                if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+                    self.mesh_cleanup_tool_window.set_nonmanifold_revert_enabled(True)
+
+                status_msg = f"[CLEANUP] Repaired non-manifold geometry: {init_faces:,} → {new_faces:,} faces, {init_verts:,} → {new_verts:,} vertices. Click 'Retexture' to project textures or 'Revert' to undo."
+                self.console_text.append(status_msg)
+                self.status_label.setText(f"Repair Non-Manifold: {new_faces:,} faces ({new_verts:,} vertices)")
+            else:
+                self.console_text.append("[ERROR] Repair non-manifold produced empty geometry.")
+                QMessageBox.warning(self, "Repair Failed", "Mesh repair did not produce valid geometry.")
+        else:
+            self.console_text.append(f"[ERROR] Repair non-manifold failed: {msg}")
+            QMessageBox.warning(self, "Repair Failed", f"Repair non-manifold failed:\n{msg}")
+
+    def _on_mesh_repair_nonmanifold_revert(self):
+        """Restores original pre-repair mesh geometry."""
+        if hasattr(self, '_cleanup_backup_points') and self._cleanup_backup_points is not None:
+            self._current_points = np.copy(self._cleanup_backup_points)
+            self._current_faces = np.copy(self._cleanup_backup_faces) if self._cleanup_backup_faces is not None else None
+            self._current_colors = np.copy(self._cleanup_backup_colors) if self._cleanup_backup_colors is not None else None
+            self._current_texcoords = np.copy(self._cleanup_backup_texcoords) if self._cleanup_backup_texcoords is not None else None
+            self._current_texture_path = self._cleanup_backup_texture_path
+            self._last_points = self._current_points
+
+            self._render_in_vispy_from_data(
+                self._current_points, self._current_colors, self._current_faces,
+                self._current_texcoords, self._current_texture_path,
+                mode=2, reset_camera=False
+            )
+            self._sync_active_transform_to_viewport()
+
+            if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+                self.mesh_cleanup_tool_window.set_nonmanifold_revert_enabled(False)
+
+            num_f = len(self._current_faces) if self._current_faces is not None else 0
+            num_v = len(self._current_points) if self._current_points is not None else 0
+            self.console_text.append(f"[CLEANUP] Reverted mesh to previous geometry ({num_v:,} vertices, {num_f:,} faces).")
+            self.status_label.setText("Mesh restored to previous state.")
+        else:
+            self.console_text.append("[WARNING] No previous mesh backup found to revert.")
+
+    def _on_mesh_remove_duplicates_apply(self):
+        """Executes Duplicate removal via PyMeshLab and updates the active mesh in VisPy."""
+        if self._current_points is None or len(self._current_points) == 0 or self._current_faces is None or len(self._current_faces) == 0:
+            QMessageBox.warning(self, "No Mesh Available", "Please load or reconstruct a 3D textured mesh before removing duplicates.")
+            return
+
+        mvs_dir = self.viewer_widget.current_mvs_dir or os.path.join(get_reconstruction_out_dir(), "mvs")
+        os.makedirs(mvs_dir, exist_ok=True)
+
+        tool_in_ply = os.path.join(mvs_dir, "scene_dense_mesh_cleanup_in.ply")
+        tool_out_ply = os.path.join(mvs_dir, "scene_dense_mesh_cleanup_out.ply")
+        backup_ply = os.path.join(mvs_dir, "scene_dense_mesh_cleanup_backup.ply")
+
+        # Create pre-operation backup for instant revert
+        self._export_temp_mesh_ply(self._current_points, self._current_faces, self._current_colors, backup_ply)
+        self._cleanup_backup_points = np.copy(self._current_points) if self._current_points is not None else None
+        self._cleanup_backup_faces = np.copy(self._current_faces) if self._current_faces is not None else None
+        self._cleanup_backup_colors = np.copy(self._current_colors) if self._current_colors is not None else None
+        self._cleanup_backup_texcoords = np.copy(self._current_texcoords) if self._current_texcoords is not None else None
+        self._cleanup_backup_texture_path = self._current_texture_path
+
+        # Export working mesh to in_ply
+        self._export_temp_mesh_ply(self._current_points, self._current_faces, self._current_colors, tool_in_ply)
+
+        # Show non-blocking progress dialog
+        self._cleanup_progress_dialog = ProjectProgressDialog(
+            "Remove Duplicates",
+            "Removing duplicate faces and vertices...\nPlease wait.",
+            self
+        )
+        self._cleanup_progress_dialog.show()
+
+        if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+            self.mesh_cleanup_tool_window.set_busy(True)
+
+        cleanup_params = {
+            "enable_reduction": False,
+            "target_reduction_pct": 0,
+            "remove_duplicates": True,
+            "repair_nonmanifold": False,
+            "close_holes": False
+        }
+
+        from pipeline_manager import MeshOperationWorker
+        self._cleanup_dup_worker = MeshOperationWorker("cleanup", tool_in_ply, tool_out_ply, cleanup_params, parent=self)
+        self._cleanup_dup_worker.log_message.connect(self._append_log)
+        self._cleanup_dup_worker.finished.connect(
+            lambda ok, out_path, msg: self._on_mesh_remove_duplicates_finished(ok, out_path, msg)
+        )
+        self._cleanup_dup_worker.start()
+
+    def _on_mesh_remove_duplicates_finished(self, success: bool, output_ply: str, msg: str):
+        """Called when Remove Duplicates worker completes."""
+        if hasattr(self, '_cleanup_progress_dialog') and self._cleanup_progress_dialog:
+            self._cleanup_progress_dialog.accept()
+            self._cleanup_progress_dialog = None
+
+        if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+            self.mesh_cleanup_tool_window.set_busy(False)
+
+        if success and output_ply and os.path.isfile(output_ply):
+            pts, cls, fcs = _read_ply_static(output_ply)
+            if pts is not None and len(pts) > 0 and fcs is not None and len(fcs) > 0:
+                init_faces = len(self._current_faces) if self._current_faces is not None else 0
+                new_faces = len(fcs)
+                init_verts = len(self._current_points) if self._current_points is not None else 0
+                new_verts = len(pts)
+
+                self._current_points = pts
+                self._current_faces = fcs
+                self._current_colors = cls
+                self._last_points = pts
+
+                # Cleanup changes vertex/face indexing; the PLY has no remapped UVs.
+                self._current_texcoords = None
+                self._current_texture_path = None
+
+                # Re-render in VisPy without resetting camera position
+                self._render_in_vispy_from_data(
+                    pts, cls, fcs,
+                    self._current_texcoords, self._current_texture_path,
+                    mode=2, reset_camera=False
+                )
+                self._sync_active_transform_to_viewport()
+
+                if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+                    self.mesh_cleanup_tool_window.set_duplicates_revert_enabled(True)
+
+                rem_faces = init_faces - new_faces
+                rem_verts = init_verts - new_verts
+                status_msg = f"[CLEANUP] Remove Duplicates complete: {init_faces:,} → {new_faces:,} faces ({rem_faces:,} removed, {rem_verts:,} vertices removed). Click 'Retexture' to project textures or 'Revert' to undo."
+                self.console_text.append(status_msg)
+                self.status_label.setText(f"Remove Duplicates: {rem_faces:,} faces, {rem_verts:,} vertices removed")
+            else:
+                self.console_text.append("[ERROR] Remove duplicates produced empty geometry.")
+                QMessageBox.warning(self, "Remove Duplicates Failed", "Mesh duplicate removal did not produce valid geometry.")
+        else:
+            self.console_text.append(f"[ERROR] Remove duplicates failed: {msg}")
+            QMessageBox.warning(self, "Remove Duplicates Failed", f"Remove duplicates failed:\n{msg}")
+
+    def _on_mesh_remove_duplicates_revert(self):
+        """Restores original pre-duplicate-removal mesh geometry."""
+        if hasattr(self, '_cleanup_backup_points') and self._cleanup_backup_points is not None:
+            self._current_points = np.copy(self._cleanup_backup_points)
+            self._current_faces = np.copy(self._cleanup_backup_faces) if self._cleanup_backup_faces is not None else None
+            self._current_colors = np.copy(self._cleanup_backup_colors) if self._cleanup_backup_colors is not None else None
+            self._current_texcoords = np.copy(self._cleanup_backup_texcoords) if self._cleanup_backup_texcoords is not None else None
+            self._current_texture_path = self._cleanup_backup_texture_path
+            self._last_points = self._current_points
+
+            self._render_in_vispy_from_data(
+                self._current_points, self._current_colors, self._current_faces,
+                self._current_texcoords, self._current_texture_path,
+                mode=2, reset_camera=False
+            )
+            self._sync_active_transform_to_viewport()
+
+            if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+                self.mesh_cleanup_tool_window.set_duplicates_revert_enabled(False)
+
+            num_f = len(self._current_faces) if self._current_faces is not None else 0
+            num_v = len(self._current_points) if self._current_points is not None else 0
+            self.console_text.append(f"[CLEANUP] Reverted mesh to previous geometry ({num_v:,} vertices, {num_f:,} faces).")
+            self.status_label.setText("Mesh restored to previous state.")
+        else:
+            self.console_text.append("[WARNING] No previous mesh backup found to revert.")
 
     def _open_mesh_tool(self, tool_id: str):
         """Opens the floating tool modal for Mesh Cleanup, Merge Vertices, or Taubin Smooth Mesh."""
@@ -8079,11 +9093,78 @@ class MainWindow(QMainWindow):
         if pts is None or len(pts) == 0:
             QMessageBox.warning(self, "Retexture Unavailable", "No active mesh geometry found to retexture.")
             return
-        self._export_temp_mesh_ply(pts, fcs, cls, modified_ply)
+
+        # Reference camera mesh (ground truth from OpenMVS reconstruction)
+        ref_ply = None
+        for candidate in ["scene_dense_mesh_refine.ply", "scene_dense_mesh.ply"]:
+            c_path = os.path.join(mvs_dir, candidate)
+            if os.path.isfile(c_path):
+                ref_ply = c_path
+                break
+
+        has_transform = (
+            hasattr(self, '_cumulative_mesh_transform')
+            and self._cumulative_mesh_transform is not None
+            and not np.allclose(self._cumulative_mesh_transform, np.eye(4, dtype=np.float32), atol=1e-4)
+        )
+
+        self._retexture_restore_data = None
+
+        if ref_ply and os.path.isfile(ref_ply):
+            try:
+                ref_pts, _, _ = _read_ply_static(ref_ply)
+                if ref_pts is not None and len(ref_pts) > 0:
+                    C_ref = np.mean(ref_pts, axis=0).astype(np.float64)
+                    C_user = np.mean(pts, axis=0).astype(np.float64)
+
+                    R_vp = np.eye(3, dtype=np.float64)
+                    if has_transform:
+                        R_vp = self._cumulative_mesh_transform[:3, :3].astype(np.float64)
+
+                    # Align user mesh back to original camera pose for OpenMVS texturing
+                    export_pts = (((pts.astype(np.float64) - C_user) @ R_vp) + C_ref).astype(np.float32)
+
+                    # Compute restoration matrix for raw OpenMVS coordinates:
+                    # Conversion from viewport space (photogrammetry coordinate flip: Y->-Y, Z->-Z)
+                    F = np.diag([1.0, -1.0, -1.0])
+                    C_ref_raw = C_ref @ F
+                    C_user_raw = C_user @ F
+                    R_raw = F @ R_vp @ F
+                    t_raw = C_user_raw - (C_ref_raw @ R_raw.T)
+
+                    M_raw = np.eye(4, dtype=np.float32)
+                    M_raw[:3, :3] = R_raw.astype(np.float32)
+                    M_raw[:3, 3] = t_raw.astype(np.float32)
+
+                    self._retexture_restore_data = {
+                        "M_raw": M_raw,
+                        "C_user": C_user,
+                        "C_ref": C_ref
+                    }
+                    self.console_text.append("[TOOLS] Mesh aligned with original reconstruction camera space for OpenMVS texturing.")
+                else:
+                    export_pts = pts
+            except Exception as align_err:
+                self.console_text.append(f"[WARNING] Reference alignment calculation failed: {align_err}")
+                export_pts = pts
+        elif has_transform:
+            self.console_text.append("[TOOLS] Temporarily aligning mesh with original camera poses for OpenMVS texturing...")
+            try:
+                T_inv = np.linalg.inv(self._cumulative_mesh_transform)
+                export_pts = (pts @ T_inv[:3, :3].T) + T_inv[:3, 3]
+            except Exception as inv_err:
+                self.console_text.append(f"[WARNING] Could not invert cumulative transform: {inv_err}")
+                export_pts = pts
+        else:
+            export_pts = pts
+
+        self._export_temp_mesh_ply(export_pts, fcs, cls, modified_ply)
 
         # Update UI: Disable Start Reconstruction button, lock tool modals & animate shared progress bar
         self.process_btn.setEnabled(False)
         self.viewer_widget.set_tool_modals_busy(True)
+        if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+            self.mesh_cleanup_tool_window.set_busy(True)
         self.progress_bar.setRange(0, 0)
         self.status_label.setText("Retexturing mesh...")
         self.console_text.append("[START] Running OpenMVS TextureMesh on modified mesh...")
@@ -8111,21 +9192,187 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(100 if success else 0)
         self._set_process_btn_state("ready" if len(self.image_list) > 0 else "idle")
         self.viewer_widget.set_tool_modals_busy(False)
+        if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+            self.mesh_cleanup_tool_window.set_busy(False)
 
         if success:
             self.status_label.setText("Retexturing Complete")
             self.console_text.append("[SUCCESS] Retexturing completed. Reloading textured mesh in viewport...")
             mvs_dir = self.viewer_widget.current_mvs_dir or os.path.join(get_reconstruction_out_dir(), "mvs")
             obj_path = os.path.join(mvs_dir, "scene_dense_mesh_texture.obj")
+            ply_texture_path = os.path.join(mvs_dir, "scene_dense_mesh_texture.ply")
+
+            # Restore user's custom position/rotation onto the newly textured model
+            restore_data = getattr(self, '_retexture_restore_data', None)
+            if restore_data is not None and "M_raw" in restore_data:
+                M_raw = restore_data["M_raw"]
+                if not np.allclose(M_raw, np.eye(4, dtype=np.float32), atol=1e-4):
+                    self.console_text.append("[TOOLS] Restoring custom mesh position onto newly textured model...")
+                    if os.path.exists(obj_path):
+                        self._apply_transform_to_obj_file(obj_path, M_raw)
+                    if os.path.exists(ply_texture_path):
+                        self._apply_transform_to_ply_file(ply_texture_path, M_raw)
+                # Invalidate stale GLB cache so next export re-converts the transformed OBJ
+                glb_path = os.path.join(mvs_dir, "scene_dense_mesh_texture.glb")
+                if os.path.exists(glb_path):
+                    try:
+                        os.remove(glb_path)
+                    except Exception:
+                        pass
+                # Reset cumulative transform since the textured model geometry is now at the user position
+                self._cumulative_mesh_transform = np.eye(4, dtype=np.float32)
+                self._retexture_restore_data = None
+            else:
+                has_transform = (
+                    hasattr(self, '_cumulative_mesh_transform')
+                    and self._cumulative_mesh_transform is not None
+                    and not np.allclose(self._cumulative_mesh_transform, np.eye(4, dtype=np.float32), atol=1e-4)
+                )
+                if has_transform:
+                    self.console_text.append("[TOOLS] Restoring custom mesh transform onto newly textured model...")
+                    if os.path.exists(obj_path):
+                        self._apply_transform_to_obj_file(obj_path, self._cumulative_mesh_transform)
+                    if os.path.exists(ply_texture_path):
+                        self._apply_transform_to_ply_file(ply_texture_path, self._cumulative_mesh_transform)
+                    glb_path = os.path.join(mvs_dir, "scene_dense_mesh_texture.glb")
+                    if os.path.exists(glb_path):
+                        try:
+                            os.remove(glb_path)
+                        except Exception:
+                            pass
+                    self._cumulative_mesh_transform = np.eye(4, dtype=np.float32)
+
             if os.path.exists(obj_path):
                 self._reload_viewer(obj_path)
             else:
                 mesh_path = self.viewer_widget.get_selected_file_path()
                 if mesh_path:
                     self._reload_viewer(mesh_path)
+
+            # Commit newly textured mesh as the active baseline backup on disk and in memory
+            backup_ply = os.path.join(mvs_dir, "scene_dense_mesh_cleanup_backup.ply")
+            if self._current_points is not None and len(self._current_points) > 0 and self._current_faces is not None:
+                try:
+                    self._export_temp_mesh_ply(
+                        self._current_points, self._current_faces, self._current_colors, backup_ply
+                    )
+                except Exception as bkp_err:
+                    self.console_text.append(f"[WARNING] Could not update cleanup backup PLY: {bkp_err}")
+
+                self._cleanup_backup_points = np.copy(self._current_points)
+                self._cleanup_backup_faces = np.copy(self._current_faces)
+                self._cleanup_backup_colors = np.copy(self._current_colors) if self._current_colors is not None else None
+                self._cleanup_backup_texcoords = np.copy(self._current_texcoords) if self._current_texcoords is not None else None
+                self._cleanup_backup_texture_path = self._current_texture_path
+                self.console_text.append("[CLEANUP] Backup updated to newly retextured mesh baseline.")
+
+            # Also update legacy preop backup if present
+            preop_backup_path = os.path.join(mvs_dir, "scene_dense_mesh_preop_backup.ply")
+            if os.path.exists(preop_backup_path) and self._current_points is not None and self._current_faces is not None:
+                try:
+                    self._export_temp_mesh_ply(
+                        self._current_points, self._current_faces, self._current_colors, preop_backup_path
+                    )
+                except Exception:
+                    pass
+
+            # Reset revert buttons in Mesh Cleanup tool window (new textured state is now the baseline)
+            if hasattr(self, 'mesh_cleanup_tool_window') and self.mesh_cleanup_tool_window:
+                self.mesh_cleanup_tool_window.set_revert_enabled(False)
+                self.mesh_cleanup_tool_window.set_holes_revert_enabled(False)
+                self.mesh_cleanup_tool_window.set_nonmanifold_revert_enabled(False)
+                self.mesh_cleanup_tool_window.set_duplicates_revert_enabled(False)
         else:
             self.status_label.setText("Retexturing Failed")
             self.console_text.append(f"[ERROR] Retexturing failed: {msg}")
+
+    def _apply_transform_to_obj_file(self, obj_path: str, T_mat: np.ndarray):
+        """Transforms vertices and vertex normals in an OBJ file in-place, preserving UVs and materials."""
+        if not os.path.isfile(obj_path) or np.allclose(T_mat, np.eye(4, dtype=np.float32), atol=1e-4):
+            return
+        try:
+            R = T_mat[:3, :3]
+            t = T_mat[:3, 3]
+
+            with open(obj_path, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+
+            new_lines = []
+            for line in lines:
+                if line.startswith('v '):
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        vx, vy, vz = float(parts[1]), float(parts[2]), float(parts[3])
+                        nx = vx * R[0, 0] + vy * R[0, 1] + vz * R[0, 2] + t[0]
+                        ny = vx * R[1, 0] + vy * R[1, 1] + vz * R[1, 2] + t[1]
+                        nz = vx * R[2, 0] + vy * R[2, 1] + vz * R[2, 2] + t[2]
+                        new_lines.append(f"v {nx:.6f} {ny:.6f} {nz:.6f}\n")
+                    else:
+                        new_lines.append(line)
+                elif line.startswith('vn '):
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        vx, vy, vz = float(parts[1]), float(parts[2]), float(parts[3])
+                        nx = vx * R[0, 0] + vy * R[0, 1] + vz * R[0, 2]
+                        ny = vx * R[1, 0] + vy * R[1, 1] + vz * R[1, 2]
+                        nz = vx * R[2, 0] + vy * R[2, 1] + vz * R[2, 2]
+                        norm = (nx * nx + ny * ny + nz * nz) ** 0.5
+                        if norm > 1e-6:
+                            nx /= norm
+                            ny /= norm
+                            nz /= norm
+                        new_lines.append(f"vn {nx:.6f} {ny:.6f} {nz:.6f}\n")
+                    else:
+                        new_lines.append(line)
+                else:
+                    new_lines.append(line)
+
+            with open(obj_path, 'w', encoding='utf-8') as f:
+                f.writelines(new_lines)
+        except Exception as e:
+            self.console_text.append(f"[WARNING] Failed to apply transform to OBJ file: {e}")
+
+    def _apply_transform_to_ply_file(self, ply_path: str, T_mat: np.ndarray):
+        """Transforms vertex coordinates in an OpenMVS binary/ASCII PLY file in-place."""
+        if not os.path.isfile(ply_path) or np.allclose(T_mat, np.eye(4, dtype=np.float32), atol=1e-4):
+            return
+        try:
+            R = T_mat[:3, :3]
+            t = T_mat[:3, 3]
+
+            with open(ply_path, 'rb') as f:
+                data = f.read()
+
+            end_hdr_idx = data.find(b"end_header\n")
+            if end_hdr_idx == -1:
+                end_hdr_idx = data.find(b"end_header\r\n")
+                if end_hdr_idx == -1:
+                    return
+                hdr_len = end_hdr_idx + len(b"end_header\r\n")
+            else:
+                hdr_len = end_hdr_idx + len(b"end_header\n")
+
+            header_str = data[:hdr_len].decode('latin1', errors='ignore')
+            num_vertices = 0
+            is_binary = "format binary_little_endian" in header_str
+
+            for line in header_str.splitlines():
+                if line.startswith("element vertex"):
+                    num_vertices = int(line.split()[2])
+                    break
+
+            if num_vertices > 0 and is_binary:
+                v_bytes = data[hdr_len : hdr_len + num_vertices * 12]
+                if len(v_bytes) == num_vertices * 12:
+                    pts = np.frombuffer(v_bytes, dtype=np.float32).reshape(-1, 3)
+                    pts_trans = (pts @ R.T) + t
+                    new_v_bytes = pts_trans.astype(np.float32).tobytes()
+                    with open(ply_path, 'wb') as f:
+                        f.write(data[:hdr_len])
+                        f.write(new_v_bytes)
+                        f.write(data[hdr_len + num_vertices * 12 :])
+        except Exception as e:
+            self.console_text.append(f"[WARNING] Failed to apply transform to PLY file: {e}")
 
     def _on_mesh_tool_closed(self):
         """Cleans up temporary pre-operation backup file from disk."""
@@ -8365,6 +9612,7 @@ class MainWindow(QMainWindow):
             self._update_ground_grid(ref_pts)
 
         self.canvas.update()
+        self._sync_active_transform_to_viewport()
 
     def _on_cloud_import_done(self, res, file_path):
         """Called on the UI thread when background cloud import finishes."""
@@ -8409,7 +9657,7 @@ class MainWindow(QMainWindow):
         # For mode 0 (sparse), keep existing sync path (reads COLMAP binary, fast)
         # For OBJ files (mode 2), keep sync path (OBJ reader is already needed on UI thread)
         ext = os.path.splitext(file_path)[1].lower()
-        use_background = mode in (0, 1, 2) and ext != '.obj'
+        use_background = mode in (1, 2) and ext != '.obj'
 
         if use_background:
             # Spawn background parser — UI stays responsive
@@ -9578,6 +10826,17 @@ if __name__ == "__main__":
     QSurfaceFormat.setDefaultFormat(fmt)
 
     app = QApplication(sys.argv)
+    app.setStyleSheet("""
+        QToolTip {
+            background-color: #242424;
+            color: #FFFFFF;
+            border: 1px solid #4D4D4D;
+            border-radius: 4px;
+            padding: 5px 8px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+    """)
     
     # Resolve app icon path
     base_dir = get_base_dir()

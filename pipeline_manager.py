@@ -1523,8 +1523,8 @@ class PipelineWorker(QThread):
             "--resolution-level",    texture_res,
             "--cost-smoothness-ratio", "0.1",
             "--empty-color",         "0",
-            "--local-seam-leveling",  "0",       # Force turns off local patch edge blending
-            "--global-seam-leveling", "0",       # Force turns off global color adjustment
+            "--local-seam-leveling",  "1",       
+            "--global-seam-leveling", "1",       
         ]
         texture_ply_ok = self._run_process_realtime(cmd_ply, timeout=1800.0, cwd=mvs_out, env=env)
         if not texture_ply_ok:
@@ -1540,8 +1540,8 @@ class PipelineWorker(QThread):
                 "--resolution-level",    texture_res,
                 "--cost-smoothness-ratio", "0.1",
                 "--empty-color",         "0",
-                "--local-seam-leveling",  "0",       # Force turns off local patch edge blending
-                "--global-seam-leveling", "0",       # Force turns off global color adjustment
+                "--local-seam-leveling",  "1",       
+                "--global-seam-leveling", "1",       
             ]
             self._run_process_realtime(cmd_obj, timeout=1800.0, cwd=mvs_out, env=env)
 
@@ -2572,8 +2572,8 @@ class CleanupAndTextureWorker(PipelineWorker):
                     "--resolution-level",    texture_res,
                     "--cost-smoothness-ratio", "0.1",
                     "--empty-color",         "0",
-                    "--local-seam-leveling",  "0",
-                    "--global-seam-leveling", "0",
+                    "--local-seam-leveling",  "1",
+                    "--global-seam-leveling", "1",
                 ]
                 self.log_message.emit(f"[RUN] Texturing PLY: {' '.join(cmd_ply)}")
                 texture_ply_ok = self._run_process_realtime(cmd_ply, timeout=1800.0, cwd=mvs_out, env=env)
@@ -2589,8 +2589,8 @@ class CleanupAndTextureWorker(PipelineWorker):
                         "--resolution-level",    texture_res,
                         "--cost-smoothness-ratio", "0.1",
                         "--empty-color",         "0",
-                        "--local-seam-leveling",  "0",
-                        "--global-seam-leveling", "0",
+                        "--local-seam-leveling",  "1",
+                        "--global-seam-leveling", "1",
                     ]
                     self.log_message.emit(f"[RUN] Texturing OBJ: {' '.join(cmd_obj)}")
                     self._run_process_realtime(cmd_obj, timeout=1800.0, cwd=mvs_out, env=env)
@@ -2786,8 +2786,8 @@ class RetextureOnlyWorker(PipelineWorker):
                     "--resolution-level",    texture_res,
                     "--cost-smoothness-ratio", "0.1",
                     "--empty-color",         "0",
-                    "--local-seam-leveling",  "0",
-                    "--global-seam-leveling", "0",
+                    "--local-seam-leveling",  "1",
+                    "--global-seam-leveling", "1",
                 ]
                 self.status_changed.emit("Projecting Textures (PLY pass)...")
                 self.progress_changed.emit(30)
@@ -2805,8 +2805,8 @@ class RetextureOnlyWorker(PipelineWorker):
                         "--resolution-level",    texture_res,
                         "--cost-smoothness-ratio", "0.1",
                         "--empty-color",         "0",
-                        "--local-seam-leveling",  "0",
-                        "--global-seam-leveling", "0",
+                        "--local-seam-leveling",  "1",
+                        "--global-seam-leveling", "1",
                     ]
                     self.status_changed.emit("Exporting Textured OBJ...")
                     self.log_message.emit(f"[RUN] Texturing OBJ: {' '.join(cmd_obj)}")
@@ -2882,7 +2882,7 @@ class BackgroundRemovalWorker(QThread):
             out_dir = os.path.join(base_dir, "reconstruction_out", "bg_removed_images")
         os.makedirs(out_dir, exist_ok=True)
 
-        self.log_message.emit(f"[START] Initializing offline background removal for {total} images (silueta.onnx)...")
+        self.log_message.emit(f"[START] Initializing offline background removal for {total} images...")
         self.log_message.emit(f"[INFO] Source files will be preserved. Transparent copies saved to: {out_dir}")
 
         try:

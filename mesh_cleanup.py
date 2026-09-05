@@ -474,10 +474,13 @@ class PyMeshLabDirectBackend(MeshProcessingBackend):
             _log(f"[CLEANUP] Initial mesh: {init_v:,} vertices, {init_f:,} faces", log_callback)
 
             _log("[CLEANUP] Applying mesh repair filters...", log_callback)
-            if remove_duplicates:
+            # Unify duplicate/unshared vertices so adjacent polygon faces share edges and can be decimated
+            if remove_duplicates or enable_reduction:
                 ms.meshing_remove_duplicate_vertices()
-                ms.meshing_remove_duplicate_faces()
                 ms.meshing_remove_unreferenced_vertices()
+
+            if remove_duplicates:
+                ms.meshing_remove_duplicate_faces()
                 ms.meshing_remove_null_faces()
             if repair_nonmanifold:
                 ms.meshing_repair_non_manifold_edges()
@@ -485,19 +488,26 @@ class PyMeshLabDirectBackend(MeshProcessingBackend):
             if close_holes and max_hole_size > 0:
                 ms.meshing_close_holes(maxholesize=max_hole_size)
 
-            ms.meshing_remove_connected_component_by_face_number(mincomponentsize=25)
-            try:
-                ms.meshing_re_orient_faces_coherently()
-            except Exception as e:
-                _log(f"[CLEANUP] Note: Face re-orientation skipped: {e}", log_callback)
-            ms.meshing_merge_close_vertices()
+            remove_isolated = bool(cleanup_params.get("remove_isolated_components", False))
+            if remove_isolated:
+                try:
+                    ms.meshing_remove_connected_component_by_face_number(mincomponentsize=25)
+                except Exception as e:
+                    _log(f"[CLEANUP] Note: Connected component filter skipped: {e}", log_callback)
+
+            if repair_nonmanifold:
+                try:
+                    ms.meshing_re_orient_faces_coherently()
+                except Exception as e:
+                    _log(f"[CLEANUP] Note: Face re-orientation skipped: {e}", log_callback)
 
             if enable_reduction and target_reduction_pct > 0:
-                target_perc = max(0.05, min(0.95, (100.0 - target_reduction_pct) / 100.0))
-                _log(f"[CLEANUP] Applying {int(target_reduction_pct)}% Quadric Edge Collapse Decimation...",
+                target_perc = max(0.01, min(0.99, (100.0 - target_reduction_pct) / 100.0))
+                target_faces = max(4, int(init_f * target_perc))
+                _log(f"[CLEANUP] Applying {int(target_reduction_pct)}% Quadric Edge Collapse Decimation (target {target_faces} faces)...",
                      log_callback)
                 ms.meshing_decimation_quadric_edge_collapse(
-                    targetperc=target_perc,
+                    targetfacenum=target_faces,
                     qualitythr=0.3,
                     preserveboundary=True,
                     preservenormal=True,
@@ -788,6 +798,12 @@ class Open3DBackend(MeshProcessingBackend):
         target_reduction_pct = float(cleanup_params.get("target_reduction_pct", 50))
         remove_duplicates    = bool(cleanup_params.get("remove_duplicates", True))
 
+        if cleanup_params.get("repair_nonmanifold", False):
+            raise NotSupportedError(
+                f"Non-manifold repair is not supported by {self.name}. "
+                "Install or enable PyMeshLab to repair non-manifold topology."
+            )
+
         try:
             _log(f"[CLEANUP] Open3D Engine: Processing {os.path.basename(input_ply_path)}...", log_callback)
             mesh = o3d.io.read_triangle_mesh(input_ply_path)
@@ -927,6 +943,12 @@ class TrimeshBackend(MeshProcessingBackend):
             cleanup_params = {}
         remove_duplicates = bool(cleanup_params.get("remove_duplicates", True))
 
+        if cleanup_params.get("repair_nonmanifold", False):
+            raise NotSupportedError(
+                f"Non-manifold repair is not supported by {self.name}. "
+                "Install or enable PyMeshLab to repair non-manifold topology."
+            )
+
         try:
             _log(f"[CLEANUP] Trimesh Engine: Processing {os.path.basename(input_ply_path)}...", log_callback)
             mesh = tm.load(input_ply_path, force="mesh")
@@ -936,7 +958,10 @@ class TrimeshBackend(MeshProcessingBackend):
 
             if remove_duplicates:
                 mesh.merge_vertices()
-                mesh.remove_duplicate_faces()
+                if hasattr(mesh, "unique_faces"):
+                    mesh.update_faces(mesh.unique_faces())
+                else:
+                    mesh.remove_duplicate_faces()
                 mesh.remove_unreferenced_vertices()
 
             os.makedirs(os.path.dirname(os.path.abspath(output_ply_path)), exist_ok=True)

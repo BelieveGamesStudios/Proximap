@@ -110,10 +110,13 @@ def handle_cleanup(ms, pymeshlab, params, input_ply, output_ply):
     _log("[CLEANUP] Initial mesh: {:,} vertices, {:,} faces".format(init_v, init_f))
 
     _log("[CLEANUP] Applying mesh repair filters...")
-    if remove_duplicates:
+    # Unify duplicate/unshared vertices so adjacent polygon faces share edges and can be decimated
+    if remove_duplicates or enable_reduction:
         ms.meshing_remove_duplicate_vertices()
-        ms.meshing_remove_duplicate_faces()
         ms.meshing_remove_unreferenced_vertices()
+
+    if remove_duplicates:
+        ms.meshing_remove_duplicate_faces()
         ms.meshing_remove_null_faces()
     if repair_nonmanifold:
         ms.meshing_repair_non_manifold_edges()
@@ -121,20 +124,27 @@ def handle_cleanup(ms, pymeshlab, params, input_ply, output_ply):
     if close_holes and max_hole_size > 0:
         ms.meshing_close_holes(maxholesize=max_hole_size)
 
-    ms.meshing_remove_connected_component_by_face_number(mincomponentsize=25)
-    try:
-        ms.meshing_re_orient_faces_coherently()
-    except Exception as e:
-        _log(f"[CLEANUP] Note: Face re-orientation skipped: {e}")
+    remove_isolated = bool(params.get("remove_isolated_components", False))
+    if remove_isolated:
+        try:
+            ms.meshing_remove_connected_component_by_face_number(mincomponentsize=25)
+        except Exception as e:
+            _log(f"[CLEANUP] Note: Connected component filter skipped: {e}")
 
-    merge_fn = _get_merge_filter(ms, pymeshlab)
-    merge_fn()
+    if repair_nonmanifold:
+        try:
+            ms.meshing_re_orient_faces_coherently()
+        except Exception as e:
+            _log(f"[CLEANUP] Note: Face re-orientation skipped: {e}")
 
     if enable_reduction and target_reduction_pct > 0:
-        target_perc = max(0.05, min(0.95, (100.0 - target_reduction_pct) / 100.0))
-        _log("[CLEANUP] Applying {}% Quadric Edge Collapse Decimation...".format(int(target_reduction_pct)))
+        target_perc = max(0.01, min(0.99, (100.0 - target_reduction_pct) / 100.0))
+        target_faces = max(4, int(init_f * target_perc))
+        _log("[CLEANUP] Applying {}% Quadric Edge Collapse Decimation (target {} faces)...".format(
+            int(target_reduction_pct), target_faces
+        ))
         ms.meshing_decimation_quadric_edge_collapse(
-            targetperc=target_perc,
+            targetfacenum=target_faces,
             qualitythr=0.3,
             preserveboundary=True,
             preservenormal=True,
