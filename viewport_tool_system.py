@@ -20,7 +20,7 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QSizePolicy, QGridLayout, QDoubleSpinBox, QSpinBox,
-    QCheckBox, QGroupBox, QStackedWidget, QAbstractSpinBox
+    QCheckBox, QGroupBox, QStackedWidget, QAbstractSpinBox, QSlider
 )
 
 
@@ -484,13 +484,9 @@ class EditorWindowHostModal(QFrame):
             banner_layout.setContentsMargins(8, 6, 8, 6)
             banner_layout.setSpacing(6)
 
-            banner_icon = QLabel("⚠️", empty_banner)
-            banner_icon.setStyleSheet("font-size: 11px; background: transparent; border: none;")
-
             banner_label = QLabel(tool.empty_message, empty_banner)
             banner_label.setStyleSheet("color: #E5B25D; font-size: 11px; font-weight: 500; background: transparent; border: none;")
 
-            banner_layout.addWidget(banner_icon)
             banner_layout.addWidget(banner_label, 1)
 
             page_layout.addWidget(empty_banner)
@@ -742,6 +738,36 @@ class FloatingToolboxWidget(QFrame):
         self.resize(44, self.sizeHint().height())
 
         return btn
+
+    def set_tool_visible(self, tool_id: str, visible: bool):
+        """Idempotently shows or hides a tool button in the floating sidebar."""
+        btn = self.tool_buttons.get(tool_id)
+        if not btn:
+            return
+        if (not btn.isHidden()) == visible:
+            return
+        btn.setVisible(visible)
+
+        # If hiding the currently active tool, close the host modal
+        if not visible and self.host_modal and self.host_modal.current_tool:
+            if self.host_modal.current_tool.tool_id == tool_id:
+                self.host_modal.close_tool()
+
+        # Recalculate layout size
+        self.adjustSize()
+        self.resize(44, self.sizeHint().height())
+
+        # Clamp toolbox within parent boundaries
+        if self.parentWidget():
+            parent_w = self.parentWidget().width()
+            parent_h = self.parentWidget().height()
+            cur_x = max(0, min(self.x(), max(0, parent_w - self.width())))
+            cur_y = max(0, min(self.y(), max(0, parent_h - self.height())))
+            self.move(cur_x, cur_y)
+
+        # Reposition host window if open
+        if self.host_modal and self.host_modal.isVisible():
+            self.host_modal.reposition()
 
     def _on_modal_tool_opened(self, tool_id: str):
         self._update_button_highlights(active_tool_id=tool_id)
@@ -1177,6 +1203,10 @@ class MeshCleanupToolWindow(BaseEditorTool):
     revert_repair_nonmanifold_requested = Signal()
     apply_remove_duplicates_requested = Signal()
     revert_remove_duplicates_requested = Signal()
+    apply_merge_vertices_requested = Signal(float, float)
+    revert_merge_vertices_requested = Signal()
+    apply_smooth_requested = Signal(float, int)
+    revert_smooth_requested = Signal()
     revert_requested = Signal()
     retexture_requested = Signal()
 
@@ -1186,7 +1216,7 @@ class MeshCleanupToolWindow(BaseEditorTool):
             tool_id="cleanup",
             title="Mesh Cleanup",
             icon_path=icon_path,
-            tooltip="Clean & Optimize 3D Mesh (Face Reduction, Holes, Non-Manifold, Duplicates)"
+            tooltip="Clean & Optimize 3D Mesh (Face Reduction, Holes, Non-Manifold, Duplicates, Merge Vertices, Smooth)"
         )
         self.spin_reduction = None
         self.stepper_reduction = None
@@ -1200,11 +1230,28 @@ class MeshCleanupToolWindow(BaseEditorTool):
         self.revert_nonmanifold_btn = None
         self.apply_duplicates_btn = None
         self.revert_duplicates_btn = None
+        self.btn_unit_pct = None
+        self.btn_unit_abs = None
+        self.spin_merge = None
+        self.stepper_merge = None
+        self.merge_equiv_label = None
+        self.apply_merge_btn = None
+        self.revert_merge_btn = None
+        self.merge_unit_mode = "pct"
+        self.bbox_diagonal = 1.0
+        self.spin_smooth_lambda = None
+        self.stepper_smooth_lambda = None
+        self.spin_smooth_iter = None
+        self.stepper_smooth_iter = None
+        self.apply_smooth_btn = None
+        self.revert_smooth_btn = None
         self.btn_retexture = None
         self.initial_hole_size = 30
 
     def on_enable(self, context: Optional[Dict[str, Any]] = None):
         super().on_enable(context)
+        if context and "bbox_diagonal" in context:
+            self.set_bbox_diagonal(float(context["bbox_diagonal"]))
 
     def on_gui(self, layout: QVBoxLayout, parent: QWidget):
         """Constructs the scrollable Mesh Cleanup UI controls."""
@@ -1409,6 +1456,205 @@ class MeshCleanupToolWindow(BaseEditorTool):
         dup_action_row.addWidget(self.apply_duplicates_btn)
         content_layout.addLayout(dup_action_row)
 
+        # ---------------- Section 5: Merge Close Vertices ----------------
+        section5_lbl = QLabel("Merge Close Vertices", container)
+        section5_lbl.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold; background: transparent; border: none; margin-top: 6px;")
+        content_layout.addWidget(section5_lbl)
+
+        # Unit Toggle Buttons (% vs Absolute)
+        unit_toggle_row = QHBoxLayout()
+        unit_toggle_row.setContentsMargins(0, 0, 0, 0)
+        unit_toggle_row.setSpacing(4)
+
+        self.btn_unit_pct = QPushButton("%", container)
+        self.btn_unit_pct.setCheckable(True)
+        self.btn_unit_pct.setChecked(True)
+        self.btn_unit_pct.setStyleSheet("""
+            QPushButton {
+                font-size: 10px; padding: 3px 8px; border-radius: 3px;
+                background-color: #00E676; color: #121212; border: 1px solid #00E676; font-weight: bold;
+            }
+            QPushButton:!checked {
+                background-color: #2D2D2D; color: #aaaaaa; border: 1px solid #444444; font-weight: normal;
+            }
+        """)
+
+        self.btn_unit_abs = QPushButton("Absolute", container)
+        self.btn_unit_abs.setCheckable(True)
+        self.btn_unit_abs.setChecked(False)
+        self.btn_unit_abs.setStyleSheet("""
+            QPushButton {
+                font-size: 10px; padding: 3px 8px; border-radius: 3px;
+                background-color: #00E676; color: #121212; border: 1px solid #00E676; font-weight: bold;
+            }
+            QPushButton:!checked {
+                background-color: #2D2D2D; color: #aaaaaa; border: 1px solid #444444; font-weight: normal;
+            }
+        """)
+
+        self.btn_unit_pct.clicked.connect(lambda: self._set_merge_unit("pct"))
+        self.btn_unit_abs.clicked.connect(lambda: self._set_merge_unit("abs"))
+
+        unit_toggle_row.addWidget(self.btn_unit_pct)
+        unit_toggle_row.addWidget(self.btn_unit_abs)
+        unit_toggle_row.addStretch()
+        content_layout.addLayout(unit_toggle_row)
+
+        # Merge threshold input row
+        merge_input_container = QWidget(container)
+        merge_input_container.setStyleSheet("background: transparent; border: none;")
+        merge_input_layout = QHBoxLayout(merge_input_container)
+        merge_input_layout.setContentsMargins(0, 0, 0, 0)
+        merge_input_layout.setSpacing(8)
+
+        lbl_merge = QLabel("Distance Threshold:", merge_input_container)
+        lbl_merge.setStyleSheet("color: #e0e0e0; font-size: 11px; background: transparent; border: none;")
+
+        self.spin_merge = QDoubleSpinBox(merge_input_container)
+        self.spin_merge.setRange(0.001, 50.0)
+        self.spin_merge.setSingleStep(0.05)
+        self.spin_merge.setDecimals(3)
+        self.spin_merge.setSuffix(" %")
+        self.spin_merge.setValue(0.2)
+        self.spin_merge.valueChanged.connect(self._on_merge_value_changed)
+        self.spin_merge.setStyleSheet("""
+            QDoubleSpinBox {
+                background-color: #161616;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 3px 6px;
+                font-size: 11px;
+            }
+            QDoubleSpinBox:focus {
+                border-color: #00E676;
+            }
+        """)
+
+        self.stepper_merge = SpinBoxStepper(self.spin_merge, merge_input_container)
+
+        merge_input_layout.addWidget(lbl_merge)
+        merge_input_layout.addWidget(self.stepper_merge)
+        content_layout.addWidget(merge_input_container)
+
+        self.merge_equiv_label = QLabel("Equivalent distance: ≈ 0.00000 units (abs)", container)
+        self.merge_equiv_label.setStyleSheet("color: #00E676; font-size: 10px; font-weight: bold; background: transparent; border: none;")
+        content_layout.addWidget(self.merge_equiv_label)
+
+        # Action Buttons Row: Revert and Apply for Merge Vertices
+        merge_action_row = QHBoxLayout()
+        merge_action_row.setSpacing(8)
+
+        self.revert_merge_btn = QPushButton("Revert", container)
+        self.revert_merge_btn.setProperty("class", "action-btn")
+        self.revert_merge_btn.setEnabled(False)
+        self.revert_merge_btn.setCursor(Qt.PointingHandCursor)
+        self.revert_merge_btn.clicked.connect(self._on_revert_merge_clicked)
+
+        self.apply_merge_btn = QPushButton("Apply", container)
+        self.apply_merge_btn.setProperty("class", "primary-btn")
+        self.apply_merge_btn.setCursor(Qt.PointingHandCursor)
+        self.apply_merge_btn.clicked.connect(self._on_apply_merge_clicked)
+
+        merge_action_row.addWidget(self.revert_merge_btn)
+        merge_action_row.addWidget(self.apply_merge_btn)
+        content_layout.addLayout(merge_action_row)
+
+        self._update_merge_equiv_label()
+
+        # ---------------- Section 6: Smooth Mesh ----------------
+        section6_lbl = QLabel("Smooth Mesh (Taubin)", container)
+        section6_lbl.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold; background: transparent; border: none; margin-top: 6px;")
+        content_layout.addWidget(section6_lbl)
+
+        # Lambda input row
+        lambda_container = QWidget(container)
+        lambda_container.setStyleSheet("background: transparent; border: none;")
+        lambda_layout = QHBoxLayout(lambda_container)
+        lambda_layout.setContentsMargins(0, 0, 0, 0)
+        lambda_layout.setSpacing(8)
+
+        lbl_lambda = QLabel("Smoothing Factor (λ):", lambda_container)
+        lbl_lambda.setStyleSheet("color: #e0e0e0; font-size: 11px; background: transparent; border: none;")
+
+        self.spin_smooth_lambda = QDoubleSpinBox(lambda_container)
+        self.spin_smooth_lambda.setRange(0.01, 1.00)
+        self.spin_smooth_lambda.setSingleStep(0.05)
+        self.spin_smooth_lambda.setDecimals(2)
+        self.spin_smooth_lambda.setValue(0.50)
+        self.spin_smooth_lambda.setStyleSheet("""
+            QDoubleSpinBox {
+                background-color: #161616;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 3px 6px;
+                font-size: 11px;
+            }
+            QDoubleSpinBox:focus {
+                border-color: #00E676;
+            }
+        """)
+
+        self.stepper_smooth_lambda = SpinBoxStepper(self.spin_smooth_lambda, lambda_container)
+
+        lambda_layout.addWidget(lbl_lambda)
+        lambda_layout.addWidget(self.stepper_smooth_lambda)
+        content_layout.addWidget(lambda_container)
+
+        # Iterations input row
+        iter_container = QWidget(container)
+        iter_container.setStyleSheet("background: transparent; border: none;")
+        iter_layout = QHBoxLayout(iter_container)
+        iter_layout.setContentsMargins(0, 0, 0, 0)
+        iter_layout.setSpacing(8)
+
+        lbl_iter = QLabel("Iterations (steps):", iter_container)
+        lbl_iter.setStyleSheet("color: #e0e0e0; font-size: 11px; background: transparent; border: none;")
+
+        self.spin_smooth_iter = QSpinBox(iter_container)
+        self.spin_smooth_iter.setRange(1, 100)
+        self.spin_smooth_iter.setSingleStep(1)
+        self.spin_smooth_iter.setValue(10)
+        self.spin_smooth_iter.setStyleSheet("""
+            QSpinBox {
+                background-color: #161616;
+                color: #ffffff;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 3px 6px;
+                font-size: 11px;
+            }
+            QSpinBox:focus {
+                border-color: #00E676;
+            }
+        """)
+
+        self.stepper_smooth_iter = SpinBoxStepper(self.spin_smooth_iter, iter_container)
+
+        iter_layout.addWidget(lbl_iter)
+        iter_layout.addWidget(self.stepper_smooth_iter)
+        content_layout.addWidget(iter_container)
+
+        # Action Buttons Row: Revert and Apply for Smooth Mesh
+        smooth_action_row = QHBoxLayout()
+        smooth_action_row.setSpacing(8)
+
+        self.revert_smooth_btn = QPushButton("Revert", container)
+        self.revert_smooth_btn.setProperty("class", "action-btn")
+        self.revert_smooth_btn.setEnabled(False)
+        self.revert_smooth_btn.setCursor(Qt.PointingHandCursor)
+        self.revert_smooth_btn.clicked.connect(self._on_revert_smooth_clicked)
+
+        self.apply_smooth_btn = QPushButton("Apply", container)
+        self.apply_smooth_btn.setProperty("class", "primary-btn")
+        self.apply_smooth_btn.setCursor(Qt.PointingHandCursor)
+        self.apply_smooth_btn.clicked.connect(self._on_apply_smooth_clicked)
+
+        smooth_action_row.addWidget(self.revert_smooth_btn)
+        smooth_action_row.addWidget(self.apply_smooth_btn)
+        content_layout.addLayout(smooth_action_row)
+
         content_layout.addStretch()
 
         scroll.setWidget(container)
@@ -1459,6 +1705,78 @@ class MeshCleanupToolWindow(BaseEditorTool):
     def _on_revert_duplicates_clicked(self):
         self.revert_remove_duplicates_requested.emit()
 
+    def _set_merge_unit(self, unit: str):
+        self.merge_unit_mode = unit
+        if unit == "pct":
+            if self.btn_unit_pct:
+                self.btn_unit_pct.setChecked(True)
+            if self.btn_unit_abs:
+                self.btn_unit_abs.setChecked(False)
+            if self.spin_merge:
+                self.spin_merge.blockSignals(True)
+                self.spin_merge.setRange(0.001, 50.0)
+                self.spin_merge.setSingleStep(0.05)
+                self.spin_merge.setDecimals(3)
+                self.spin_merge.setSuffix(" %")
+                self.spin_merge.setValue(0.2)
+                self.spin_merge.blockSignals(False)
+        else:
+            if self.btn_unit_pct:
+                self.btn_unit_pct.setChecked(False)
+            if self.btn_unit_abs:
+                self.btn_unit_abs.setChecked(True)
+            if self.spin_merge:
+                self.spin_merge.blockSignals(True)
+                self.spin_merge.setRange(0.00001, 10.0)
+                self.spin_merge.setSingleStep(0.001)
+                self.spin_merge.setDecimals(5)
+                self.spin_merge.setSuffix(" units")
+                equiv_val = 0.002 * getattr(self, 'bbox_diagonal', 1.0)
+                self.spin_merge.setValue(max(0.00001, equiv_val))
+                self.spin_merge.blockSignals(False)
+        self._update_merge_equiv_label()
+
+    def _on_merge_value_changed(self, val: float):
+        self._update_merge_equiv_label()
+
+    def _update_merge_equiv_label(self):
+        if not self.merge_equiv_label or not self.spin_merge:
+            return
+        val = self.spin_merge.value()
+        diag = max(0.0001, getattr(self, 'bbox_diagonal', 1.0))
+        if getattr(self, 'merge_unit_mode', 'pct') == "pct":
+            equiv_abs = (val / 100.0) * diag
+            self.merge_equiv_label.setText(f"Equivalent distance: ≈ {equiv_abs:.5f} units (abs)")
+        else:
+            equiv_pct = (val / diag) * 100.0 if diag > 0 else 0.0
+            self.merge_equiv_label.setText(f"Equivalent percentage: ≈ {equiv_pct:.3f} % of diagonal")
+
+    def set_bbox_diagonal(self, bbox_diagonal: float):
+        self.bbox_diagonal = max(0.0001, bbox_diagonal)
+        self._update_merge_equiv_label()
+
+    def _on_apply_merge_clicked(self):
+        if self.spin_merge:
+            val = float(self.spin_merge.value())
+            diag = max(0.0001, getattr(self, 'bbox_diagonal', 1.0))
+            if getattr(self, 'merge_unit_mode', 'pct') == "pct":
+                threshold_pct = val
+            else:
+                threshold_pct = (val / diag) * 100.0
+            self.apply_merge_vertices_requested.emit(threshold_pct, diag)
+
+    def _on_revert_merge_clicked(self):
+        self.revert_merge_vertices_requested.emit()
+
+    def _on_apply_smooth_clicked(self):
+        if self.spin_smooth_lambda and self.spin_smooth_iter:
+            lambda_val = float(self.spin_smooth_lambda.value())
+            iter_val = int(self.spin_smooth_iter.value())
+            self.apply_smooth_requested.emit(lambda_val, iter_val)
+
+    def _on_revert_smooth_clicked(self):
+        self.revert_smooth_requested.emit()
+
     def _on_retexture_clicked(self):
         self.retexture_requested.emit()
 
@@ -1478,6 +1796,14 @@ class MeshCleanupToolWindow(BaseEditorTool):
         if self.revert_duplicates_btn:
             self.revert_duplicates_btn.setEnabled(enabled)
 
+    def set_merge_revert_enabled(self, enabled: bool):
+        if self.revert_merge_btn:
+            self.revert_merge_btn.setEnabled(enabled)
+
+    def set_smooth_revert_enabled(self, enabled: bool):
+        if self.revert_smooth_btn:
+            self.revert_smooth_btn.setEnabled(enabled)
+
     def set_busy(self, is_busy: bool):
         if is_busy:
             # All cleanup actions share one backup: only the latest completed
@@ -1486,6 +1812,8 @@ class MeshCleanupToolWindow(BaseEditorTool):
             self.set_holes_revert_enabled(False)
             self.set_nonmanifold_revert_enabled(False)
             self.set_duplicates_revert_enabled(False)
+            self.set_merge_revert_enabled(False)
+            self.set_smooth_revert_enabled(False)
         if self.apply_btn:
             self.apply_btn.setEnabled(not is_busy)
         if self.stepper_reduction:
@@ -1496,10 +1824,447 @@ class MeshCleanupToolWindow(BaseEditorTool):
             self.stepper_hole.setEnabled(not is_busy)
         if self.apply_nonmanifold_btn:
             self.apply_nonmanifold_btn.setEnabled(not is_busy)
+        if self.stepper_merge:
+            self.stepper_merge.setEnabled(not is_busy)
+        if self.apply_merge_btn:
+            self.apply_merge_btn.setEnabled(not is_busy)
         if self.apply_duplicates_btn:
             self.apply_duplicates_btn.setEnabled(not is_busy)
+        if self.apply_smooth_btn:
+            self.apply_smooth_btn.setEnabled(not is_busy)
+        if self.stepper_smooth_lambda:
+            self.stepper_smooth_lambda.setEnabled(not is_busy)
+        if self.stepper_smooth_iter:
+            self.stepper_smooth_iter.setEnabled(not is_busy)
         if self.btn_retexture:
             self.btn_retexture.setEnabled(not is_busy)
 
     def on_disable(self):
         super().on_disable()
+
+
+class MeshCutToolWindow(BaseEditorTool):
+    """
+    Concrete Tool: Cut & Crop Mesh.
+    Provides Bounding Box Crop, Box Selection, and Lasso Selection.
+    """
+    mode_changed = Signal(str)            # 'crop_box', 'box', 'lasso', 'none'
+    crop_requested = Signal()              # RealityScan Bounding Box Crop
+    reset_crop_requested = Signal()        # Reset Bounding Box
+    delete_selection_requested = Signal()  # Delete selected vertices/faces
+    clear_selection_requested = Signal()   # Clear active selection
+    invert_selection_requested = Signal()  # Invert selection
+    retexture_requested = Signal()        # Retexture modified mesh
+
+    def __init__(self):
+        icon_path = os.path.join("interface element", "scissors.svg")
+        super().__init__(
+            tool_id="cut",
+            title="Cut & Select",
+            icon_path=icon_path,
+            tooltip="Cut & Select 3D Mesh (Bounding Box Crop, Box Select, Lasso Select)"
+        )
+        self.current_mode = "crop_box"
+        self.btn_mode_crop = None
+        self.btn_mode_box = None
+        self.btn_mode_lasso = None
+        self.crop_panel = None
+        self.select_panel = None
+        self.select_hint_label = None
+        self.btn_crop = None
+        self.btn_reset_crop = None
+        self.btn_delete_selection = None
+        self.btn_clear_selection = None
+        self.btn_invert_selection = None
+        self.btn_retexture = None
+
+    def on_enable(self, context: Optional[Dict[str, Any]] = None):
+        super().on_enable(context)
+        self.mode_changed.emit(self.current_mode)
+
+    def on_disable(self):
+        super().on_disable()
+        self.mode_changed.emit('none')
+
+    def on_gui(self, layout: QVBoxLayout, parent: QWidget):
+        # 1. Mode Switcher (Bounding Box | Box Select | Lasso Select)
+        mode_btn_row = QHBoxLayout()
+        mode_btn_row.setContentsMargins(0, 0, 0, 0)
+        mode_btn_row.setSpacing(4)
+
+        mode_style = """
+            QPushButton {
+                font-size: 10px;
+                padding: 4px 6px;
+                background-color: #2D2D2D;
+                color: #AAAAAA;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                font-weight: normal;
+            }
+            QPushButton:checked {
+                background-color: #1B382B;
+                color: #00E676;
+                border: 1px solid #00E676;
+                font-weight: bold;
+            }
+            QPushButton:hover:!checked {
+                background-color: #383838;
+                color: #FFFFFF;
+            }
+        """
+
+        self.btn_mode_crop = QPushButton("Bounding Box", parent)
+        self.btn_mode_crop.setCheckable(True)
+        self.btn_mode_crop.setChecked(self.current_mode == "crop_box")
+        self.btn_mode_crop.setStyleSheet(mode_style)
+        self.btn_mode_crop.setCursor(Qt.PointingHandCursor)
+
+        self.btn_mode_box = QPushButton("Box Select", parent)
+        self.btn_mode_box.setCheckable(True)
+        self.btn_mode_box.setChecked(self.current_mode == "box")
+        self.btn_mode_box.setStyleSheet(mode_style)
+        self.btn_mode_box.setCursor(Qt.PointingHandCursor)
+
+        self.btn_mode_lasso = QPushButton("Lasso Select", parent)
+        self.btn_mode_lasso.setCheckable(True)
+        self.btn_mode_lasso.setChecked(self.current_mode == "lasso")
+        self.btn_mode_lasso.setStyleSheet(mode_style)
+        self.btn_mode_lasso.setCursor(Qt.PointingHandCursor)
+
+        self.btn_mode_crop.clicked.connect(lambda: self._set_mode("crop_box"))
+        self.btn_mode_box.clicked.connect(lambda: self._set_mode("box"))
+        self.btn_mode_lasso.clicked.connect(lambda: self._set_mode("lasso"))
+
+        mode_btn_row.addWidget(self.btn_mode_crop)
+        mode_btn_row.addWidget(self.btn_mode_box)
+        mode_btn_row.addWidget(self.btn_mode_lasso)
+        layout.addLayout(mode_btn_row)
+
+        # 2. Bounding Box Mode Panel
+        self.crop_panel = QWidget(parent)
+        self.crop_panel.setStyleSheet("background: transparent; border: none;")
+        crop_layout = QVBoxLayout(self.crop_panel)
+        crop_layout.setContentsMargins(0, 6, 0, 4)
+        crop_layout.setSpacing(8)
+
+        crop_info = QLabel("Adjust the 3D bounding box corners and planes in the viewport to enclose the region of interest.", self.crop_panel)
+        crop_info.setStyleSheet("color: #AAAAAA; font-size: 11px;")
+        crop_info.setWordWrap(True)
+        crop_layout.addWidget(crop_info)
+
+        crop_action_row = QHBoxLayout()
+        crop_action_row.setSpacing(8)
+
+        self.btn_crop = QPushButton("Crop", self.crop_panel)
+        self.btn_crop.setToolTip("Deletes all mesh vertices/faces outside the crop box")
+        self.btn_crop.setProperty("class", "primary-btn")
+        self.btn_crop.setCursor(Qt.PointingHandCursor)
+        self.btn_crop.clicked.connect(self.crop_requested.emit)
+
+        self.btn_reset_crop = QPushButton("Reset", self.crop_panel)
+        self.btn_reset_crop.setToolTip("Resets bounding box bounds to the initial mesh boundaries")
+        self.btn_reset_crop.setProperty("class", "action-btn")
+        self.btn_reset_crop.setCursor(Qt.PointingHandCursor)
+        self.btn_reset_crop.clicked.connect(self.reset_crop_requested.emit)
+
+        crop_action_row.addWidget(self.btn_crop)
+        crop_action_row.addWidget(self.btn_reset_crop)
+        crop_layout.addLayout(crop_action_row)
+
+        layout.addWidget(self.crop_panel)
+
+        # 3. Selection Mode Panel (Box / Lasso)
+        self.select_panel = QWidget(parent)
+        self.select_panel.setStyleSheet("background: transparent; border: none;")
+        select_layout = QVBoxLayout(self.select_panel)
+        select_layout.setContentsMargins(0, 6, 0, 4)
+        select_layout.setSpacing(8)
+
+        self.select_hint_label = QLabel("Hold Ctrl + Left Click & Drag in viewport to select vertices.", self.select_panel)
+        self.select_hint_label.setStyleSheet("color: #AAAAAA; font-size: 11px;")
+        self.select_hint_label.setWordWrap(True)
+        select_layout.addWidget(self.select_hint_label)
+
+        select_action_row1 = QHBoxLayout()
+        select_action_row1.setSpacing(8)
+
+        self.btn_delete_selection = QPushButton("Delete Selected", self.select_panel)
+        self.btn_delete_selection.setToolTip("Deletes all selected mesh triangles/vertices")
+        self.btn_delete_selection.setCursor(Qt.PointingHandCursor)
+        self.btn_delete_selection.setStyleSheet("""
+            QPushButton {
+                font-size: 11px; padding: 5px 12px; font-weight: bold;
+                background-color: #E53935; color: #ffffff;
+                border: 1px solid #E53935; border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #D32F2F; }
+            QPushButton:disabled { background-color: #2D2D2D; color: #666666; border-color: #444444; }
+        """)
+        self.btn_delete_selection.clicked.connect(self.delete_selection_requested.emit)
+
+        self.btn_invert_selection = QPushButton("Invert", self.select_panel)
+        self.btn_invert_selection.setToolTip("Inverts the current selection highlighting")
+        self.btn_invert_selection.setProperty("class", "action-btn")
+        self.btn_invert_selection.setCursor(Qt.PointingHandCursor)
+        self.btn_invert_selection.clicked.connect(self.invert_selection_requested.emit)
+
+        self.btn_clear_selection = QPushButton("Clear", self.select_panel)
+        self.btn_clear_selection.setToolTip("Clears the current selection highlighting")
+        self.btn_clear_selection.setProperty("class", "action-btn")
+        self.btn_clear_selection.setCursor(Qt.PointingHandCursor)
+        self.btn_clear_selection.clicked.connect(self.clear_selection_requested.emit)
+
+        select_action_row1.addWidget(self.btn_delete_selection)
+        select_action_row1.addWidget(self.btn_invert_selection)
+        select_action_row1.addWidget(self.btn_clear_selection)
+        select_layout.addLayout(select_action_row1)
+
+        layout.addWidget(self.select_panel)
+
+        # 4. Retexture Button at Bottom
+        self.btn_retexture = QPushButton("Retexture", parent)
+        self.btn_retexture.setToolTip("Reruns OpenMVS texture projection on the modified mesh geometry.")
+        self.btn_retexture.setCursor(Qt.PointingHandCursor)
+        self.btn_retexture.setStyleSheet("""
+            QPushButton {
+                font-size: 11px; padding: 7px 14px; font-weight: bold;
+                background-color: #00C853; color: #121212;
+                border: 1px solid #00C853; border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #00E676; }
+            QPushButton:disabled { background-color: #2D2D2D; color: #666666; border-color: #444444; }
+        """)
+        self.btn_retexture.clicked.connect(self.retexture_requested.emit)
+        layout.addWidget(self.btn_retexture)
+
+        self._update_panel_visibility()
+
+    def _set_mode(self, mode: str):
+        self.current_mode = mode
+        if self.btn_mode_crop:
+            self.btn_mode_crop.setChecked(mode == "crop_box")
+        if self.btn_mode_box:
+            self.btn_mode_box.setChecked(mode == "box")
+        if self.btn_mode_lasso:
+            self.btn_mode_lasso.setChecked(mode == "lasso")
+        self._update_panel_visibility()
+        self.mode_changed.emit(mode)
+
+    def _update_panel_visibility(self):
+        is_crop = (self.current_mode == "crop_box")
+        if self.crop_panel:
+            self.crop_panel.setVisible(is_crop)
+        if self.select_panel:
+            self.select_panel.setVisible(not is_crop)
+        if self.select_hint_label:
+            if self.current_mode == "lasso":
+                self.select_hint_label.setText("Hold Ctrl + Left Click & Drag in viewport to draw a lasso selection around vertices.")
+            else:
+                self.select_hint_label.setText("Hold Ctrl + Left Click & Drag in viewport to box select vertices.")
+
+    def set_busy(self, is_busy: bool):
+        if self.btn_crop:
+            self.btn_crop.setEnabled(not is_busy)
+        if self.btn_reset_crop:
+            self.btn_reset_crop.setEnabled(not is_busy)
+        if self.btn_delete_selection:
+            self.btn_delete_selection.setEnabled(not is_busy)
+        if self.btn_invert_selection:
+            self.btn_invert_selection.setEnabled(not is_busy)
+        if self.btn_clear_selection:
+            self.btn_clear_selection.setEnabled(not is_busy)
+        if self.btn_retexture:
+            self.btn_retexture.setEnabled(not is_busy)
+        if self.btn_mode_crop:
+            self.btn_mode_crop.setEnabled(not is_busy)
+        if self.btn_mode_box:
+            self.btn_mode_box.setEnabled(not is_busy)
+        if self.btn_mode_lasso:
+            self.btn_mode_lasso.setEnabled(not is_busy)
+
+
+class CameraRegistrationToolWindow(BaseEditorTool):
+    """
+    Concrete Tool: Camera Registration & Display.
+    Provides camera wireframe frustum toggling, photo plane toggling,
+    frustum scaling, and photo opacity adjustments.
+    """
+    cameras_toggled = Signal(bool)
+    photos_toggled = Signal(bool)
+    scale_changed = Signal(float)
+    opacity_changed = Signal(float)
+
+    def __init__(self):
+        icon_path = os.path.join("interface element", "point cloud.svg")
+        super().__init__(
+            tool_id="camera_registration",
+            title="Camera Registration",
+            icon_path=icon_path,
+            tooltip="Camera Registration & Display (Frustums, Image Planes, Scale & Opacity)",
+            requires_data=True,
+            empty_message="No registered cameras found in current sparse model"
+        )
+        self.btn_show_cameras = None
+        self.btn_show_photos = None
+        self.scale_slider = None
+        self.scale_val_lbl = None
+        self.opacity_slider = None
+        self.opacity_val_lbl = None
+
+        self._cameras_checked = True
+        self._photos_checked = True
+        self._scale_val = 1.0
+        self._opacity_val = 0.85
+
+    def on_gui(self, layout: QVBoxLayout, parent: QWidget):
+        # 1. Display Toggles
+        toggle_box = QGroupBox("Display", parent)
+        toggle_layout = QHBoxLayout(toggle_box)
+        toggle_layout.setContentsMargins(8, 12, 8, 8)
+        toggle_layout.setSpacing(8)
+
+        toggle_style = """
+            QPushButton {
+                font-size: 11px;
+                padding: 5px 10px;
+                background-color: #2D2D2D;
+                color: #AAAAAA;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                font-weight: normal;
+            }
+            QPushButton:checked {
+                background-color: #1B382B;
+                color: #00E676;
+                border: 1px solid #00E676;
+                font-weight: bold;
+            }
+            QPushButton:hover:!checked {
+                background-color: #383838;
+                color: #FFFFFF;
+            }
+        """
+
+        self.btn_show_cameras = QPushButton("Cameras", toggle_box)
+        self.btn_show_cameras.setCheckable(True)
+        self.btn_show_cameras.setChecked(self._cameras_checked)
+        self.btn_show_cameras.setStyleSheet(toggle_style)
+        self.btn_show_cameras.setCursor(Qt.PointingHandCursor)
+        self.btn_show_cameras.toggled.connect(self._on_cameras_toggled)
+
+        self.btn_show_photos = QPushButton("Photos", toggle_box)
+        self.btn_show_photos.setCheckable(True)
+        self.btn_show_photos.setChecked(self._photos_checked)
+        self.btn_show_photos.setStyleSheet(toggle_style)
+        self.btn_show_photos.setCursor(Qt.PointingHandCursor)
+        self.btn_show_photos.toggled.connect(self._on_photos_toggled)
+
+        toggle_layout.addWidget(self.btn_show_cameras)
+        toggle_layout.addWidget(self.btn_show_photos)
+        layout.addWidget(toggle_box)
+
+        # 2. Camera Settings (Scale & Opacity Sliders)
+        settings_box = QGroupBox("Settings", parent)
+        settings_layout = QVBoxLayout(settings_box)
+        settings_layout.setContentsMargins(8, 12, 8, 8)
+        settings_layout.setSpacing(10)
+
+        lbl_style = "color: #CCCCCC; font-size: 11px;"
+        slider_style = """
+            QSlider::groove:horizontal {
+                background: #333333;
+                height: 4px;
+                border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #00E676;
+                width: 12px;
+                height: 12px;
+                margin: -4px 0;
+                border-radius: 6px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #00E676;
+                border-radius: 2px;
+            }
+        """
+
+        # Frustum Scale
+        scale_header = QLabel("Frustum Scale", settings_box)
+        scale_header.setStyleSheet(lbl_style)
+        settings_layout.addWidget(scale_header)
+
+        scale_row = QHBoxLayout()
+        self.scale_slider = QSlider(Qt.Horizontal, settings_box)
+        self.scale_slider.setRange(20, 300)
+        self.scale_slider.setValue(int(round(self._scale_val * 100)))
+        self.scale_slider.setStyleSheet(slider_style)
+        self.scale_slider.valueChanged.connect(self._on_scale_slider_changed)
+
+        self.scale_val_lbl = QLabel(f"{self._scale_val:.1f}x", settings_box)
+        self.scale_val_lbl.setStyleSheet(lbl_style)
+        self.scale_val_lbl.setFixedWidth(36)
+
+        scale_row.addWidget(self.scale_slider)
+        scale_row.addWidget(self.scale_val_lbl)
+        settings_layout.addLayout(scale_row)
+
+        # Photo Opacity
+        opacity_header = QLabel("Photo Opacity", settings_box)
+        opacity_header.setStyleSheet(lbl_style)
+        settings_layout.addWidget(opacity_header)
+
+        opacity_row = QHBoxLayout()
+        self.opacity_slider = QSlider(Qt.Horizontal, settings_box)
+        self.opacity_slider.setRange(10, 100)
+        self.opacity_slider.setValue(int(round(self._opacity_val * 100)))
+        self.opacity_slider.setStyleSheet(slider_style)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_slider_changed)
+
+        self.opacity_val_lbl = QLabel(f"{int(round(self._opacity_val * 100))}%", settings_box)
+        self.opacity_val_lbl.setStyleSheet(lbl_style)
+        self.opacity_val_lbl.setFixedWidth(36)
+
+        opacity_row.addWidget(self.opacity_slider)
+        opacity_row.addWidget(self.opacity_val_lbl)
+        settings_layout.addLayout(opacity_row)
+
+        layout.addWidget(settings_box)
+
+        # 3. Instruction label
+        hint_lbl = QLabel("Click any camera frustum in the 3D viewport to inspect the photo and position.", parent)
+        hint_lbl.setStyleSheet("color: #888888; font-size: 10px; padding-top: 4px;")
+        hint_lbl.setWordWrap(True)
+        layout.addWidget(hint_lbl)
+
+    def _on_cameras_toggled(self, checked: bool):
+        self._cameras_checked = checked
+        self.cameras_toggled.emit(checked)
+
+    def _on_photos_toggled(self, checked: bool):
+        self._photos_checked = checked
+        self.photos_toggled.emit(checked)
+
+    def _on_scale_slider_changed(self, value: int):
+        self._scale_val = value / 100.0
+        if self.scale_val_lbl:
+            self.scale_val_lbl.setText(f"{self._scale_val:.1f}x")
+        self.scale_changed.emit(self._scale_val)
+
+    def _on_opacity_slider_changed(self, value: int):
+        self._opacity_val = value / 100.0
+        if self.opacity_val_lbl:
+            self.opacity_val_lbl.setText(f"{value}%")
+        self.opacity_changed.emit(self._opacity_val)
+
+    def set_busy(self, is_busy: bool):
+        if self.btn_show_cameras:
+            self.btn_show_cameras.setEnabled(not is_busy)
+        if self.btn_show_photos:
+            self.btn_show_photos.setEnabled(not is_busy)
+        if self.scale_slider:
+            self.scale_slider.setEnabled(not is_busy)
+        if self.opacity_slider:
+            self.opacity_slider.setEnabled(not is_busy)
+

@@ -97,10 +97,10 @@ class Camera:
         up = np.cross(right, forward)
         up = up / np.linalg.norm(up)
         
-        # Scale movement based on zoom distance
-        scale = self.distance * 0.0015
+        # Scale movement based on zoom distance (responsive panning speed)
+        scale = self.distance * 0.004
         if not self.is_perspective:
-            scale = self.ortho_scale * 0.0015
+            scale = self.ortho_scale * 0.004
             
         self.target += right * (-delta_x * scale) + up * (delta_y * scale)
 

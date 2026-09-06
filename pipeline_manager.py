@@ -450,7 +450,9 @@ class PipelineWorker(QThread):
         Allows users to see step-by-step progress as it occurs.
         Returns True if the process exited with code 0, False otherwise.
         """
+        import queue
         import subprocess
+        import threading
         import glob
         from hardware_profiler import _active_subprocesses
 
@@ -475,6 +477,43 @@ class PipelineWorker(QThread):
         if sys.platform == 'win32':
             creationflags = subprocess.CREATE_NO_WINDOW
 
+        proc = None
+        log_handle = None
+        stdout_thread = None
+        log_pattern = None
+        old_log_state = {}
+        if is_openmvs:
+            log_dir = cwd if cwd else os.getcwd()
+            log_pattern = os.path.join(log_dir, f"{exe_name}-*.log")
+            for path in glob.glob(log_pattern):
+                try:
+                    stat = os.stat(path)
+                    old_log_state[path] = (stat.st_mtime_ns, stat.st_size)
+                except OSError:
+                    pass
+
+        def emit_output(raw_line):
+            clean_line = raw_line.strip()
+            if not clean_line:
+                return False
+            if line_parser:
+                parsed = line_parser(clean_line)
+                self.log_message.emit(parsed if parsed is not None else clean_line)
+            else:
+                self.log_message.emit(clean_line)
+            self.last_output_lines.append(clean_line)
+            return True
+
+        def stop_process():
+            if proc is None or proc.poll() is not None:
+                return
+            proc.terminate()
+            try:
+                proc.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2.0)
+
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -490,171 +529,114 @@ class PipelineWorker(QThread):
             start_time = time.time()
             last_mem_check = time.time()
 
-            log_handle = None
+            # Always drain stdout on a separate thread. OpenMVS also writes a log file;
+            # tailing only that file leaves this pipe unread and eventually blocks the
+            # child once the OS pipe buffer fills (most visible during TextureMesh).
+            stdout_lines = queue.Queue()
+
+            def drain_stdout():
+                try:
+                    for output_line in iter(proc.stdout.readline, ""):
+                        stdout_lines.put(output_line)
+                finally:
+                    stdout_lines.put(None)
+
+            stdout_thread = threading.Thread(
+                target=drain_stdout,
+                name=f"{exe_name}-stdout-drain",
+                daemon=True,
+            )
+            stdout_thread.start()
+
             if is_openmvs:
-                # Wait up to 2 seconds for log file to appear in the working directory
-                log_dir = cwd if cwd else os.getcwd()
-                log_pattern = os.path.join(log_dir, f"{exe_name}-*.log")
+                # Wait briefly for the log created by this invocation. Never attach to
+                # a stale log from an earlier run, which otherwise produces endless
+                # heartbeats while hiding the current process diagnostics.
                 for _ in range(20):
                     if not self.is_running:
                         break
-                    log_files = glob.glob(log_pattern)
-                    if log_files:
-                        # Pick the newest matching file
-                        newest_file = max(log_files, key=os.path.getmtime)
+                    if proc.poll() is not None:
+                        break
+                    changed_logs = []
+                    for path in glob.glob(log_pattern):
                         try:
-                            log_handle = open(newest_file, "r", encoding="utf-8", errors="ignore")
-                            break
-                        except Exception:
+                            stat = os.stat(path)
+                            state = (stat.st_mtime_ns, stat.st_size)
+                            if path not in old_log_state or state != old_log_state[path]:
+                                changed_logs.append(path)
+                        except OSError:
                             pass
+                    if changed_logs:
+                        newest_file = max(changed_logs, key=os.path.getmtime)
+                        log_handle = open(newest_file, "r", encoding="utf-8", errors="ignore")
+                        break
                     time.sleep(0.1)
 
-            if log_handle:
-                # Log-tailing loop for OpenMVS
-                last_log_time = time.time()
+            last_output_time = time.time()
+            stdout_done = False
+            while True:
+                if not self.is_running:
+                    stop_process()
+                    return False
+
+                now = time.time()
+                if now - start_time > timeout:
+                    stop_process()
+                    self.log_message.emit(f"[TIMEOUT] Process timed out after {timeout}s")
+                    return False
+
+                if now - last_mem_check > 4.0:
+                    last_mem_check = now
+                    vm = psutil.virtual_memory()
+                    if vm.percent > 96.0 or vm.available < (500 * 1024 * 1024):
+                        stop_process()
+                        self.log_message.emit(
+                            f"[CRITICAL OOM GUARD] System RAM usage reached {vm.percent:.1f}% "
+                            f"({vm.available / (1024**2):.0f} MB available). "
+                            f"Terminated {exe_name} to prevent system lockup/crash."
+                        )
+                        return False
+
+                emitted = False
                 while True:
-                    if not self.is_running:
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=2.0)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                        log_handle.close()
-                        return False
-
-                    if time.time() - start_time > timeout:
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=2.0)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                        log_handle.close()
-                        self.log_message.emit(f"[TIMEOUT] Process timed out after {timeout}s")
-                        return False
-
-                    # Memory watchdog check
-                    if time.time() - last_mem_check > 4.0:
-                        last_mem_check = time.time()
-                        vm = psutil.virtual_memory()
-                        if vm.percent > 96.0 or vm.available < (500 * 1024 * 1024):
-                            proc.terminate()
-                            try:
-                                proc.wait(timeout=2.0)
-                            except subprocess.TimeoutExpired:
-                                proc.kill()
-                            log_handle.close()
-                            self.log_message.emit(
-                                f"[CRITICAL OOM GUARD] System RAM usage reached {vm.percent:.1f}% "
-                                f"({vm.available / (1024**2):.0f} MB available). "
-                                f"Terminated {exe_name} to prevent system lockup/crash."
-                            )
-                            return False
-
-                    line = log_handle.readline()
-                    if not line:
-                        if proc.poll() is not None:
-                            # Process ended, check one last time for remaining lines
-                            while True:
-                                extra_line = log_handle.readline()
-                                if not extra_line:
-                                    break
-                                clean_line = extra_line.strip()
-                                if clean_line:
-                                    if line_parser:
-                                        parsed = line_parser(clean_line)
-                                        if parsed is not None:
-                                            self.log_message.emit(parsed)
-                                        else:
-                                            self.log_message.emit(clean_line)
-                                    else:
-                                        self.log_message.emit(clean_line)
-                                    self.last_output_lines.append(clean_line)
-                            break
-                        # Emit a heartbeat every 30s of silence so the UI doesn't look frozen
-                        silent_secs = time.time() - last_log_time
-                        if silent_secs >= 30.0:
-                            elapsed = int(time.time() - start_time)
-                            self.log_message.emit(
-                                f"[RUNNING] {exe_name} still processing... ({elapsed}s elapsed, pipeline is active)"
-                            )
-                            last_log_time = time.time()
-                        time.sleep(0.05)
+                    try:
+                        output_line = stdout_lines.get_nowait()
+                    except queue.Empty:
+                        break
+                    if output_line is None:
+                        stdout_done = True
                         continue
+                    emitted = emit_output(output_line) or emitted
 
-                    clean_line = line.strip()
-                    if clean_line:
-                        last_log_time = time.time()  # reset silence timer on real output
-                        if line_parser:
-                            parsed = line_parser(clean_line)
-                            if parsed is not None:
-                                self.log_message.emit(parsed)
-                            else:
-                                self.log_message.emit(clean_line)
-                        else:
-                            self.log_message.emit(clean_line)
-                        self.last_output_lines.append(clean_line)
-                log_handle.close()
-            else:
-                # Standard stdout reading loop for non-OpenMVS tools (or fallback)
-                while True:
-                    if not self.is_running:
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=2.0)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                        return False
-
-                    if time.time() - start_time > timeout:
-                        proc.terminate()
-                        try:
-                            proc.wait(timeout=2.0)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                        self.log_message.emit(f"[TIMEOUT] Process timed out after {timeout}s")
-                        return False
-
-                    # Memory watchdog check
-                    if time.time() - last_mem_check > 4.0:
-                        last_mem_check = time.time()
-                        vm = psutil.virtual_memory()
-                        if vm.percent > 96.0 or vm.available < (500 * 1024 * 1024):
-                            proc.terminate()
-                            try:
-                                proc.wait(timeout=2.0)
-                            except subprocess.TimeoutExpired:
-                                proc.kill()
-                            self.log_message.emit(
-                                f"[CRITICAL OOM GUARD] System RAM usage reached {vm.percent:.1f}% "
-                                f"({vm.available / (1024**2):.0f} MB available). "
-                                f"Terminated {exe_name} to prevent system lockup/crash."
-                            )
-                            return False
-
-                    line = proc.stdout.readline()
-
-                    if not line:
-                        if proc.poll() is not None:
+                if log_handle:
+                    while True:
+                        log_line = log_handle.readline()
+                        if not log_line:
                             break
-                        time.sleep(0.02)
-                        continue
+                        emitted = emit_output(log_line) or emitted
 
-                    clean_line = line.strip()
-                    if clean_line:
-                        if line_parser:
-                            parsed = line_parser(clean_line)
-                            if parsed is not None:
-                                self.log_message.emit(parsed)
-                            else:
-                                self.log_message.emit(clean_line)
-                        else:
-                            self.log_message.emit(clean_line)
-                        self.last_output_lines.append(clean_line)
+                if emitted:
+                    last_output_time = now
+                elif proc.poll() is None and now - last_output_time >= 30.0:
+                    elapsed = int(now - start_time)
+                    self.log_message.emit(
+                        f"[RUNNING] {exe_name} still processing... ({elapsed}s elapsed, pipeline is active)"
+                    )
+                    last_output_time = now
 
-            _active_subprocesses.discard(proc)
+                if proc.poll() is not None and stdout_done:
+                    # One final pass through the OpenMVS log after process exit.
+                    if log_handle:
+                        while emit_output(log_handle.readline()):
+                            pass
+                    break
+
+                time.sleep(0.02)
+
             return proc.returncode == 0
 
         except Exception as e:
+            stop_process()
             self.log_message.emit(f"[ERROR] Failed to run subprocess: {e}")
             if sys.platform != 'win32' and cmd[0].endswith('.exe'):
                 self.log_message.emit(
@@ -663,6 +645,15 @@ class PipelineWorker(QThread):
                     "  are available."
                 )
             return False
+        finally:
+            if log_handle:
+                log_handle.close()
+            if proc is not None:
+                if proc.stdout:
+                    proc.stdout.close()
+                if stdout_thread:
+                    stdout_thread.join(timeout=0.5)
+                _active_subprocesses.discard(proc)
 
     def _run_real_pipeline(self) -> bool:
         """
@@ -1523,8 +1514,8 @@ class PipelineWorker(QThread):
             "--resolution-level",    texture_res,
             "--cost-smoothness-ratio", "0.1",
             "--empty-color",         "0",
-            "--local-seam-leveling",  "1",       
-            "--global-seam-leveling", "1",       
+            "--local-seam-leveling",  "0",
+            "--global-seam-leveling", "0",
         ]
         texture_ply_ok = self._run_process_realtime(cmd_ply, timeout=1800.0, cwd=mvs_out, env=env)
         if not texture_ply_ok:
@@ -1540,8 +1531,8 @@ class PipelineWorker(QThread):
                 "--resolution-level",    texture_res,
                 "--cost-smoothness-ratio", "0.1",
                 "--empty-color",         "0",
-                "--local-seam-leveling",  "1",       
-                "--global-seam-leveling", "1",       
+                "--local-seam-leveling",  "0",
+                "--global-seam-leveling", "0",
             ]
             self._run_process_realtime(cmd_obj, timeout=1800.0, cwd=mvs_out, env=env)
 
@@ -2572,8 +2563,8 @@ class CleanupAndTextureWorker(PipelineWorker):
                     "--resolution-level",    texture_res,
                     "--cost-smoothness-ratio", "0.1",
                     "--empty-color",         "0",
-                    "--local-seam-leveling",  "1",
-                    "--global-seam-leveling", "1",
+                    "--local-seam-leveling",  "0",
+                    "--global-seam-leveling", "0",
                 ]
                 self.log_message.emit(f"[RUN] Texturing PLY: {' '.join(cmd_ply)}")
                 texture_ply_ok = self._run_process_realtime(cmd_ply, timeout=1800.0, cwd=mvs_out, env=env)
@@ -2589,8 +2580,8 @@ class CleanupAndTextureWorker(PipelineWorker):
                         "--resolution-level",    texture_res,
                         "--cost-smoothness-ratio", "0.1",
                         "--empty-color",         "0",
-                        "--local-seam-leveling",  "1",
-                        "--global-seam-leveling", "1",
+                        "--local-seam-leveling",  "0",
+                        "--global-seam-leveling", "0",
                     ]
                     self.log_message.emit(f"[RUN] Texturing OBJ: {' '.join(cmd_obj)}")
                     self._run_process_realtime(cmd_obj, timeout=1800.0, cwd=mvs_out, env=env)
@@ -2786,8 +2777,8 @@ class RetextureOnlyWorker(PipelineWorker):
                     "--resolution-level",    texture_res,
                     "--cost-smoothness-ratio", "0.1",
                     "--empty-color",         "0",
-                    "--local-seam-leveling",  "1",
-                    "--global-seam-leveling", "1",
+                    "--local-seam-leveling",  "0",
+                    "--global-seam-leveling", "0",
                 ]
                 self.status_changed.emit("Projecting Textures (PLY pass)...")
                 self.progress_changed.emit(30)
@@ -2805,8 +2796,8 @@ class RetextureOnlyWorker(PipelineWorker):
                         "--resolution-level",    texture_res,
                         "--cost-smoothness-ratio", "0.1",
                         "--empty-color",         "0",
-                        "--local-seam-leveling",  "1",
-                        "--global-seam-leveling", "1",
+                        "--local-seam-leveling",  "0",
+                        "--global-seam-leveling", "0",
                     ]
                     self.status_changed.emit("Exporting Textured OBJ...")
                     self.log_message.emit(f"[RUN] Texturing OBJ: {' '.join(cmd_obj)}")
@@ -2939,9 +2930,5 @@ class BackgroundRemovalWorker(QThread):
 
     def stop(self):
         self.is_running = False
-
-
-
-
 
 
