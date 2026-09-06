@@ -45,8 +45,8 @@ _BTN_STYLE = """
     }
     QPushButton:hover {
         background-color: #333333;
-        border-color: #00E5FF;
-        color: #00E5FF;
+        border-color: #00E676;
+        color: #00E676;
     }
 """
 
@@ -54,14 +54,15 @@ _PRIMARY_BTN_STYLE = """
     QPushButton {
         font-size: 11px;
         padding: 5px 10px;
-        background-color: #1A3A3A;
-        color: #00E5FF;
-        border: 1px solid #00E5FF;
+        background-color: #00E676;
+        color: #121212;
+        border: 1px solid #00E676;
         border-radius: 4px;
         font-weight: bold;
     }
     QPushButton:hover {
-        background-color: #1E4A4A;
+        background-color: #00C853;
+        border-color: #00C853;
     }
 """
 
@@ -74,14 +75,14 @@ _SLIDER_STYLE = """
         border-radius: 2px;
     }
     QSlider::handle:horizontal {
-        background: #00E5FF;
+        background: #00E676;
         width: 12px;
         height: 12px;
         margin: -4px 0;
         border-radius: 6px;
     }
     QSlider::sub-page:horizontal {
-        background: #00E5FF;
+        background: #00E676;
         border-radius: 2px;
     }
 """

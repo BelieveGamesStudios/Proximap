@@ -145,34 +145,6 @@ class SidebarToolsVisibilityTests(unittest.TestCase):
         self.assertTrue(self.cam_tool.opacity_slider.isEnabled())
 
 
-class CameraFrustumPickingTests(unittest.TestCase):
-    def setUp(self):
-        self.manager = CameraFrustumManager(Mock())
-        self.manager._view.scene.transform.map.side_effect = lambda point: point
-        self.manager._cameras_data = [{
-            "center": np.array([100.0, 100.0, 0.0]),
-            "R": np.eye(3),
-        }]
-        self.manager._world_corners_for = Mock(return_value=[
-            np.array([200.0, 80.0, 0.0]),
-            np.array([200.0, 120.0, 0.0]),
-            np.array([160.0, 120.0, 0.0]),
-            np.array([160.0, 80.0, 0.0]),
-        ])
-
-    def test_picks_using_canvas_pixel_coordinates(self):
-        """Projected coordinates are already pixels after homogeneous division."""
-        self.assertEqual(self.manager.pick_camera(100, 100, 800, 600), 0)
-
-    def test_picks_visible_frustum_edge_not_just_camera_origin(self):
-        """Clicking a rendered wireframe segment should select its camera."""
-        self.assertEqual(self.manager.pick_camera(180, 80, 800, 600), 0)
-
-    def test_does_not_pick_when_camera_geometry_is_hidden(self):
-        self.manager.set_frustums_visible(False)
-        self.manager.set_planes_visible(False)
-        self.assertEqual(self.manager.pick_camera(100, 100, 800, 600), -1)
-
     def test_main_window_set_view_mode_helper(self):
         """Verify MainWindow._set_view_mode sets index and updates sidebar visibility."""
         import main_window
@@ -201,5 +173,72 @@ class CameraFrustumPickingTests(unittest.TestCase):
         self.assertFalse(self.toolbox.tool_buttons["cut"].isHidden())
 
 
+class CameraFrustumPickingTests(unittest.TestCase):
+    def setUp(self):
+        self.manager = CameraFrustumManager(Mock())
+        self.manager._view.scene.transform.map.side_effect = lambda point: point
+        self.manager._cameras_data = [{
+            "center": np.array([100.0, 100.0, 0.0]),
+            "R": np.eye(3),
+        }]
+        self.manager._world_corners_for = Mock(return_value=[
+            np.array([200.0, 80.0, 0.0]),
+            np.array([200.0, 120.0, 0.0]),
+            np.array([160.0, 120.0, 0.0]),
+            np.array([160.0, 80.0, 0.0]),
+        ])
+
+    def test_picks_using_canvas_pixel_coordinates(self):
+        """Projected coordinates are already pixels after homogeneous division."""
+        self.assertEqual(self.manager.pick_camera(100, 100, 800, 600), 0)
+
+    def test_picks_visible_frustum_edge_not_just_camera_origin(self):
+        """Clicking a rendered wireframe segment should select its camera."""
+        self.assertEqual(self.manager.pick_camera(180, 80, 800, 600), 0)
+
+    def test_does_not_pick_when_camera_geometry_is_hidden(self):
+        self.manager.set_frustums_visible(False)
+        self.manager.set_planes_visible(False)
+        self.assertEqual(self.manager.pick_camera(100, 100, 800, 600), -1)
+
+    def test_camera_look_through_orientation_math(self):
+        """Verify look-through azimuth and elevation match VisPy forward view vector."""
+        import main_window
+        win = Mock()
+        win.frustum_manager = Mock()
+        win.view = Mock()
+        win.view.camera = Mock()
+        win.view.camera.azimuth = 45.0
+        win.view.camera.elevation = 30.0
+        win.view.camera.center = [0.0, 0.0, 0.0]
+        win.view.camera.distance = 5.0
+        win._show_look_through_badge = Mock()
+        win._look_through_timer = Mock()
+        win._look_through_timer.start = Mock()
+
+        # Camera pointing toward -Z in world space (R = eye(3))
+        cam_data = {
+            "center": np.array([2.0, 3.0, 4.0]),
+            "R": np.eye(3),
+            "image_name": "test_cam.jpg"
+        }
+        win.frustum_manager.get_camera.return_value = cam_data
+
+        # Bind and invoke _on_look_through_camera
+        win._on_look_through_camera = main_window.MainWindow._on_look_through_camera.__get__(win)
+        win._on_look_through_camera(0)
+
+        target = win._look_through_target
+        # forward is [0, 0, -1] -> az = 90 deg, el = 0 deg
+        self.assertAlmostEqual(target["azimuth"] % 360.0, 90.0, places=3)
+        self.assertAlmostEqual(target["elevation"], 0.0, places=3)
+        # target_center = C + forward * 2.0 = [2.0, 3.0, 4.0] + [0, 0, -2.0] = [2.0, 3.0, 2.0]
+        self.assertAlmostEqual(target["center"][0], 2.0, places=3)
+        self.assertAlmostEqual(target["center"][1], 3.0, places=3)
+        self.assertAlmostEqual(target["center"][2], 2.0, places=3)
+        self.assertEqual(target["distance"], 2.0)
+
+
 if __name__ == "__main__":
     unittest.main()
+

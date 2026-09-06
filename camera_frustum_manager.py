@@ -414,7 +414,7 @@ class CameraFrustumManager:
         pos = np.array(verts, dtype=np.float32)
         self._highlight_visual = scene.visuals.Line(
             pos=pos,
-            color="#00E5FF",
+            color="#00E676",
             width=2.5,
             connect="segments",
             parent=self._view.scene,

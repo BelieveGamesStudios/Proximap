@@ -6868,22 +6868,38 @@ class MainWindow(QMainWindow):
             "distance":  getattr(vc, 'distance',   5.0),
         }
 
-        # Compute target azimuth/elevation from the camera's viewing direction
         # Forward direction in world space: R^T . [0, 0, -1]
         R_cw = cam["R"].T
         forward = R_cw @ np.array([0.0, 0.0, -1.0])
-        C = cam["center"]
+        norm = np.linalg.norm(forward)
+        if norm > 1e-6:
+            forward = forward / norm
+        else:
+            forward = np.array([0.0, 0.0, -1.0])
+        C = np.asarray(cam["center"], dtype=np.float64)
 
-        # Azimuth: angle in XZ plane (degrees)
-        az = np.degrees(np.arctan2(forward[0], forward[2]))
-        # Elevation: angle above horizontal (degrees)
-        el = np.degrees(np.arcsin(np.clip(forward[1], -1.0, 1.0)))
+        # In VisPy TurntableCamera(up='+y'):
+        # view_dir = [cos(el)*cos(az), -sin(el), -cos(el)*sin(az)]
+        # Therefore:
+        # el = arcsin(-forward[1])
+        # az = atan2(-forward[2], forward[0])
+        el = float(np.degrees(np.arcsin(np.clip(-forward[1], -1.0, 1.0))))
+        az = float(np.degrees(np.arctan2(-forward[2], forward[0])))
+
+        # Unwrap azimuth so animation smoothly takes the shortest path
+        saved_az = self._look_through_saved["azimuth"]
+        diff_az = (az - saved_az + 180.0) % 360.0 - 180.0
+        target_az = saved_az + diff_az
+
+        # Place target center ahead along forward ray so camera eye sits exactly at C
+        look_dist = 2.0
+        target_center = (C + forward * look_dist).tolist()
 
         self._look_through_target = {
-            "azimuth":   az,
+            "azimuth":   target_az,
             "elevation": el,
-            "center":    C.tolist(),
-            "distance":  0.01,   # very close, essentially inside the camera
+            "center":    target_center,
+            "distance":  look_dist,
         }
         self._look_through_steps = 20
         self._look_through_step  = 0
@@ -6939,8 +6955,8 @@ class MainWindow(QMainWindow):
         badge = QWidget(self.viewer_widget.container_area)
         badge.setStyleSheet("""
             QWidget {
-                background-color: rgba(22, 22, 22, 210);
-                border: 1px solid #00E5FF;
+                background-color: rgba(22, 22, 22, 220);
+                border: 1px solid #00E676;
                 border-radius: 6px;
             }
         """)
@@ -6949,7 +6965,7 @@ class MainWindow(QMainWindow):
         badge_layout.setSpacing(10)
 
         lbl = QLabel(f"Camera View: {camera_name}")
-        lbl.setStyleSheet("color: #00E5FF; font-size: 11px; font-weight: bold;")
+        lbl.setStyleSheet("color: #00E676; font-size: 11px; font-weight: bold; background: transparent; border: none;")
         badge_layout.addWidget(lbl)
 
         exit_btn = QPushButton("Exit Camera View")
@@ -6957,13 +6973,15 @@ class MainWindow(QMainWindow):
             QPushButton {
                 font-size: 11px;
                 padding: 3px 8px;
-                background-color: #1A3A3A;
-                color: #00E5FF;
-                border: 1px solid #00E5FF;
+                background-color: #00E676;
+                color: #121212;
+                border: 1px solid #00E676;
                 border-radius: 4px;
+                font-weight: bold;
             }
             QPushButton:hover {
-                background-color: #1E4A4A;
+                background-color: #00C853;
+                border-color: #00C853;
             }
         """)
         exit_btn.clicked.connect(self._on_exit_look_through)
